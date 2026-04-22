@@ -8,7 +8,7 @@
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentRouter, GatewayConfig } from "./types";
-import { splitMessage, isAllowed } from "./util";
+import { splitMessage, isAllowed, startTypingLoop } from "./util";
 
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
@@ -80,12 +80,11 @@ export class Gateway {
       const agent = this.router.resolve(thread.id);
       console.log(`[roundhouse] → ${agent.name} | thread=${thread.id}`);
 
-      try {
-        await thread.startTyping();
-      } catch {}
+      const stopTyping = startTypingLoop(thread);
 
       try {
         const reply = await agent.prompt(thread.id, userText);
+        stopTyping();
         if (reply.text) {
           for (const chunk of splitMessage(reply.text, 4000)) {
             await thread.post(chunk);
@@ -94,6 +93,7 @@ export class Gateway {
           await thread.post("(empty response)");
         }
       } catch (err) {
+        stopTyping();
         console.error(`[roundhouse] agent error:`, err);
         try {
           await thread.post("⚠️ Something went wrong.");

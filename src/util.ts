@@ -47,6 +47,32 @@ export function isAllowed(
 }
 
 /**
+ * Start a periodic typing indicator loop.
+ * Calls thread.startTyping() immediately and then every intervalMs.
+ * Returns a stop function.
+ */
+export function startTypingLoop(
+  thread: { startTyping: (status?: string) => Promise<void> },
+  intervalMs: number = 4000
+): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  const send = () => {
+    if (stopped) return;
+    thread.startTyping().catch(() => {});
+  };
+
+  send(); // fire immediately
+  timer = setInterval(send, intervalMs);
+
+  return () => {
+    stopped = true;
+    if (timer) clearInterval(timer);
+  };
+}
+
+/**
  * Convert a threadId to a safe directory name.
  * Uses a scheme that avoids collisions between different separators.
  */
