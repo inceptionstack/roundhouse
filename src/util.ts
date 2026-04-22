@@ -65,6 +65,7 @@ export function startTypingLoop(
 
   send(); // fire immediately
   timer = setInterval(send, intervalMs);
+  if (timer.unref) timer.unref(); // don't hold Node alive
 
   return () => {
     stopped = true;

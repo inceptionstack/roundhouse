@@ -84,7 +84,6 @@ export class Gateway {
 
       try {
         const reply = await agent.prompt(thread.id, userText);
-        stopTyping();
         if (reply.text) {
           for (const chunk of splitMessage(reply.text, 4000)) {
             await thread.post(chunk);
@@ -93,11 +92,12 @@ export class Gateway {
           await thread.post("(empty response)");
         }
       } catch (err) {
-        stopTyping();
         console.error(`[roundhouse] agent error:`, err);
         try {
           await thread.post("⚠️ Something went wrong.");
         } catch {}
+      } finally {
+        stopTyping();
       }
     };
 
