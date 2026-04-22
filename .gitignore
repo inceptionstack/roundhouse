@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.js
+!*.config.js
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+/tmp/
+
+# Pi sessions (persisted locally, not in repo)
+gateway-sessions/

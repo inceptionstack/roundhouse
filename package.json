@@ -1,0 +1,22 @@
+{
+  "name": "roundhouse",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@chat-adapter/state-memory": "latest",
+    "@chat-adapter/telegram": "latest",
+    "@mariozechner/pi-coding-agent": "latest",
+    "chat": "latest",
+    "tsx": "^4.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.5"
+  }
+}
