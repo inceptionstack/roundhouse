@@ -42,6 +42,18 @@ const DEFAULT_CONFIG: GatewayConfig = {
 };
 
 async function loadConfig(): Promise<GatewayConfig> {
+  // Check for ROUNDHOUSE_CONFIG env var (set by CLI/daemon)
+  const envConfig = process.env.ROUNDHOUSE_CONFIG;
+  if (envConfig) {
+    try {
+      const raw = await readFile(resolve(envConfig), "utf8");
+      console.log(`[roundhouse] loaded config from ${envConfig}`);
+      return JSON.parse(raw) as GatewayConfig;
+    } catch {
+      // Fall through to other methods
+    }
+  }
+
   // Check for --config flag
   const configIdx = process.argv.indexOf("--config");
   if (configIdx !== -1 && process.argv[configIdx + 1]) {

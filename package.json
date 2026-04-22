@@ -3,12 +3,37 @@
   "version": "0.2.0",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/inceptionstack/roundhouse.git"
+  },
+  "keywords": [
+    "chat",
+    "gateway",
+    "telegram",
+    "slack",
+    "discord",
+    "ai",
+    "agent",
+    "pi",
+    "bot"
+  ],
+  "bin": {
+    "roundhouse": "./src/cli/cli.ts"
+  },
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md",
+    "architecture.md"
+  ],
   "dependencies": {
     "@chat-adapter/state-memory": "latest",
     "@chat-adapter/telegram": "latest",
