@@ -214,6 +214,147 @@ async function cmdConfig() {
   }
 }
 
+async function cmdTui() {
+  // 1. Load config to determine agent type
+  let config: any = DEFAULT_CONFIG;
+  if (await fileExists(CONFIG_PATH)) {
+    try {
+      config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+    } catch {}
+  }
+
+  const agentType = config.agent?.type ?? "pi";
+
+  if (agentType !== "pi") {
+    console.error(`roundhouse tui: agent type "${agentType}" does not support TUI yet.`);
+    console.error("Only \"pi\" is supported currently.");
+    process.exit(1);
+  }
+
+  // 2. Find gateway sessions
+  const sessionsBase = config.agent?.sessionDir ?? resolve(homedir(), ".pi", "agent", "gateway-sessions");
+  let threadDirs: string[] = [];
+  try {
+    const { readdirSync, statSync } = await import("node:fs");
+    threadDirs = readdirSync(sessionsBase)
+      .filter((d: string) => {
+        try {
+          return statSync(resolve(sessionsBase, d)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .sort();
+  } catch {
+    console.error(`No gateway sessions found at ${sessionsBase}`);
+    console.error("Send a message via Telegram/Slack first to create a session.");
+    process.exit(1);
+  }
+
+  if (threadDirs.length === 0) {
+    console.error("No gateway sessions found. Send a message via Telegram/Slack first.");
+    process.exit(1);
+  }
+
+  // 3. Find session files in each thread dir, pick the most recent
+  const { readdirSync, statSync } = await import("node:fs");
+  const threadArg = process.argv[3]; // optional: roundhouse tui <thread>
+
+  interface SessionCandidate {
+    threadDir: string;
+    sessionFile: string;
+    mtime: number;
+  }
+
+  const candidates: SessionCandidate[] = [];
+  for (const dir of threadDirs) {
+    if (threadArg && !dir.includes(threadArg)) continue;
+    const threadPath = resolve(sessionsBase, dir);
+    try {
+      const files = readdirSync(threadPath).filter((f: string) => f.endsWith(".jsonl"));
+      for (const f of files) {
+        const fullPath = resolve(threadPath, f);
+        const st = statSync(fullPath);
+        candidates.push({ threadDir: dir, sessionFile: fullPath, mtime: st.mtimeMs });
+      }
+    } catch {}
+  }
+
+  if (candidates.length === 0) {
+    if (threadArg) {
+      console.error(`No sessions found matching "${threadArg}".`);
+      console.log("Available threads:");
+      for (const d of threadDirs) console.log(`  ${d}`);
+    } else {
+      console.error("No session files found.");
+    }
+    process.exit(1);
+  }
+
+  // Sort by most recently modified
+  candidates.sort((a, b) => b.mtime - a.mtime);
+
+  // If multiple threads and no filter, let user pick
+  let selected: SessionCandidate;
+  const uniqueThreads = [...new Set(candidates.map((c) => c.threadDir))];
+
+  if (uniqueThreads.length === 1 || threadArg) {
+    selected = candidates[0];
+  } else {
+    console.log("Available sessions (most recent first):\n");
+    const shown: SessionCandidate[] = [];
+    const seen = new Set<string>();
+    for (const c of candidates) {
+      if (seen.has(c.threadDir)) continue;
+      seen.add(c.threadDir);
+      shown.push(c);
+    }
+    for (let i = 0; i < shown.length; i++) {
+      const age = Math.round((Date.now() - shown[i].mtime) / 60000);
+      const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+      console.log(`  [${i + 1}] ${shown[i].threadDir}  (${ageStr})`);
+    }
+    console.log();
+
+    // Simple prompt
+    const readline = await import("node:readline");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((resolve) => {
+      rl.question("Pick a session [1]: ", (ans) => {
+        rl.close();
+        resolve(ans.trim() || "1");
+      });
+    });
+
+    const idx = parseInt(answer, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= shown.length) {
+      console.error("Invalid selection.");
+      process.exit(1);
+    }
+    // Find most recent session file for the selected thread
+    selected = candidates.find((c) => c.threadDir === shown[idx].threadDir)!;
+  }
+
+  console.log(`\nOpening: ${selected.sessionFile}\n`);
+
+  // 4. Launch pi --resume <session>
+  const piArgs = ["--resume", selected.sessionFile];
+  const child = spawn("pi", piArgs, { stdio: "inherit" });
+
+  child.on("error", (err) => {
+    if ((err as any).code === "ENOENT") {
+      console.error("'pi' not found in PATH. Install pi first.");
+    } else {
+      console.error("Failed to launch pi:", err.message);
+    }
+    process.exit(1);
+  });
+
+  child.on("exit", (code) => {
+    process.exit(code ?? 0);
+  });
+}
+
 function printHelp() {
   console.log(`
 roundhouse — Multi-platform chat gateway for AI agents
@@ -222,15 +363,16 @@ Usage:
   roundhouse <command>
 
 Commands:
-  start       Start the gateway (foreground)
-  install     Install as a systemd daemon (requires sudo)
-  uninstall   Remove the systemd daemon
-  update      Update from npm + restart daemon
-  status      Show daemon status
-  logs        Tail daemon logs
-  stop        Stop the daemon
-  restart     Restart the daemon
-  config      Show config path and contents
+  start               Start the gateway (foreground)
+  tui [thread]        Open agent TUI on a gateway session
+  install             Install as a systemd daemon (requires sudo)
+  uninstall           Remove the systemd daemon
+  update              Update from npm + restart daemon
+  status              Show daemon status
+  logs                Tail daemon logs
+  stop                Stop the daemon
+  restart             Restart the daemon
+  config              Show config path and contents
 
 Config:
   ~/.config/roundhouse/gateway.config.json
@@ -273,6 +415,9 @@ switch (command) {
     break;
   case "config":
     cmdConfig();
+    break;
+  case "tui":
+    cmdTui();
     break;
   default:
     printHelp();
