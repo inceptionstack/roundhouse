@@ -1,12 +1,12 @@
 {
-  "name": "roundhouse",
-  "version": "0.2.0",
+  "name": "@inceptionstack/roundhouse",
+  "version": "0.1.0",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/inceptionstack/roundhouse.git"
+    "url": "git+https://github.com/inceptionstack/roundhouse.git"
   },
   "keywords": [
     "chat",
@@ -20,7 +20,7 @@
     "bot"
   ],
   "bin": {
-    "roundhouse": "./src/cli/cli.ts"
+    "roundhouse": "bin/roundhouse.mjs"
   },
   "scripts": {
     "start": "tsx src/index.ts",
@@ -30,6 +30,7 @@
   },
   "files": [
     "src/",
+    "bin/",
     "LICENSE",
     "README.md",
     "architecture.md"
