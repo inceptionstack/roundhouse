@@ -60,7 +60,7 @@ export default function (pi: ExtensionAPI) {
     if (isReviewing) {
       ctx.ui.setStatus(
         "code-review",
-        `${star} ${theme.fg("accent", "review")} ${theme.fg("warning", "reviewing…")} ${theme.fg("dim", "(Esc to cancel)")}`
+        `${star} ${theme.fg("accent", "review")} ${theme.fg("warning", "reviewing…")} ${theme.fg("dim", "(Ctrl+Shift+R to cancel)")}`
       );
       return;
     }
@@ -263,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Esc to cancel review ───────────────────────────
 
-  pi.registerShortcut("escape", {
+  pi.registerShortcut("ctrl+shift+r", {
     description: "Cancel in-progress code review",
     handler: async (ctx) => {
       if (isReviewing && reviewAbort) {
