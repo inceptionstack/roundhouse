@@ -52,7 +52,7 @@ export default function (pi: ExtensionAPI) {
   // ── Status bar ─────────────────────────────────────
 
   function updateStatus(ctx: { ui: any; hasUI?: boolean }) {
-    if (ctx.hasUI === false) return;
+    if (!ctx.hasUI || !ctx.ui) return;
     const theme = ctx.ui.theme;
     const star = reviewEnabled ? theme.fg("accent", "★") : theme.fg("dim", "☆");
     const state = reviewEnabled ? theme.fg("success", "on") : theme.fg("dim", "off");
@@ -207,14 +207,15 @@ export default function (pi: ExtensionAPI) {
 
       try {
         const signal = reviewAbort.signal;
-        // Single race: abort listener + prompt. No pre-check needed.
         await new Promise<void>((resolve, reject) => {
+          let settled = false;
           const onAbort = () => {
+            if (settled) return;
+            settled = true;
             reviewSession.abort();
             reject(new Error("Review cancelled"));
           };
 
-          // If already aborted before we got here, bail immediately
           if (signal.aborted) { onAbort(); return; }
 
           signal.addEventListener("abort", onAbort, { once: true });
@@ -222,8 +223,8 @@ export default function (pi: ExtensionAPI) {
           reviewSession.prompt(
             `${REVIEW_SYSTEM_PROMPT}\n\n---\n\nHere are the changes made:\n\n${changeSummary}`
           ).then(
-            () => { signal.removeEventListener("abort", onAbort); resolve(); },
-            (err) => { signal.removeEventListener("abort", onAbort); reject(err); },
+            () => { settled = true; signal.removeEventListener("abort", onAbort); resolve(); },
+            (err) => { settled = true; signal.removeEventListener("abort", onAbort); reject(err); },
           );
         });
       } finally {
