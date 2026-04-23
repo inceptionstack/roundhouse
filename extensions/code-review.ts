@@ -35,11 +35,22 @@ export default function (pi: ExtensionAPI) {
 
   // Track ALL tool calls across the entire agent run (not just one turn)
   let agentToolCalls: Array<{ name: string; input: any; result?: string }> = [];
+  // Buffer args from tool_execution_start (keyed by toolCallId)
+  const pendingArgs = new Map<string, { name: string; input: any }>();
 
-  pi.on("tool_execution_end", async (event) => {
-    agentToolCalls.push({
+  pi.on("tool_execution_start", async (event) => {
+    pendingArgs.set(event.toolCallId, {
       name: event.toolName,
       input: event.args,
+    });
+  });
+
+  pi.on("tool_execution_end", async (event) => {
+    const pending = pendingArgs.get(event.toolCallId);
+    pendingArgs.delete(event.toolCallId);
+    agentToolCalls.push({
+      name: event.toolName,
+      input: pending?.input ?? {},
       result: event.result?.content
         ?.filter((c: any) => c.type === "text")
         .map((c: any) => c.text)
@@ -50,6 +61,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", async () => {
     agentToolCalls = [];
+    pendingArgs.clear();
   });
 
   pi.on("agent_end", async (event, ctx) => {
