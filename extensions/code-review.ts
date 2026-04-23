@@ -33,11 +33,11 @@ Do NOT suggest stylistic preferences. Only flag real problems.`;
 export default function (pi: ExtensionAPI) {
   let reviewEnabled = true;
 
-  // Track which tool calls happened this turn
-  let turnToolCalls: Array<{ name: string; input: any; result?: string }> = [];
+  // Track ALL tool calls across the entire agent run (not just one turn)
+  let agentToolCalls: Array<{ name: string; input: any; result?: string }> = [];
 
   pi.on("tool_execution_end", async (event) => {
-    turnToolCalls.push({
+    agentToolCalls.push({
       name: event.toolName,
       input: event.args,
       result: event.result?.content
@@ -48,8 +48,8 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("turn_start", async () => {
-    turnToolCalls = [];
+  pi.on("agent_start", async () => {
+    agentToolCalls = [];
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -57,7 +57,7 @@ export default function (pi: ExtensionAPI) {
 
     // Only review if files were modified (write, edit, bash with file ops)
     const fileModifyingTools = ["write", "edit"];
-    const hasFileChanges = turnToolCalls.some(
+    const hasFileChanges = agentToolCalls.some(
       (tc) =>
         fileModifyingTools.includes(tc.name) ||
         (tc.name === "bash" &&
@@ -67,12 +67,12 @@ export default function (pi: ExtensionAPI) {
     );
 
     if (!hasFileChanges) {
-      turnToolCalls = [];
+      agentToolCalls = [];
       return;
     }
 
     // Build a summary of what changed
-    const changeSummary = turnToolCalls
+    const changeSummary = agentToolCalls
       .filter((tc) => fileModifyingTools.includes(tc.name) || tc.name === "bash")
       .map((tc) => {
         if (tc.name === "write") {
@@ -154,7 +154,7 @@ export default function (pi: ExtensionAPI) {
       console.error("[code-review] Review failed:", err);
     }
 
-    turnToolCalls = [];
+    agentToolCalls = [];
   });
 
   // Toggle command
