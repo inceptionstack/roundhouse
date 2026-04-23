@@ -51,7 +51,8 @@ export default function (pi: ExtensionAPI) {
 
   // ── Status bar ─────────────────────────────────────
 
-  function updateStatus(ctx: { ui: any }) {
+  function updateStatus(ctx: { ui: any; hasUI?: boolean }) {
+    if (ctx.hasUI === false) return;
     const theme = ctx.ui.theme;
     const star = reviewEnabled ? theme.fg("accent", "★") : theme.fg("dim", "☆");
     const state = reviewEnabled ? theme.fg("success", "on") : theme.fg("dim", "off");
@@ -204,26 +205,27 @@ export default function (pi: ExtensionAPI) {
         }
       });
 
-      // Check abort before starting
-      if (reviewAbort.signal.aborted) {
-        unsub();
-        reviewSession.dispose();
-        throw new Error("Review cancelled");
-      }
-
       try {
-        // Race the review against the abort signal
-        await Promise.race([
+        const signal = reviewAbort.signal;
+        // Single race: abort listener + prompt. No pre-check needed.
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            reviewSession.abort();
+            reject(new Error("Review cancelled"));
+          };
+
+          // If already aborted before we got here, bail immediately
+          if (signal.aborted) { onAbort(); return; }
+
+          signal.addEventListener("abort", onAbort, { once: true });
+
           reviewSession.prompt(
             `${REVIEW_SYSTEM_PROMPT}\n\n---\n\nHere are the changes made:\n\n${changeSummary}`
-          ),
-          new Promise<never>((_, reject) => {
-            reviewAbort!.signal.addEventListener("abort", () => {
-              reviewSession.abort();
-              reject(new Error("Review cancelled"));
-            }, { once: true });
-          }),
-        ]);
+          ).then(
+            () => { signal.removeEventListener("abort", onAbort); resolve(); },
+            (err) => { signal.removeEventListener("abort", onAbort); reject(err); },
+          );
+        });
       } finally {
         unsub();
         reviewSession.dispose();
