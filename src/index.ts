@@ -8,13 +8,10 @@
  *   TELEGRAM_BOT_TOKEN=... npm start -- --config ./my-config.json
  */
 
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-
-import type { GatewayConfig } from "./types";
 import { getAgentFactory } from "./agents/registry";
 import { SingleAgentRouter } from "./router";
 import { Gateway } from "./gateway";
+import { loadConfig } from "./config";
 
 // ── Crash protection ─────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -23,60 +20,6 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
   console.error("[roundhouse] unhandledRejection:", reason);
 });
-
-// ── Default config ───────────────────────────────────
-const DEFAULT_CONFIG: GatewayConfig = {
-  agent: {
-    type: "pi",
-    cwd: process.cwd(),
-  },
-  chat: {
-    botUsername: process.env.BOT_USERNAME ?? "roundhouse_bot",
-    allowedUsers: process.env.ALLOWED_USERS
-      ? process.env.ALLOWED_USERS.split(",").map((u) => u.trim())
-      : [],
-    adapters: {
-      telegram: { mode: "polling" },
-    },
-  },
-};
-
-async function loadConfig(): Promise<GatewayConfig> {
-  // Check for ROUNDHOUSE_CONFIG env var (set by CLI/daemon)
-  const envConfig = process.env.ROUNDHOUSE_CONFIG;
-  if (envConfig) {
-    try {
-      const raw = await readFile(resolve(envConfig), "utf8");
-      console.log(`[roundhouse] loaded config from ${envConfig}`);
-      return JSON.parse(raw) as GatewayConfig;
-    } catch {
-      // Fall through to other methods
-    }
-  }
-
-  // Check for --config flag
-  const configIdx = process.argv.indexOf("--config");
-  if (configIdx !== -1 && process.argv[configIdx + 1]) {
-    const configPath = resolve(process.argv[configIdx + 1]);
-    console.log(`[roundhouse] loading config from ${configPath}`);
-    const raw = await readFile(configPath, "utf8");
-    return JSON.parse(raw) as GatewayConfig;
-  }
-
-  // Try gateway.config.json in cwd
-  try {
-    const raw = await readFile(
-      resolve(process.cwd(), "gateway.config.json"),
-      "utf8"
-    );
-    console.log("[roundhouse] loaded gateway.config.json");
-    return JSON.parse(raw) as GatewayConfig;
-  } catch {
-    // Fall back to defaults + env vars
-    console.log("[roundhouse] using default config + env vars");
-    return DEFAULT_CONFIG;
-  }
-}
 
 async function main() {
   const config = await loadConfig();

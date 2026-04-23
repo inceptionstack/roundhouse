@@ -2,46 +2,30 @@
 
 /**
  * roundhouse CLI entry point
- *
- * Commands:
- *   roundhouse start      — start the gateway (foreground)
- *   roundhouse install    — install as a systemd daemon
- *   roundhouse uninstall  — remove the systemd daemon
- *   roundhouse update     — update to latest version from npm + restart daemon
- *   roundhouse status     — show daemon status
- *   roundhouse logs       — tail daemon logs
- *   roundhouse stop       — stop the daemon
- *   roundhouse restart    — restart the daemon
- *   roundhouse config     — show config path and current config
  */
 
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readdirSync, statSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import {
+  CONFIG_DIR,
+  CONFIG_PATH,
+  DEFAULT_CONFIG,
+  SERVICE_NAME,
+  fileExists,
+  loadConfig,
+} from "../config";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const SERVICE_NAME = "roundhouse";
-const CONFIG_DIR = resolve(homedir(), ".config", "roundhouse");
-const CONFIG_PATH = resolve(CONFIG_DIR, "gateway.config.json");
 const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 
-const DEFAULT_CONFIG = {
-  agent: {
-    type: "pi",
-    cwd: homedir(),
-  },
-  chat: {
-    botUsername: "roundhouse_bot",
-    allowedUsers: [] as string[],
-    adapters: {
-      telegram: { mode: "polling" },
-    },
-  },
-};
+// ── Shell helpers ───────────────────────────────────
 
 function run(cmd: string, opts?: { silent?: boolean }): string {
   try {
@@ -56,40 +40,31 @@ function runSudo(cmd: string): void {
   execSync(`sudo ${cmd}`, { stdio: "inherit" });
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
+function systemctl(verb: string, message?: string): void {
+  runSudo(`systemctl ${verb} ${SERVICE_NAME}`);
+  if (message) console.log(`  ✅ ${message}`);
 }
 
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
-  // Import and run the gateway in-process (foreground)
   process.env.ROUNDHOUSE_CONFIG = CONFIG_PATH;
   const indexPath = resolve(__dirname, "..", "src", "index.ts");
-
-  // If running from installed npm package, use compiled JS
   const jsPath = resolve(__dirname, "..", "dist", "index.js");
+
   if (await fileExists(jsPath)) {
     await import(jsPath);
   } else {
-    // Dev mode: use tsx
-    const { execSync } = await import("node:child_process");
-    execSync(`node ${resolve(__dirname, "..", "node_modules", "tsx", "dist", "cli.mjs")} ${indexPath}`, {
-      stdio: "inherit",
-      env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH },
-    });
+    execSync(
+      `node ${resolve(__dirname, "..", "node_modules", "tsx", "dist", "cli.mjs")} ${indexPath}`,
+      { stdio: "inherit", env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH } },
+    );
   }
 }
 
 async function cmdInstall() {
   console.log("[roundhouse] Installing as systemd daemon...\n");
 
-  // 1. Create config if missing
   await mkdir(CONFIG_DIR, { recursive: true });
   if (await fileExists(CONFIG_PATH)) {
     console.log(`  Config exists: ${CONFIG_PATH}`);
@@ -99,19 +74,14 @@ async function cmdInstall() {
     console.log(`  ⚠️  Edit this file to set allowedUsers and other settings.`);
   }
 
-  // 2. Find roundhouse binary
   const binPath = run("which roundhouse", { silent: true }) || resolve(__dirname, "cli.ts");
   const nodePath = run("which node", { silent: true }) || process.execPath;
 
-  // 3. Gather env vars for the service (only known safe ones)
   const envLines: string[] = [];
   for (const key of ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS"]) {
-    if (process.env[key]) {
-      envLines.push(`Environment=${key}=${process.env[key]}`);
-    }
+    if (process.env[key]) envLines.push(`Environment=${key}=${process.env[key]}`);
   }
 
-  // 4. Create systemd unit
   const unit = `[Unit]
 Description=Roundhouse Chat Gateway
 After=network.target
@@ -135,10 +105,9 @@ WantedBy=multi-user.target
   await writeFile(tmpUnit, unit);
   runSudo(`cp ${tmpUnit} ${SERVICE_PATH}`);
   runSudo("systemctl daemon-reload");
-  runSudo(`systemctl enable ${SERVICE_NAME}`);
-  runSudo(`systemctl start ${SERVICE_NAME}`);
+  systemctl("enable");
+  systemctl("start", "Daemon installed and started.");
 
-  console.log(`\n  ✅ Daemon installed and started.`);
   console.log(`\n  Config:  ${CONFIG_PATH}`);
   console.log(`  Service: ${SERVICE_PATH}`);
   console.log(`  Logs:    roundhouse logs`);
@@ -152,15 +121,9 @@ WantedBy=multi-user.target
 
 async function cmdUninstall() {
   console.log("[roundhouse] Removing systemd daemon...");
-  try {
-    runSudo(`systemctl stop ${SERVICE_NAME}`);
-  } catch {}
-  try {
-    runSudo(`systemctl disable ${SERVICE_NAME}`);
-  } catch {}
-  try {
-    runSudo(`rm -f ${SERVICE_PATH}`);
-  } catch {}
+  try { systemctl("stop"); } catch {}
+  try { systemctl("disable"); } catch {}
+  try { runSudo(`rm -f ${SERVICE_PATH}`); } catch {}
   runSudo("systemctl daemon-reload");
   console.log("  ✅ Daemon removed. Config preserved at:", CONFIG_PATH);
 }
@@ -170,8 +133,7 @@ async function cmdUpdate() {
   run("npm update -g roundhouse");
   console.log("\n[roundhouse] Restarting daemon...");
   try {
-    runSudo(`systemctl restart ${SERVICE_NAME}`);
-    console.log("  ✅ Updated and restarted.");
+    systemctl("restart", "Updated and restarted.");
   } catch {
     console.log("  ⚠️  Daemon not running. Start with: roundhouse install");
   }
@@ -189,65 +151,40 @@ function cmdLogs() {
   const child = spawn("journalctl", ["-u", SERVICE_NAME, "-f", "--no-pager", "-n", "100"], {
     stdio: "inherit",
   });
-  child.on("error", () => {
-    console.log("Could not read logs. Is the daemon installed?");
-  });
+  child.on("error", () => console.log("Could not read logs. Is the daemon installed?"));
 }
 
-function cmdStop() {
-  runSudo(`systemctl stop ${SERVICE_NAME}`);
-  console.log("  ✅ Daemon stopped.");
-}
-
-function cmdRestart() {
-  runSudo(`systemctl restart ${SERVICE_NAME}`);
-  console.log("  ✅ Daemon restarted.");
-}
+function cmdStop() { systemctl("stop", "Daemon stopped."); }
+function cmdRestart() { systemctl("restart", "Daemon restarted."); }
 
 async function cmdConfig() {
   console.log(`Config path: ${CONFIG_PATH}\n`);
   if (await fileExists(CONFIG_PATH)) {
-    const content = await readFile(CONFIG_PATH, "utf8");
-    console.log(content);
+    console.log(await readFile(CONFIG_PATH, "utf8"));
   } else {
     console.log("(no config file — defaults will be used)");
   }
 }
 
 async function cmdTui() {
-  // 1. Load config to determine agent type
-  let config: any = DEFAULT_CONFIG;
-  if (await fileExists(CONFIG_PATH)) {
-    try {
-      config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-    } catch {}
-  }
-
+  const config = await loadConfig();
   const agentType = config.agent?.type ?? "pi";
 
   if (agentType !== "pi") {
     console.error(`roundhouse tui: agent type "${agentType}" does not support TUI yet.`);
-    console.error("Only \"pi\" is supported currently.");
     process.exit(1);
   }
 
-  // 2. Find gateway sessions
-  const sessionsBase = config.agent?.sessionDir ?? resolve(homedir(), ".pi", "agent", "gateway-sessions");
+  const sessionsBase = (config.agent as any)?.sessionDir
+    ?? resolve(homedir(), ".pi", "agent", "gateway-sessions");
+
   let threadDirs: string[] = [];
   try {
-    const { readdirSync, statSync } = await import("node:fs");
     threadDirs = readdirSync(sessionsBase)
-      .filter((d: string) => {
-        try {
-          return statSync(resolve(sessionsBase, d)).isDirectory();
-        } catch {
-          return false;
-        }
-      })
+      .filter((d) => { try { return statSync(resolve(sessionsBase, d)).isDirectory(); } catch { return false; } })
       .sort();
   } catch {
     console.error(`No gateway sessions found at ${sessionsBase}`);
-    console.error("Send a message via Telegram/Slack first to create a session.");
     process.exit(1);
   }
 
@@ -256,26 +193,18 @@ async function cmdTui() {
     process.exit(1);
   }
 
-  // 3. Find session files in each thread dir, pick the most recent
-  const { readdirSync, statSync } = await import("node:fs");
-  const threadArg = process.argv[3]; // optional: roundhouse tui <thread>
+  const threadArg = process.argv[3];
 
-  interface SessionCandidate {
-    threadDir: string;
-    sessionFile: string;
-    mtime: number;
-  }
+  interface SessionCandidate { threadDir: string; sessionFile: string; mtime: number; }
 
   const candidates: SessionCandidate[] = [];
   for (const dir of threadDirs) {
     if (threadArg && !dir.includes(threadArg)) continue;
     const threadPath = resolve(sessionsBase, dir);
     try {
-      const files = readdirSync(threadPath).filter((f: string) => f.endsWith(".jsonl"));
-      for (const f of files) {
+      for (const f of readdirSync(threadPath).filter((f) => f.endsWith(".jsonl"))) {
         const fullPath = resolve(threadPath, f);
-        const st = statSync(fullPath);
-        candidates.push({ threadDir: dir, sessionFile: fullPath, mtime: st.mtimeMs });
+        candidates.push({ threadDir: dir, sessionFile: fullPath, mtime: statSync(fullPath).mtimeMs });
       }
     } catch {}
   }
@@ -291,10 +220,8 @@ async function cmdTui() {
     process.exit(1);
   }
 
-  // Sort by most recently modified
   candidates.sort((a, b) => b.mtime - a.mtime);
 
-  // If multiple threads and no filter, let user pick
   let selected: SessionCandidate;
   const uniqueThreads = [...new Set(candidates.map((c) => c.threadDir))];
 
@@ -316,14 +243,10 @@ async function cmdTui() {
     }
     console.log();
 
-    // Simple prompt
     const readline = await import("node:readline");
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise<string>((resolve) => {
-      rl.question("Pick a session [1]: ", (ans) => {
-        rl.close();
-        resolve(ans.trim() || "1");
-      });
+    const answer = await new Promise<string>((r) => {
+      rl.question("Pick a session [1]: ", (ans) => { rl.close(); r(ans.trim() || "1"); });
     });
 
     const idx = parseInt(answer, 10) - 1;
@@ -331,28 +254,17 @@ async function cmdTui() {
       console.error("Invalid selection.");
       process.exit(1);
     }
-    // Find most recent session file for the selected thread
     selected = candidates.find((c) => c.threadDir === shown[idx].threadDir)!;
   }
 
   console.log(`\nOpening: ${selected.sessionFile}\n`);
 
-  // 4. Launch pi --resume <session>
-  const piArgs = ["--resume", selected.sessionFile];
-  const child = spawn("pi", piArgs, { stdio: "inherit" });
-
+  const child = spawn("pi", ["--resume", selected.sessionFile], { stdio: "inherit" });
   child.on("error", (err) => {
-    if ((err as any).code === "ENOENT") {
-      console.error("'pi' not found in PATH. Install pi first.");
-    } else {
-      console.error("Failed to launch pi:", err.message);
-    }
+    console.error((err as any).code === "ENOENT" ? "'pi' not found in PATH." : `Failed: ${err.message}`);
     process.exit(1);
   });
-
-  child.on("exit", (code) => {
-    process.exit(code ?? 0);
-  });
+  child.on("exit", (code) => process.exit(code ?? 0));
 }
 
 function printHelp() {
@@ -389,37 +301,15 @@ Environment:
 const command = process.argv[2];
 
 switch (command) {
-  case "start":
-    cmdStart();
-    break;
-  case "install":
-    cmdInstall();
-    break;
-  case "uninstall":
-    cmdUninstall();
-    break;
-  case "update":
-    cmdUpdate();
-    break;
-  case "status":
-    cmdStatus();
-    break;
-  case "logs":
-    cmdLogs();
-    break;
-  case "stop":
-    cmdStop();
-    break;
-  case "restart":
-    cmdRestart();
-    break;
-  case "config":
-    cmdConfig();
-    break;
-  case "tui":
-    cmdTui();
-    break;
-  default:
-    printHelp();
-    break;
+  case "start": cmdStart(); break;
+  case "install": cmdInstall(); break;
+  case "uninstall": cmdUninstall(); break;
+  case "update": cmdUpdate(); break;
+  case "status": cmdStatus(); break;
+  case "logs": cmdLogs(); break;
+  case "stop": cmdStop(); break;
+  case "restart": cmdRestart(); break;
+  case "config": cmdConfig(); break;
+  case "tui": cmdTui(); break;
+  default: printHelp(); break;
 }
