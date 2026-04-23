@@ -261,7 +261,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ── Esc to cancel review ───────────────────────────
+  // ── Ctrl+Shift+R to cancel review ─────────────────
 
   pi.registerShortcut("ctrl+shift+r", {
     description: "Cancel in-progress code review",
