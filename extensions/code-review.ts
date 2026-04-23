@@ -69,14 +69,14 @@ export default function (pi: ExtensionAPI) {
       const count = modifiedFiles.size;
       ctx.ui.setStatus(
         "code-review",
-        `${star} ${theme.fg("accent", "review")} ${state} ${theme.fg("muted", `· will review`)} ${theme.fg("accent", String(count))} ${theme.fg("muted", count === 1 ? "file" : "files")}`
+        `${star} ${theme.fg("accent", "review")} ${state} ${theme.fg("muted", `· will review`)} ${theme.fg("accent", String(count))} ${theme.fg("muted", count === 1 ? "file" : "files")} ${theme.fg("dim", "(Shift+R toggle)")}`
       );
       return;
     }
 
     ctx.ui.setStatus(
       "code-review",
-      `${star} ${theme.fg("accent", "review")} ${state}`
+      `${star} ${theme.fg("accent", "review")} ${state} ${theme.fg("dim", "(Shift+R toggle)")}`
     );
   }
 
