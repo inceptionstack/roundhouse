@@ -86,7 +86,7 @@ export class Gateway {
         const reply = await agent.prompt(thread.id, userText);
         if (reply.text) {
           for (const chunk of splitMessage(reply.text, 4000)) {
-            await thread.post(chunk);
+            await thread.post({ markdown: chunk });
           }
         }
         // No fallback message — tool-only turns legitimately produce no text.
