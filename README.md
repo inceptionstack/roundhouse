@@ -170,17 +170,11 @@ Messages from Telegram/Slack and from the CLI share the same context.
 
 ### Code review extension
 
-Included at `extensions/code-review.ts` — automatically reviews file changes after each agent run using a separate pi instance. Install globally:
+The code review extension has moved to its own package: [pi-autoreview](https://github.com/inceptionstack/pi-autoreview). Install it with:
 
 ```bash
-cp extensions/code-review.ts ~/.pi/agent/extensions/
+pi install git:github.com/inceptionstack/pi-autoreview
 ```
-
-- Triggers on `agent_end` when `write`, `edit`, or file-modifying `bash` calls were made
-- Spawns a fresh pi reviewer with a focused prompt (bugs, security, errors, DRY)
-- Feeds findings back to the main agent as a follow-up message
-- Says "LGTM" silently if no issues found
-- Toggle with `/review` command
 
 ## Adding a new agent backend
 
@@ -228,7 +222,7 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/cli/cli.ts` | CLI: start, install, tui, update, logs, etc. |
 | `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/registry.ts` | Agent type → factory registry |
-| `extensions/code-review.ts` | Auto code review extension for pi |
+| `src/config.ts` | Shared config loading, defaults, env overrides |
 | `test/` | Unit tests (vitest, 36 passing) |
 
 ## CI/CD

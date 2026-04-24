@@ -202,6 +202,7 @@ The gateway and agent adapters don't change — only the router.
 
 ```
 index.ts
+  ├── config.ts (loadConfig, applyEnvOverrides)
   ├── agents/registry.ts
   │     └── agents/pi.ts
   │           └── util.ts (threadIdToDir)
@@ -209,6 +210,10 @@ index.ts
   ├── gateway.ts
   │     └── util.ts (splitMessage, isAllowed)
   └── types.ts (shared interfaces)
+
+cli/cli.ts
+  ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
+  └── (node:fs, node:child_process for daemon management)
 ```
 
-No circular dependencies. `util.ts` and `types.ts` are leaf modules.
+No circular dependencies. `util.ts`, `types.ts`, and `config.ts` are leaf modules.

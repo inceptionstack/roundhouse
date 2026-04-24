@@ -88,9 +88,8 @@ export class Gateway {
           for (const chunk of splitMessage(reply.text, 4000)) {
             await thread.post(chunk);
           }
-        } else {
-          await thread.post("(empty response)");
         }
+        // No fallback message — tool-only turns legitimately produce no text.
       } catch (err) {
         console.error(`[roundhouse] agent error:`, err);
         try {

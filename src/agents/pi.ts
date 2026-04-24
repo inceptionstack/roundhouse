@@ -114,30 +114,29 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   reapInterval = setInterval(reap, 60_000);
   reapInterval.unref();
 
+  // Per-thread promise chain ensures only one prompt() runs at a time.
+  // Subsequent messages for the same thread wait for prior ones to complete.
+  const threadQueues = new Map<string, Promise<AgentResponse>>();
+
   const adapter: AgentAdapter = {
     name: "pi",
 
     async prompt(threadId: string, text: string): Promise<AgentResponse> {
-      const entry = await getOrCreate(threadId);
-      entry.lastUsed = Date.now();
-
-      let fullText = "";
-      const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
-        if (
-          event.type === "message_update" &&
-          event.assistantMessageEvent.type === "text_delta"
-        ) {
-          fullText += event.assistantMessageEvent.delta;
-        }
-      });
+      // Chain this prompt after any in-flight work for the same thread
+      const previous = threadQueues.get(threadId) ?? Promise.resolve({ text: "" });
+      const current = previous
+        .catch(() => {}) // don't let a prior failure block the chain
+        .then(() => doPrompt(threadId, text));
+      threadQueues.set(threadId, current);
 
       try {
-        await entry.session.prompt(text);
+        return await current;
       } finally {
-        unsub();
+        // Clean up if this was the last in the chain
+        if (threadQueues.get(threadId) === current) {
+          threadQueues.delete(threadId);
+        }
       }
-
-      return { text: fullText };
     },
 
     async dispose(): Promise<void> {
@@ -147,8 +146,32 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       }
       sessions.clear();
       creating.clear();
+      threadQueues.clear();
     },
   };
+
+  async function doPrompt(threadId: string, text: string): Promise<AgentResponse> {
+    const entry = await getOrCreate(threadId);
+    entry.lastUsed = Date.now();
+
+    let fullText = "";
+    const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
+      if (
+        event.type === "message_update" &&
+        event.assistantMessageEvent.type === "text_delta"
+      ) {
+        fullText += event.assistantMessageEvent.delta;
+      }
+    });
+
+    try {
+      await entry.session.prompt(text);
+    } finally {
+      unsub();
+    }
+
+    return { text: fullText };
+  }
 
   return adapter;
 };
