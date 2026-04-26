@@ -6,7 +6,8 @@
 
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
+const ENV_FILE_PATH = resolve(CONFIG_DIR, "env");
 
 // ── Shell helpers ───────────────────────────────────
 
@@ -49,7 +51,7 @@ function systemctl(verb: string, message?: string): void {
 
 async function cmdStart() {
   process.env.ROUNDHOUSE_CONFIG = CONFIG_PATH;
-  const indexPath = resolve(__dirname, "..", "src", "index.ts");
+  const indexPath = resolve(__dirname, "..", "index.ts");
   const jsPath = resolve(__dirname, "..", "dist", "index.js");
 
   if (await fileExists(jsPath)) {
@@ -74,13 +76,50 @@ async function cmdInstall() {
     console.log(`  ⚠️  Edit this file to set allowedUsers and other settings.`);
   }
 
-  const binPath = run("which roundhouse", { silent: true }) || resolve(__dirname, "cli.ts");
-  const nodePath = run("which node", { silent: true }) || process.execPath;
-
-  const envLines: string[] = [];
-  for (const key of ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS"]) {
-    if (process.env[key]) envLines.push(`Environment=${key}=${process.env[key]}`);
+  // Write environment file for secrets — merge with existing to preserve manually-added keys
+  const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS"];
+  const existing = new Map<string, string>();
+  if (await fileExists(ENV_FILE_PATH)) {
+    const raw = await readFile(ENV_FILE_PATH, "utf8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) existing.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+    }
   }
+  // Override with current env vars for known keys
+  let envChanged = false;
+  for (const key of ENV_KEYS) {
+    if (process.env[key]) {
+      existing.set(key, `"${process.env[key].replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$$").replace(/`/g, "\\`").replace(/\n/g, "\\n")}"`);
+      envChanged = true;
+    }
+  }
+  if (envChanged || !(await fileExists(ENV_FILE_PATH))) {
+    const envFileContent = [...existing.entries()].map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+    await writeFile(ENV_FILE_PATH, envFileContent, { mode: 0o600 });
+    console.log(`  Environment file: ${ENV_FILE_PATH}`);
+  }
+
+  // Resolve paths — prefer the installed bin, fall back to tsx + source
+  const binPath = run("which roundhouse", { silent: true });
+  const nodePath = run("which node", { silent: true }) || process.execPath;
+  const tsxPath = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
+  const srcIndex = resolve(__dirname, "..", "index.ts");
+
+  let execStart: string;
+  if (binPath) {
+    execStart = `${nodePath} ${binPath} start`;
+  } else {
+    // No global install — use tsx directly
+    const tsxBin = run("which tsx", { silent: true }) || tsxPath;
+    execStart = `${tsxBin} ${srcIndex}`;
+  }
+
+  // Compute PATH that includes node's bin dir (for mise/nvm setups)
+  const nodeBinDir = dirname(nodePath);
+  const pathValue = `${nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
 
   const unit = `[Unit]
 Description=Roundhouse Chat Gateway
@@ -90,32 +129,37 @@ After=network.target
 Type=simple
 User=${process.env.USER || "root"}
 WorkingDirectory=${homedir()}
-ExecStart=${nodePath} ${binPath} start
+ExecStart=${execStart}
 Restart=on-failure
 RestartSec=5
-${envLines.join("\n")}
+EnvironmentFile=-${ENV_FILE_PATH}
 Environment=ROUNDHOUSE_CONFIG=${CONFIG_PATH}
 Environment=NODE_ENV=production
+Environment=PATH=${pathValue}
 
 [Install]
 WantedBy=multi-user.target
 `;
 
-  const tmpUnit = `/tmp/${SERVICE_NAME}.service`;
-  await writeFile(tmpUnit, unit);
+  const tmpDir = await mkdtemp(resolve(tmpdir(), "roundhouse-"));
+  const tmpUnit = resolve(tmpDir, `${SERVICE_NAME}.service`);
+  await writeFile(tmpUnit, unit, { mode: 0o600 });
   runSudo(`cp ${tmpUnit} ${SERVICE_PATH}`);
+  runSudo(`rm -rf -- ${tmpDir}`);
   runSudo("systemctl daemon-reload");
   systemctl("enable");
   systemctl("start", "Daemon installed and started.");
 
-  console.log(`\n  Config:  ${CONFIG_PATH}`);
-  console.log(`  Service: ${SERVICE_PATH}`);
-  console.log(`  Logs:    roundhouse logs`);
-  console.log(`  Status:  roundhouse status`);
+  console.log(`\n  Config:   ${CONFIG_PATH}`);
+  console.log(`  Env file: ${ENV_FILE_PATH}`);
+  console.log(`  Service:  ${SERVICE_PATH}`);
+  console.log(`  Logs:     roundhouse logs`);
+  console.log(`  Status:   roundhouse status`);
 
-  if (envLines.length === 0) {
-    console.log(`\n  ⚠️  No env vars detected. You may need to add TELEGRAM_BOT_TOKEN etc.`);
-    console.log(`     Edit ${SERVICE_PATH} or use an EnvironmentFile=`);
+  if (!envChanged) {
+    console.log(`\n  ⚠️  No env vars detected. Edit ${ENV_FILE_PATH} with your secrets:`);
+    console.log(`     TELEGRAM_BOT_TOKEN=...`);
+    console.log(`     Then add your API keys and run: roundhouse restart`);
   }
 }
 
@@ -300,16 +344,25 @@ Environment:
 
 const command = process.argv[2];
 
-switch (command) {
-  case "start": cmdStart(); break;
-  case "install": cmdInstall(); break;
-  case "uninstall": cmdUninstall(); break;
-  case "update": cmdUpdate(); break;
-  case "status": cmdStatus(); break;
-  case "logs": cmdLogs(); break;
-  case "stop": cmdStop(); break;
-  case "restart": cmdRestart(); break;
-  case "config": cmdConfig(); break;
-  case "tui": cmdTui(); break;
-  default: printHelp(); break;
+const commands: Record<string, () => void | Promise<void>> = {
+  start: cmdStart,
+  install: cmdInstall,
+  uninstall: cmdUninstall,
+  update: cmdUpdate,
+  status: cmdStatus,
+  logs: cmdLogs,
+  stop: cmdStop,
+  restart: cmdRestart,
+  config: cmdConfig,
+  tui: cmdTui,
+};
+
+const fn = command ? commands[command] : undefined;
+if (fn) {
+  Promise.resolve(fn()).catch((err) => {
+    console.error(`[roundhouse] ${command} failed:`, err);
+    process.exit(1);
+  });
+} else {
+  printHelp();
 }
