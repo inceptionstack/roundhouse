@@ -20,6 +20,8 @@ export interface MessageAttachment {
   sizeBytes: number;
   /** Whether this is user-provided (untrusted) content */
   untrusted: true;
+  /** Transcript of audio content (populated by STT service) */
+  transcript?: import("./voice/types").AttachmentTranscript;
 }
 
 // ── Agent adapter ────────────────────────────────────
@@ -111,5 +113,8 @@ export interface GatewayConfig {
       discord?: Record<string, unknown>;
       [key: string]: Record<string, unknown> | undefined;
     };
+  };
+  voice?: {
+    stt?: import("./voice/types").SttConfig;
   };
 }

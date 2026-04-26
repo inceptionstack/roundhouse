@@ -254,20 +254,37 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     let text = message.text;
     if (message.attachments?.length) {
       const manifest = JSON.stringify(
-        message.attachments.map((a) => ({
-          id: a.id,
-          type: a.mediaType,
-          name: a.name,
-          localPath: a.localPath,
-          mime: a.mime,
-          sizeBytes: a.sizeBytes,
-          untrusted: true,
-        })),
+        message.attachments.map((a) => {
+          const entry: Record<string, unknown> = {
+            id: a.id,
+            type: a.mediaType,
+            name: a.name,
+            localPath: a.localPath,
+            mime: a.mime,
+            sizeBytes: a.sizeBytes,
+            untrusted: true,
+          };
+          if (a.transcript?.status === "completed" && a.transcript.text) {
+            entry.transcript = {
+              text: a.transcript.text,
+              language: a.transcript.language,
+              provider: a.transcript.provider,
+              approximate: true,
+            };
+          } else if (a.transcript?.status === "failed") {
+            entry.transcript = {
+              status: "failed",
+              error: a.transcript.error,
+              approximate: true,
+            };
+          }
+          return entry;
+        }),
         null,
         2,
       );
       const block = [
-        "Chat attachments saved locally. Inspect these files with tools before making claims about their contents.",
+        "Chat attachments saved locally. Inspect files with tools before making claims. Transcripts are approximate; use the raw file if exact wording matters.",
         "```json",
         manifest,
         "```",

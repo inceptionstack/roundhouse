@@ -128,6 +128,18 @@ interface MessageAttachment {
   mime: string;
   sizeBytes: number;
   untrusted: true;
+  transcript?: AttachmentTranscript;
+}
+
+interface AttachmentTranscript {
+  text: string;
+  provider: string;
+  language?: string;
+  confidence?: number;
+  approximate: true;
+  status: "completed" | "failed";
+  error?: string;
+  durationMs?: number;
 }
 
 interface AgentAdapter {
@@ -169,6 +181,18 @@ gateway.config.json
         ├── telegram: { mode: "polling" }
         ├── slack: { ... }    # (future)
         └── discord: { ... }  # (future)
+
+└── voice                     # Optional voice features
+    └── stt
+        ├── enabled: true
+        ├── mode: "on" | "off"
+        ├── chain: ["whisper"]    # Provider chain (try in order)
+        ├── autoTranscribe
+        │   ├── voiceMessages: true
+        │   ├── audioFiles: false
+        │   └── maxDurationSec: 120
+        └── providers
+            └── whisper: { model: "small", timeoutMs: 30000 }
 ```
 
 Secrets (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) are always env vars, never in config.
@@ -234,6 +258,9 @@ index.ts
   ├── router.ts
   ├── gateway.ts
   │     └── util.ts (splitMessage, isAllowed, threadIdToDir, generateAttachmentId)
+  │     └── voice/stt-service.ts
+  │           └── voice/providers/whisper.ts
+  │           └── voice/types.ts
   └── types.ts (shared interfaces, pure types only)
 
 cli/cli.ts

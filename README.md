@@ -154,6 +154,9 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `chat.allowedUsers` | Telegram usernames / user IDs allowed (empty = allow all) |
 | `chat.notifyChatIds` | Telegram chat IDs to notify on startup (env: `NOTIFY_CHAT_IDS`) |
 | `chat.adapters.telegram` | `{ "mode": "polling" \| "webhook" \| "auto" }` |
+| `voice.stt.enabled` | Enable automatic voice transcription (default: off unless configured) |
+| `voice.stt.chain` | STT provider chain, e.g. `["whisper"]` |
+| `voice.stt.providers.whisper` | `{ "model": "small", "timeoutMs": 30000 }` |
 
 Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, etc.
 
@@ -257,6 +260,62 @@ Chat attachments saved locally. Inspect these files with tools before making cla
 ```
 
 Other agent adapters can format attachments differently — the `AgentMessage.attachments` array provides structured data.
+
+### Voice transcription (STT)
+
+Roundhouse can automatically transcribe voice messages using [OpenAI Whisper](https://github.com/openai/whisper) running locally. No cloud services or API keys required.
+
+**Setup:**
+```bash
+pip install openai-whisper
+```
+
+**Enable in config:**
+```json
+{
+  "voice": {
+    "stt": {
+      "enabled": true,
+      "mode": "on",
+      "chain": ["whisper"],
+      "autoTranscribe": {
+        "voiceMessages": true,
+        "audioFiles": false,
+        "maxDurationSec": 120
+      },
+      "providers": {
+        "whisper": {
+          "type": "whisper",
+          "model": "small",
+          "timeoutMs": 30000
+        }
+      }
+    }
+  }
+}
+```
+
+When enabled, voice messages are automatically transcribed before being sent to the agent. The agent sees both the transcript and the raw audio file path:
+
+```json
+{
+  "id": "att_a1b2c3d4",
+  "type": "audio",
+  "localPath": "/home/user/.roundhouse/incoming/.../0-audio.ogg",
+  "transcript": {
+    "text": "This will also work in Hebrew",
+    "language": "hebrew",
+    "provider": "whisper-small",
+    "approximate": true
+  }
+}
+```
+
+For voice-only messages (no typed text), the transcript becomes the message text sent to the agent.
+
+Whisper model sizes: `tiny` (fast, English-only reliable), `base`, `small` (recommended — good multilingual), `medium`, `large` (slow but most accurate).
+
+Transcripts are always marked `approximate: true` — the agent is instructed to use the raw file if exact wording matters.
 
 ## Extensions
 

@@ -9,6 +9,7 @@ import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
+import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { hostname } from "node:os";
 import { homedir } from "node:os";
 import { readFileSync, mkdirSync } from "node:fs";
@@ -182,6 +183,7 @@ export class Gateway {
   private chat!: Chat;
   private router: AgentRouter;
   private config: GatewayConfig;
+  private sttService: SttService | null = null;
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -190,6 +192,25 @@ export class Gateway {
 
   async start() {
     const chatAdapters = await buildChatAdapters(this.config.chat.adapters);
+
+    // Initialize STT service (only if explicitly configured)
+    const sttConfig = this.config.voice?.stt;
+    if (sttConfig?.enabled && sttConfig.mode !== "off") {
+      // Deep merge with defaults to handle partial configs
+      const defaultProviders = DEFAULT_STT_CONFIG.providers;
+      const mergedProviders: Record<string, any> = {};
+      for (const key of new Set([...Object.keys(defaultProviders), ...Object.keys(sttConfig.providers ?? {})])) {
+        mergedProviders[key] = { ...defaultProviders[key], ...(sttConfig.providers ?? {})[key] };
+      }
+      const mergedConfig = {
+        ...DEFAULT_STT_CONFIG,
+        ...sttConfig,
+        autoTranscribe: { ...DEFAULT_STT_CONFIG.autoTranscribe, ...sttConfig.autoTranscribe },
+        providers: mergedProviders,
+      };
+      this.sttService = new SttService(mergedConfig);
+      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")})`);
+    }
 
     if (Object.keys(chatAdapters).length === 0) {
       throw new Error("No chat adapters configured. Add at least one in config.chat.adapters.");
@@ -395,6 +416,26 @@ export class Gateway {
       if (prevLock) await prevLock;
 
       console.log(`[roundhouse] → ${agent.name} | thread=${thread.id}`);
+
+      // Enrich audio attachments with transcripts (STT) — inside thread lock to prevent stampede
+      if (this.sttService && agentMessage.attachments?.length) {
+        try {
+          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService);
+          // Update text for voice-only messages after transcription
+          if (!agentMessage.text) {
+            const transcripts = agentMessage.attachments
+              .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
+              .map((a) => a.transcript!.text);
+            if (transcripts.length > 0) {
+              agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
+            } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
+              agentMessage.text = "Voice message attached, but automatic transcription failed.";
+            }
+          }
+        } catch (err) {
+          console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
+        }
+      }
 
       const stopTyping = startTypingLoop(thread);
 
