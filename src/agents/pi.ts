@@ -109,6 +109,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     await entry.session.prompt(text);
     await drainSessionEvents(entry.session);
 
+    // Notify immediately if there's follow-up work pending — this is where
+    // the user would otherwise wait with no feedback while extensions
+    // (e.g. pi-lgtm review) do their work.
+    if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
+      onDraining();
+    }
+
     // Loop until the session is fully idle. Two separate conditions can keep
     // work in flight after the initial prompt resolves:
     //
@@ -128,16 +135,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     //
     // Without (b), pi CLI works (its subscriber stays attached across runs)
     // but roundhouse delivers the review bubble then goes silent.
-    let notifiedDraining = false;
     while (true) {
       if (entry.session.isStreaming) {
-        if (!notifiedDraining && onDraining) { onDraining(); notifiedDraining = true; }
         await entry.session.agent.waitForIdle();
         await drainSessionEvents(entry.session);
         continue;
       }
       if (entry.session.agent.hasQueuedMessages()) {
-        if (!notifiedDraining && onDraining) { onDraining(); notifiedDraining = true; }
         await entry.session.agent.continue();
         await drainSessionEvents(entry.session);
         continue;
