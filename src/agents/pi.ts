@@ -109,9 +109,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     await entry.session.prompt(text);
     await drainSessionEvents(entry.session);
 
-    // Notify immediately if there's follow-up work pending — this is where
-    // the user would otherwise wait with no feedback while extensions
-    // (e.g. pi-lgtm review) do their work.
+    // Check for pending follow-up work AFTER drainSessionEvents — that's
+    // where agent_end extension handlers run and queue follow-up messages
+    // (e.g. pi-lgtm calls sendMessage with deliverAs: "followUp").
+    // The actual long wait is in the while loop's waitForIdle() below.
     let notifiedDraining = false;
     if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
       onDraining();
