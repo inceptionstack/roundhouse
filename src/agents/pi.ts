@@ -169,6 +169,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
               if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
                 streamEvent = { type: "text_delta", text: event.assistantMessageEvent.delta };
+              } else if (event.type === "message_end" && (event.message as any).role === "custom" && (event.message as any).display) {
+                // Extension messages (e.g. code review results)
+                const content = (event.message as any).content;
+                if (typeof content === "string" && content.trim()) {
+                  streamEvent = { type: "text_delta", text: "\n\n" + content };
+                }
               } else if (event.type === "tool_execution_start") {
                 streamEvent = { type: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId };
               } else if (event.type === "tool_execution_end") {
