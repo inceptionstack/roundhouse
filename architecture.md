@@ -142,6 +142,7 @@ gateway.config.json
 └── chat                      # Multiple chat inputs
     ├── botUsername: "my_bot"
     ├── allowedUsers: [...]   # Auth filter (userName or userId)
+    ├── notifyChatIds: [...]   # Telegram chat IDs for startup notifications
     └── adapters
         ├── telegram: { mode: "polling" }
         ├── slack: { ... }    # (future)
@@ -163,6 +164,7 @@ Secrets (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) are always env vars, never i
    b. Create Chat instance with all adapters
    c. Wire onDirectMessage / onNewMention / onSubscribedMessage → handle()
    d. chat.initialize() — starts polling / webhooks
+   e. notifyStartup() — send Telegram notification to configured notifyChatIds
 7. Running. Ctrl+C → gateway.stop() → router.dispose() → agent.dispose()
 ```
 

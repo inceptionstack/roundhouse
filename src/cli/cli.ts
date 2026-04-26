@@ -77,7 +77,7 @@ async function cmdInstall() {
   }
 
   // Write environment file for secrets — merge with existing to preserve manually-added keys
-  const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
+  const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS", "NOTIFY_CHAT_IDS", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
   const existing = new Map<string, string>();
   if (await fileExists(ENV_FILE_PATH)) {
     const raw = await readFile(ENV_FILE_PATH, "utf8");

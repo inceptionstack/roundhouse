@@ -46,6 +46,9 @@ export function applyEnvOverrides(config: GatewayConfig): GatewayConfig {
       allowedUsers: process.env.ALLOWED_USERS
         ? process.env.ALLOWED_USERS.split(",").map((u) => u.trim())
         : config.chat.allowedUsers,
+      notifyChatIds: process.env.NOTIFY_CHAT_IDS
+        ? process.env.NOTIFY_CHAT_IDS.split(",").map((id) => id.trim())
+        : config.chat.notifyChatIds,
     },
   };
 }

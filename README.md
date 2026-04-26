@@ -148,6 +148,7 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `agent.sessionDir` | Override session storage path |
 | `chat.botUsername` | Bot display name for Chat SDK |
 | `chat.allowedUsers` | Telegram usernames / user IDs allowed (empty = allow all) |
+| `chat.notifyChatIds` | Telegram chat IDs to notify on startup (env: `NOTIFY_CHAT_IDS`) |
 | `chat.adapters.telegram` | `{ "mode": "polling" \| "webhook" \| "auto" }` |
 
 Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, etc.

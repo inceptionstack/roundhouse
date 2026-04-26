@@ -147,7 +147,10 @@ export class Gateway {
     if (!chatIds?.length) return;
 
     const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) return;
+    if (!token) {
+      console.warn("[roundhouse] notifyChatIds configured but TELEGRAM_BOT_TOKEN not set — skipping startup notification");
+      return;
+    }
 
     const uptime = process.uptime();
     const host = hostname();
