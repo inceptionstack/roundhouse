@@ -140,20 +140,6 @@ export class Gateway {
         return;
       }
 
-      // Handle /verbose command — toggle tool status messages for this thread
-      if (userText.trim() === "/verbose") {
-        const threadId = thread.id;
-        if (verboseThreads.has(threadId)) {
-          verboseThreads.delete(threadId);
-          await thread.post("🔇 Verbose mode OFF — tool status messages hidden.");
-        } else {
-          verboseThreads.add(threadId);
-          await thread.post("📢 Verbose mode ON — showing tool calls.");
-        }
-        console.log(`[roundhouse] /verbose for thread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
-        return;
-      }
-
       // Handle /compact command — compact session context
       if (userText.trim() === "/compact") {
         const agent = this.router.resolve(thread.id);
@@ -303,6 +289,20 @@ export class Gateway {
           try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
         }
         console.log(`[roundhouse] /stop for thread=${thread.id}`);
+        return;
+      }
+      // /verbose is a gateway toggle — runs immediately, no queuing
+      if (text === "/verbose") {
+        if (!isAllowed(message, allowedUsers)) return;
+        const threadId = thread.id;
+        if (verboseThreads.has(threadId)) {
+          verboseThreads.delete(threadId);
+          try { await thread.post("🔇 Verbose mode OFF — tool status messages hidden."); } catch {}
+        } else {
+          verboseThreads.add(threadId);
+          try { await thread.post("📢 Verbose mode ON — showing tool calls."); } catch {}
+        }
+        console.log(`[roundhouse] /verbose for thread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
         return;
       }
       await handle(thread, message);
