@@ -137,6 +137,11 @@ export class Gateway {
     await this.notifyStartup(platforms);
   }
 
+  /**
+   * Send a startup notification to configured chat IDs.
+   * Currently Telegram-only — when Slack/Discord adapters are added,
+   * extend this to use their respective APIs or a Chat SDK broadcast API.
+   */
   private async notifyStartup(platforms: string) {
     const chatIds = this.config.chat.notifyChatIds;
     if (!chatIds?.length) return;
@@ -146,16 +151,21 @@ export class Gateway {
 
     const uptime = process.uptime();
     const host = hostname();
+    const agentName = this.config.agent.type;
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
-    const text = `\u2705 Roundhouse is online\n\nHost: ${host}\nPlatforms: ${platforms}\nAgent: ${this.router.resolve("_").name}\nStarted: ${now}\nBoot time: ${uptime.toFixed(1)}s`;
+    const text = `\u2705 Roundhouse is online\n\nHost: ${host}\nPlatforms: ${platforms}\nAgent: ${agentName}\nStarted: ${now}\nBoot time: ${uptime.toFixed(1)}s`;
 
     for (const chatId of chatIds) {
       try {
-        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text }),
         });
+        if (!res.ok) {
+          const body = await res.text().catch(() => "");
+          console.warn(`[roundhouse] startup notification to ${chatId} failed (${res.status}): ${body.slice(0, 200)}`);
+        }
       } catch (err) {
         console.warn(`[roundhouse] failed to send startup notification to ${chatId}:`, (err as Error).message);
       }
