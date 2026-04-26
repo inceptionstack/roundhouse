@@ -250,6 +250,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         event.assistantMessageEvent.type === "text_delta"
       ) {
         fullText += event.assistantMessageEvent.delta;
+      } else if (
+        event.type === "message_end" &&
+        (event.message as any).role === "custom" &&
+        (event.message as any).display
+      ) {
+        const content = (event.message as any).content;
+        if (typeof content === "string" && content.trim()) {
+          fullText += "\n\n" + content;
+        }
       }
     });
 
