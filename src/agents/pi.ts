@@ -20,7 +20,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 import type { AgentAdapter, AgentAdapterFactory, AgentResponse, AgentStreamEvent } from "../types";
-import { threadIdToDir } from "../util";
+import { DEBUG_STREAM, threadIdToDir } from "../util";
 
 interface SessionEntry {
   session: AgentSession;
@@ -57,6 +57,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     //   2. followUp messages they queue are visible via hasQueuedMessages()
     //   3. message_end events for custom messages reach our subscribe() handler
     //      BEFORE we unsubscribe in the finally block.
+    //
+    // WARNING: _agentEventQueue is a private field of AgentSession (not part
+    // of the public pi-coding-agent API). Tested against
+    // @mariozechner/pi-coding-agent version bundled via `latest` in
+    // package.json at the time of this commit. If upstream renames or changes
+    // this field, extension custom messages (e.g. pi-lgtm review bubbles)
+    // will stop reaching Telegram. The `if (queue)` check fails silently
+    // on purpose because a missing field is not fatal — it just reverts to
+    // the pre-fix race condition. A public `session.flushEvents()` or
+    // `session.waitForIdle()` upstream would obsolete this.
     const queue = (session as unknown as { _agentEventQueue?: Promise<void> })._agentEventQueue;
     if (queue) {
       await queue;
@@ -74,6 +84,21 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         .join("");
     }
     return "";
+  }
+
+  /**
+   * Extract displayable text from a session event if it is an extension custom
+   * message (e.g. pi-lgtm review) with display=true. Returns null otherwise.
+   * Shared helper so promptStream() and doPrompt() use identical filter logic.
+   */
+  function extractCustomMessage(event: AgentSessionEvent): { customType: string; content: string } | null {
+    if (event.type !== "message_end") return null;
+    const message = (event as any).message;
+    if (!message || message.role !== "custom" || !message.display) return null;
+    const content = customContentToText(message.content);
+    if (!content.trim()) return null;
+    const customType = message.customType ?? "";
+    return { customType, content };
   }
 
   async function runPromptAndFollowUps(entry: SessionEntry, text: string): Promise<void> {
@@ -203,23 +228,30 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             entry.lastUsed = Date.now();
 
             const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
+              if (DEBUG_STREAM) {
+                const extra =
+                  event.type === "message_end" || event.type === "message_start"
+                    ? ` role=${(event as any).message?.role}`
+                    : event.type === "message_update"
+                      ? ` subType=${(event as any).assistantMessageEvent?.type}`
+                      : "";
+                console.log(`[pi-agent/sub] event=${event.type}${extra}`);
+              }
               let streamEvent: AgentStreamEvent | null = null;
 
               if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
                 streamEvent = { type: "text_delta", text: event.assistantMessageEvent.delta };
-              } else if (event.type === "message_end" && (event.message as any).role === "custom" && (event.message as any).display) {
-                // Extension messages (e.g. code review results) — emit as distinct event
-                const content = customContentToText((event.message as any).content);
-                const customType = (event.message as any).customType ?? "";
-                if (content.trim()) {
-                  streamEvent = { type: "custom_message", customType, content };
+              } else {
+                const custom = extractCustomMessage(event);
+                if (custom) {
+                  streamEvent = { type: "custom_message", customType: custom.customType, content: custom.content };
+                } else if (event.type === "tool_execution_start") {
+                  streamEvent = { type: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId };
+                } else if (event.type === "tool_execution_end") {
+                  streamEvent = { type: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
+                } else if (event.type === "turn_end") {
+                  streamEvent = { type: "turn_end" };
                 }
-              } else if (event.type === "tool_execution_start") {
-                streamEvent = { type: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId };
-              } else if (event.type === "tool_execution_end") {
-                streamEvent = { type: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
-              } else if (event.type === "turn_end") {
-                streamEvent = { type: "turn_end" };
               }
 
               if (streamEvent) {
@@ -287,14 +319,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         event.assistantMessageEvent.type === "text_delta"
       ) {
         fullText += event.assistantMessageEvent.delta;
-      } else if (
-        event.type === "message_end" &&
-        (event.message as any).role === "custom" &&
-        (event.message as any).display
-      ) {
-        const content = customContentToText((event.message as any).content);
-        if (content.trim()) {
-          fullText += "\n\n" + content;
+      } else {
+        const custom = extractCustomMessage(event);
+        if (custom) {
+          fullText += "\n\n" + custom.content;
         }
       }
     });

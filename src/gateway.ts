@@ -8,7 +8,7 @@
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
-import { splitMessage, isAllowed, startTypingLoop } from "./util";
+import { splitMessage, isAllowed, startTypingLoop, DEBUG_STREAM } from "./util";
 import { hostname } from "node:os";
 
 // ── Chat SDK adapter factories ───────────────────────
@@ -222,8 +222,17 @@ export class Gateway {
     };
 
     let hasTextInCurrentTurn = false;
+    let eventCount = 0;
 
     for await (const event of stream) {
+      if (DEBUG_STREAM) {
+        eventCount++;
+        const preview = event.type === "text_delta" ? `"${event.text.slice(0, 30)}"`
+          : event.type === "custom_message" ? `${event.customType}:${event.content.slice(0, 30)}`
+          : event.type === "tool_start" || event.type === "tool_end" ? event.toolName
+          : "";
+        console.log(`[roundhouse/stream] #${eventCount} ${event.type} ${preview}`);
+      }
       switch (event.type) {
         case "text_delta": {
           ensureStream();

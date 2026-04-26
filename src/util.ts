@@ -3,6 +3,14 @@
  */
 
 /**
+ * Debug flag for per-event stream logging. Enabled via
+ * ROUNDHOUSE_DEBUG_STREAM=1 in the roundhouse env file. Evaluated once at
+ * module load so the hot path (subscription callbacks, event loops) is a
+ * single boolean check rather than an env read on every event.
+ */
+export const DEBUG_STREAM = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
+
+/**
  * Split a long message into chunks that fit within maxLen.
  * Prefers splitting at newline boundaries.
  */
