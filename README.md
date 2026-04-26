@@ -100,12 +100,16 @@ Commands:
   install             Install as a systemd daemon (requires sudo)
   uninstall           Remove the systemd daemon
   update              Update from npm + restart daemon
-  status              Show daemon status
+  status              Show daemon status (rich detail view)
   logs                Tail daemon logs
   stop                Stop the daemon
   restart             Restart the daemon
   config              Show config path and contents
 ```
+
+### `roundhouse status`
+
+Shows detailed daemon info including version, state, PID, uptime, memory, agent type and version, platforms, allowed users, notify chats, debug flags, and config paths.
 
 ### `roundhouse tui`
 
@@ -174,10 +178,32 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | Command | Description |
 |---------|-------------|
 | `/new` | Start a fresh conversation (resets the agent session for this chat) |
+| `/compact` | Compact session context to free up tokens |
+| `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
-| `/status` | Show gateway status: version, agent, model, uptime, memory, etc. |
 
 These appear in Telegram's `/` command menu automatically.
+
+### `/status` details
+
+Shows a rich status view including:
+- Roundhouse and agent versions
+- Current model (from active session or configured default)
+- Context token usage with visual progress bar
+- Active sessions, platforms, uptime, memory
+- Debug flags and allowed users
+
+### `/compact`
+
+Manually triggers context compaction for the current chat's session. Shows before/after token counts. Useful when conversations get long and you want to free up context window space without starting a new session.
+
+### Follow-up notifications
+
+When extensions (e.g. code review) queue follow-up work after the agent responds, the gateway shows:
+- ⏳ "Hold on — waiting for follow-up messages..." (after 2s delay)
+- ✅ "All done — waiting for your input." (when processing completes)
+
+Fast operations that complete within 2 seconds show no extra messages.
 
 ## Extensions
 
@@ -230,13 +256,13 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/index.ts` | Entry point, config loading, startup |
 | `src/gateway.ts` | Owns Chat SDK, wires events → router → agent |
 | `src/router.ts` | `AgentRouter` interface + `SingleAgentRouter` |
-| `src/types.ts` | Core interfaces: `AgentAdapter`, `AgentRouter`, `GatewayConfig` |
+| `src/types.ts` | Core interfaces: `AgentAdapter`, `AgentStreamEvent`, `AgentRouter`, `GatewayConfig` |
 | `src/util.ts` | Pure utilities: `splitMessage`, `isAllowed`, `threadIdToDir`, `startTypingLoop` |
 | `src/cli/cli.ts` | CLI: start, install, tui, update, logs, etc. |
 | `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
-| `test/` | Unit tests (vitest, 36 passing) |
+| `test/` | Unit tests (vitest, 48 passing) |
 
 ## CI/CD
 
