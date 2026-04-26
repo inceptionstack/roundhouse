@@ -9,6 +9,7 @@ import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentRouter, GatewayConfig } from "./types";
 import { splitMessage, isAllowed, startTypingLoop } from "./util";
+import { hostname } from "node:os";
 
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
@@ -131,6 +132,34 @@ export class Gateway {
 
     const platforms = Object.keys(this.config.chat.adapters).join(", ");
     console.log(`[roundhouse] gateway ready (platforms: ${platforms})`);
+
+    // ── Startup notification ───────────────────────
+    await this.notifyStartup(platforms);
+  }
+
+  private async notifyStartup(platforms: string) {
+    const chatIds = this.config.chat.notifyChatIds;
+    if (!chatIds?.length) return;
+
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return;
+
+    const uptime = process.uptime();
+    const host = hostname();
+    const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    const text = `\u2705 Roundhouse is online\n\nHost: ${host}\nPlatforms: ${platforms}\nAgent: ${this.router.resolve("_").name}\nStarted: ${now}\nBoot time: ${uptime.toFixed(1)}s`;
+
+    for (const chatId of chatIds) {
+      try {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+        });
+      } catch (err) {
+        console.warn(`[roundhouse] failed to send startup notification to ${chatId}:`, (err as Error).message);
+      }
+    }
   }
 
   async stop() {

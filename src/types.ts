@@ -46,6 +46,8 @@ export interface GatewayConfig {
   chat: {
     botUsername: string;
     allowedUsers?: string[];
+    /** Telegram chat IDs to notify on startup/shutdown */
+    notifyChatIds?: (string | number)[];
     adapters: {
       telegram?: Record<string, unknown>;
       slack?: Record<string, unknown>;
