@@ -77,6 +77,7 @@ export class Gateway {
       userName: this.config.chat.botUsername,
       adapters: chatAdapters as any,
       state: createMemoryState(),
+      concurrency: "concurrent",
     });
 
     const allowedUsers = (this.config.chat.allowedUsers ?? []).map((u) =>
@@ -85,6 +86,12 @@ export class Gateway {
 
     // Per-thread verbose toggle (shows tool_start messages)
     const verboseThreads = new Set<string>();
+
+    // Per-thread abort signal for /stop
+    const abortControllers = new Map<string, AbortController>();
+
+    // Per-thread lock to serialize prompts (concurrent mode lets /stop through)
+    const threadLocks = new Map<string, Promise<void>>();
 
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
@@ -130,19 +137,6 @@ export class Gateway {
           try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
           process.exit(75);
         }, 1000);
-        return;
-      }
-
-      // Handle /stop command — abort current agent run
-      if (userText.trim() === "/stop") {
-        const agent = this.router.resolve(thread.id);
-        if (!agent.abort) {
-          await thread.post("⚠️ Abort not supported for this agent.");
-          return;
-        }
-        await agent.abort(thread.id);
-        await thread.post("⏹️ Stopped the current agent run.");
-        console.log(`[roundhouse] /stop for thread=${thread.id}`);
         return;
       }
 
@@ -249,13 +243,27 @@ export class Gateway {
       }
 
       const agent = this.router.resolve(thread.id);
+
+      // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
+      const prevLock = threadLocks.get(thread.id);
+      let releaseLock: () => void;
+      const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
+      threadLocks.set(thread.id, lockPromise);
+      if (prevLock) await prevLock;
+
       console.log(`[roundhouse] → ${agent.name} | thread=${thread.id}`);
 
       const stopTyping = startTypingLoop(thread);
 
       try {
         if (agent.promptStream) {
-          await this.handleStreaming(thread, agent.promptStream(thread.id, userText), verboseThreads.has(thread.id));
+          const ac = new AbortController();
+          abortControllers.set(thread.id, ac);
+          try {
+            await this.handleStreaming(thread, agent.promptStream(thread.id, userText), verboseThreads.has(thread.id), ac.signal);
+          } finally {
+            abortControllers.delete(thread.id);
+          }
         } else {
           // Fallback: non-streaming prompt
           const reply = await agent.prompt(thread.id, userText);
@@ -272,22 +280,46 @@ export class Gateway {
         } catch {}
       } finally {
         stopTyping();
+        releaseLock!();
+        if (threadLocks.get(thread.id) === lockPromise) {
+          threadLocks.delete(thread.id);
+        }
       }
     };
 
     // ── Wire Chat SDK events ───────────────────────
+    const handleOrAbort = async (thread: any, message: any) => {
+      const text = (message.text ?? "").trim();
+      // /stop is handled immediately — abort the in-flight agent run
+      // without waiting for the current handler to finish
+      if (text === "/stop") {
+        if (!isAllowed(message, allowedUsers)) return;
+        const agent = this.router.resolve(thread.id);
+        if (agent.abort) {
+          await agent.abort(thread.id);
+          abortControllers.get(thread.id)?.abort();
+          try { await thread.post("⏹️ Stopped."); } catch {}
+        } else {
+          try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
+        }
+        console.log(`[roundhouse] /stop for thread=${thread.id}`);
+        return;
+      }
+      await handle(thread, message);
+    };
+
     this.chat.onDirectMessage(async (thread, message) => {
       await thread.subscribe();
-      await handle(thread, message);
+      await handleOrAbort(thread, message);
     });
 
     this.chat.onNewMention(async (thread, message) => {
       await thread.subscribe();
-      await handle(thread, message);
+      await handleOrAbort(thread, message);
     });
 
     this.chat.onSubscribedMessage(async (thread, message) => {
-      await handle(thread, message);
+      await handleOrAbort(thread, message);
     });
 
     await this.chat.initialize();
@@ -309,7 +341,7 @@ export class Gateway {
    * - Tool starts/ends are sent as compact status messages.
    * - Turn boundaries trigger a new message for the next turn's text.
    */
-  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean) {
+  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal) {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
@@ -385,6 +417,11 @@ export class Gateway {
     let drainingNotified = false;
 
     for await (const event of stream) {
+      // Check if /stop was called
+      if (signal?.aborted) {
+        console.log(`[roundhouse] stream aborted for thread`);
+        break;
+      }
       if (DEBUG_STREAM) {
         eventCount++;
         const preview = event.type === "text_delta" ? `"${event.text.slice(0, 30)}"`
