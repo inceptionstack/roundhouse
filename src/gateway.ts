@@ -360,6 +360,17 @@ export class Gateway {
           break;
         }
 
+        case "draining": {
+          if (hasTextInCurrentTurn) {
+            await flushCurrentStream();
+            hasTextInCurrentTurn = false;
+          }
+          try {
+            await thread.post("⏳ Hold on — waiting for follow-up messages...");
+          } catch {}
+          break;
+        }
+
         case "agent_end": {
           if (hasTextInCurrentTurn) {
             await flushCurrentStream();

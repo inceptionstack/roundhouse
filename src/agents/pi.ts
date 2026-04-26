@@ -101,7 +101,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     return { customType, content };
   }
 
-  async function runPromptAndFollowUps(entry: SessionEntry, text: string): Promise<void> {
+  async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void): Promise<void> {
     await entry.session.prompt(text);
     await drainSessionEvents(entry.session);
 
@@ -124,13 +124,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     //
     // Without (b), pi CLI works (its subscriber stays attached across runs)
     // but roundhouse delivers the review bubble then goes silent.
+    let notifiedDraining = false;
     while (true) {
       if (entry.session.isStreaming) {
+        if (!notifiedDraining && onDraining) { onDraining(); notifiedDraining = true; }
         await entry.session.agent.waitForIdle();
         await drainSessionEvents(entry.session);
         continue;
       }
       if (entry.session.agent.hasQueuedMessages()) {
+        if (!notifiedDraining && onDraining) { onDraining(); notifiedDraining = true; }
         await entry.session.agent.continue();
         await drainSessionEvents(entry.session);
         continue;
@@ -289,7 +292,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             });
 
             try {
-              await runPromptAndFollowUps(entry, text);
+              await runPromptAndFollowUps(entry, text, () => {
+                eventQueue.push({ type: "draining" });
+                resolve?.();
+              });
               // Final drain — guarantees all subscriber events have been delivered
               // before we unsubscribe below.
               await drainSessionEvents(entry.session);
