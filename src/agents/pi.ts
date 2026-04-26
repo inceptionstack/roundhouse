@@ -6,7 +6,8 @@
  *   ~/.pi/agent/gateway-sessions/<thread_id>/<session>.jsonl
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -354,7 +355,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     getInfo(): Record<string, unknown> {
-      // Get model info from the most recently used session
+      // Get model from most recently used session, or fall back to configured default
       let modelInfo: string | undefined;
       let latestUsed = 0;
       for (const [, entry] of sessions) {
@@ -366,8 +367,22 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           }
         }
       }
+
+      // Fall back to configured default from settings.json
+      if (!modelInfo) {
+        try {
+          const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
+          const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+          if (settings.defaultProvider && settings.defaultModel) {
+            modelInfo = `${settings.defaultProvider}/${settings.defaultModel}`;
+          }
+        } catch (err) {
+          console.warn(`[pi-agent] could not read settings.json for model info:`, (err as Error).message);
+        }
+      }
+
       return {
-        model: modelInfo ?? "no active sessions",
+        model: modelInfo ?? "unknown",
         activeSessions: sessions.size,
         cwd,
       };
