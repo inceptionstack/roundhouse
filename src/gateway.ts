@@ -10,6 +10,19 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, DEBUG_STREAM } from "./util";
 import { hostname } from "node:os";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __gatewayDir = dirname(fileURLToPath(import.meta.url));
+const ROUNDHOUSE_VERSION: string = (() => {
+  try { return JSON.parse(readFileSync(join(__gatewayDir, "..", "package.json"), "utf8")).version; }
+  catch { return "unknown"; }
+})();
+const PI_VERSION: string = (() => {
+  try { return JSON.parse(readFileSync(join(__gatewayDir, "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json"), "utf8")).version; }
+  catch { return "unknown"; }
+})();
 
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
@@ -136,7 +149,8 @@ export class Gateway {
         const lines = [
           `📊 *Roundhouse Status*`,
           ``,
-          `🤖 Agent: \`${agent.name}\``,
+          `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`,
+          `🤖 Agent: \`${agent.name}\` (v${PI_VERSION})`,
         ];
 
         if (agent.getInfo) {

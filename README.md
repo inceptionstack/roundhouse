@@ -167,6 +167,18 @@ pi --resume ~/.pi/agent/gateway-sessions/<thread_dir>/<session>.jsonl
 
 Messages from Telegram/Slack and from the CLI share the same context.
 
+## Telegram bot commands
+
+Roundhouse automatically registers these commands with Telegram on startup:
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a fresh conversation (resets the agent session for this chat) |
+| `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
+| `/status` | Show gateway status: version, agent, model, uptime, memory, etc. |
+
+These appear in Telegram's `/` command menu automatically.
+
 ## Extensions
 
 ### Code review extension

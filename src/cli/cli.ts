@@ -233,7 +233,22 @@ async function cmdStatus() {
     debugStream = envContent.includes("ROUNDHOUSE_DEBUG_STREAM=1") || envContent.includes('ROUNDHOUSE_DEBUG_STREAM="1"');
   } catch {}
 
+  // Read versions
+  let roundhouseVersion = "unknown";
+  let piVersion = "unknown";
+  try {
+    const pkgPath = resolve(__dirname, "..", "..", "package.json");
+    const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
+    roundhouseVersion = pkg.version;
+  } catch {}
+  try {
+    const piPkgPath = resolve(__dirname, "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
+    const piPkg = JSON.parse(await readFile(piPkgPath, "utf8"));
+    piVersion = piPkg.version;
+  } catch {}
+
   console.log("\n  🟢 Roundhouse is running\n");
+  console.log(`  Version:        v${roundhouseVersion}`);
   console.log(`  State:          ${activeState}`);
   console.log(`  PID:            ${pid}`);
   console.log(`  Uptime:         ${uptimeStr}`);
@@ -242,7 +257,7 @@ async function cmdStatus() {
   if (config) {
     const platforms = Object.keys(config.chat.adapters).join(", ");
     const allowedCount = config.chat.allowedUsers?.length ?? 0;
-    console.log(`  Agent:          ${config.agent.type}`);
+    console.log(`  Agent:          ${config.agent.type} (v${piVersion})`);
     console.log(`  Agent CWD:      ${config.agent.cwd ?? process.cwd()}`);
     console.log(`  Platforms:      ${platforms}`);
     console.log(`  Bot:            @${config.chat.botUsername}`);
