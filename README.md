@@ -179,7 +179,9 @@ Roundhouse automatically registers these commands with Telegram on startup:
 |---------|-------------|
 | `/new` | Start a fresh conversation (resets the agent session for this chat) |
 | `/compact` | Compact session context to free up tokens |
+| `/verbose` | Toggle tool status messages on/off for this chat |
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
+| `/stop` | Shut down the gateway (requires `allowedUsers` to be configured) |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
 
 These appear in Telegram's `/` command menu automatically.
@@ -196,6 +198,14 @@ Shows a rich status view including:
 ### `/compact`
 
 Manually triggers context compaction for the current chat's session. Shows before/after token counts. Useful when conversations get long and you want to free up context window space without starting a new session.
+
+### `/verbose`
+
+Toggles verbose mode for the current chat. When ON, shows tool call status messages (e.g. "⚡ Running `bash`…"). When OFF (default), tool calls execute silently — you only see the agent's text responses. State shown in `/status`.
+
+### `/stop`
+
+Gracefully shuts down the gateway. Exits with code 0 so systemd does NOT auto-restart. Requires `allowedUsers` to be configured (same guard as `/restart`).
 
 ### Follow-up notifications
 

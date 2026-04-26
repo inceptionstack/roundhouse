@@ -83,6 +83,9 @@ export class Gateway {
       u.toLowerCase()
     );
 
+    // Per-thread verbose toggle (shows tool_start messages)
+    const verboseThreads = new Set<string>();
+
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
       const userText = message.text ?? "";
@@ -127,6 +130,36 @@ export class Gateway {
           try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
           process.exit(75);
         }, 1000);
+        return;
+      }
+
+      // Handle /stop command — graceful shutdown without restart
+      if (userText.trim() === "/stop") {
+        if (allowedUsers.length === 0) {
+          await thread.post("⚠️ /stop requires an allowedUsers list to be configured.");
+          return;
+        }
+        console.log(`[roundhouse] /stop requested by @${authorName} in thread=${thread.id}`);
+        await thread.post("🛑 Shutting down gateway...");
+        setTimeout(async () => {
+          console.log("[roundhouse] shutting down (stop)");
+          try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
+          process.exit(0); // exit 0 so systemd does NOT restart
+        }, 1000);
+        return;
+      }
+
+      // Handle /verbose command — toggle tool status messages for this thread
+      if (userText.trim() === "/verbose") {
+        const threadId = thread.id;
+        if (verboseThreads.has(threadId)) {
+          verboseThreads.delete(threadId);
+          await thread.post("🔇 Verbose mode OFF — tool status messages hidden.");
+        } else {
+          verboseThreads.add(threadId);
+          await thread.post("📢 Verbose mode ON — showing tool calls.");
+        }
+        console.log(`[roundhouse] /verbose for thread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
         return;
       }
 
@@ -190,6 +223,7 @@ export class Gateway {
           `💾 Memory: ${memMB} MB`,
           `🟢 Node: ${nodeVer}`,
           `🔧 Debug stream: ${debugStream ? "on" : "off"}`,
+          `📢 Verbose: ${verboseThreads.has(thread.id) ? "on" : "off"}`,
         );
 
         const allowedCount = allowedUsers.length;
@@ -224,7 +258,7 @@ export class Gateway {
 
       try {
         if (agent.promptStream) {
-          await this.handleStreaming(thread, agent.promptStream(thread.id, userText));
+          await this.handleStreaming(thread, agent.promptStream(thread.id, userText), verboseThreads.has(thread.id));
         } else {
           // Fallback: non-streaming prompt
           const reply = await agent.prompt(thread.id, userText);
@@ -278,7 +312,7 @@ export class Gateway {
    * - Tool starts/ends are sent as compact status messages.
    * - Turn boundaries trigger a new message for the next turn's text.
    */
-  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>) {
+  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean) {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
@@ -372,10 +406,11 @@ export class Gateway {
 
         case "tool_start": {
           activeTools.set(event.toolCallId, event.toolName);
-          // Send a compact tool status message
-          try {
-            await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
-          } catch {}
+          if (verbose) {
+            try {
+              await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
+            } catch {}
+          }
           break;
         }
 
@@ -471,6 +506,8 @@ export class Gateway {
     const commands = [
       { command: "new", description: "Start a fresh conversation" },
       { command: "compact", description: "Compact session context to free up tokens" },
+      { command: "verbose", description: "Toggle tool status messages" },
+      { command: "stop", description: "Shut down the gateway" },
       { command: "restart", description: "Restart the gateway service" },
       { command: "status", description: "Show gateway status" },
     ];
