@@ -246,6 +246,16 @@ export class Gateway {
           break;
         }
 
+        case "custom_message": {
+          // Extension messages (e.g. code review) — flush current stream and post as distinct message
+          if (currentPromise) {
+            await flushCurrentStream();
+            hasTextInCurrentTurn = false;
+          }
+          await this.postWithFallback(thread, event.content);
+          break;
+        }
+
         case "turn_end": {
           if (hasTextInCurrentTurn) {
             await flushCurrentStream();
