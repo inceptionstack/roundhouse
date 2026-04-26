@@ -334,6 +334,18 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       creating.clear();
       threadQueues.clear();
     },
+
+    async restart(threadId: string): Promise<void> {
+      await enqueue(threadId, async () => {
+        const existing = sessions.get(threadId);
+        if (existing) {
+          existing.session.dispose();
+          sessions.delete(threadId);
+          console.log(`[pi-agent] disposed session for ${threadId}`);
+        }
+        // Next prompt() or promptStream() call will create a fresh session
+      });
+    },
   };
 
   async function doPrompt(threadId: string, text: string): Promise<AgentResponse> {

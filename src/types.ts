@@ -26,6 +26,9 @@ export interface AgentAdapter {
    */
   promptStream?(threadId: string, text: string): AsyncIterable<AgentStreamEvent>;
 
+  /** Dispose the session for a thread and start fresh on next prompt */
+  restart?(threadId: string): Promise<void>;
+
   /** Tear down all sessions */
   dispose(): Promise<void>;
 }

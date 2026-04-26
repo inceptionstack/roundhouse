@@ -90,6 +90,19 @@ export class Gateway {
 
       if (!userText.trim() || userText === "/start") return;
 
+      // Handle /restart command — dispose current session, start fresh
+      if (userText.trim() === "/restart") {
+        const agent = this.router.resolve(thread.id);
+        if (agent.restart) {
+          await agent.restart(thread.id);
+          await thread.post("🔄 Session restarted. Send a message to begin a new conversation.");
+        } else {
+          await thread.post("⚠️ Restart not supported for this agent.");
+        }
+        console.log(`[roundhouse] /restart for thread=${thread.id}`);
+        return;
+      }
+
       const agent = this.router.resolve(thread.id);
       console.log(`[roundhouse] → ${agent.name} | thread=${thread.id}`);
 
