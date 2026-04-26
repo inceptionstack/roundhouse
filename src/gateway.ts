@@ -151,52 +151,74 @@ export class Gateway {
    * - Turn boundaries trigger a new message for the next turn's text.
    */
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>) {
-    let textBuffer = "";
-    let textResolve: ((value: IteratorResult<string>) => void) | null = null;
-    let streamingDone = false;
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
-    let streamPromise: Promise<void> | null = null;
 
-    // Create an async iterable of text chunks that thread.handleStream() consumes
-    const textStream: AsyncIterable<string> = {
-      [Symbol.asyncIterator]() {
-        return {
-          async next(): Promise<IteratorResult<string>> {
-            if (textBuffer) {
-              const chunk = textBuffer;
-              textBuffer = "";
-              return { value: chunk, done: false };
-            }
-            if (streamingDone) {
-              return { value: undefined as any, done: true };
-            }
-            return new Promise((resolve) => {
-              textResolve = resolve;
-            });
-          },
-        };
-      },
-    };
+    // Per-turn streaming state — each turn gets a fresh iterable + promise
+    let currentPush: ((text: string) => void) | null = null;
+    let currentFinish: (() => void) | null = null;
+    let currentPromise: Promise<void> | null = null;
 
-    const flushTextStream = async () => {
-      streamingDone = true;
-      textResolve?.({ value: undefined as any, done: true });
-      if (streamPromise) {
-        try {
-          await streamPromise;
-        } catch (err) {
-          console.warn(`[roundhouse] stream flush error:`, (err as Error).message);
-        }
+    function createTextStream(): { iterable: AsyncIterable<string>; push: (text: string) => void; finish: () => void } {
+      let buffer = "";
+      let resolve: ((value: IteratorResult<string>) => void) | null = null;
+      let done = false;
+
+      const iterable: AsyncIterable<string> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next(): Promise<IteratorResult<string>> {
+              if (buffer) {
+                const chunk = buffer;
+                buffer = "";
+                return { value: chunk, done: false };
+              }
+              if (done) return { value: undefined as any, done: true };
+              return new Promise((r) => { resolve = r; });
+            },
+          };
+        },
+      };
+
+      return {
+        iterable,
+        push(text: string) {
+          if (resolve) {
+            const r = resolve;
+            resolve = null;
+            r({ value: text, done: false });
+          } else {
+            buffer += text;
+          }
+        },
+        finish() {
+          done = true;
+          resolve?.({ value: undefined as any, done: true });
+        },
+      };
+    }
+
+    const flushCurrentStream = async () => {
+      if (!currentPromise) return;
+      currentFinish?.();
+      try {
+        await currentPromise;
+      } catch (err) {
+        console.warn(`[roundhouse] stream flush error:`, (err as Error).message);
       }
+      currentPush = null;
+      currentFinish = null;
+      currentPromise = null;
     };
 
-    const startNewTextStream = () => {
-      textBuffer = "";
-      streamingDone = false;
-      textResolve = null;
-      streamPromise = thread.handleStream(textStream).catch((err: Error) => {
-        console.warn(`[roundhouse] handleStream error:`, err.message);
-      });
+    const ensureStream = () => {
+      if (!currentPromise) {
+        const ts = createTextStream();
+        currentPush = ts.push;
+        currentFinish = ts.finish;
+        currentPromise = thread.handleStream(ts.iterable).catch((err: Error) => {
+          console.warn(`[roundhouse] handleStream error:`, err.message);
+        });
+      }
     };
 
     let hasTextInCurrentTurn = false;
@@ -204,18 +226,9 @@ export class Gateway {
     for await (const event of stream) {
       switch (event.type) {
         case "text_delta": {
-          if (!streamPromise) {
-            startNewTextStream();
-          }
+          ensureStream();
+          currentPush!(event.text);
           hasTextInCurrentTurn = true;
-
-          if (textResolve) {
-            const r = textResolve;
-            textResolve = null;
-            r({ value: event.text, done: false });
-          } else {
-            textBuffer += event.text;
-          }
           break;
         }
 
@@ -234,9 +247,8 @@ export class Gateway {
         }
 
         case "turn_end": {
-          // Flush current text stream before next turn
           if (hasTextInCurrentTurn) {
-            await flushTextStream();
+            await flushCurrentStream();
             hasTextInCurrentTurn = false;
           }
           break;
@@ -244,7 +256,7 @@ export class Gateway {
 
         case "agent_end": {
           if (hasTextInCurrentTurn) {
-            await flushTextStream();
+            await flushCurrentStream();
           }
           break;
         }
@@ -252,8 +264,8 @@ export class Gateway {
     }
 
     // Safety: make sure we flush
-    if (streamPromise && !streamingDone) {
-      await flushTextStream();
+    if (currentPromise) {
+      await flushCurrentStream();
     }
   }
 

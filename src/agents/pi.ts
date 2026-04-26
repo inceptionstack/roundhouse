@@ -145,10 +145,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     promptStream(threadId: string, text: string): AsyncIterable<AgentStreamEvent> {
-      // We need to serialize per-thread. Return an async iterable that
-      // waits for its turn, then streams events from the session.
+      // Return an async iterable that is single-use by design.
+      // State is scoped inside the iterator factory to prevent sharing.
+      let consumed = false;
+
       return {
         [Symbol.asyncIterator]() {
+          if (consumed) throw new Error("promptStream() iterable can only be consumed once");
+          consumed = true;
+
           let eventQueue: AgentStreamEvent[] = [];
           let resolve: (() => void) | null = null;
           let done = false;
