@@ -105,15 +105,17 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     return { customType, content };
   }
 
-  async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void): Promise<void> {
+  async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void, onDrainComplete?: () => void): Promise<void> {
     await entry.session.prompt(text);
     await drainSessionEvents(entry.session);
 
     // Notify immediately if there's follow-up work pending — this is where
     // the user would otherwise wait with no feedback while extensions
     // (e.g. pi-lgtm review) do their work.
+    let notifiedDraining = false;
     if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
       onDraining();
+      notifiedDraining = true;
     }
 
     // Loop until the session is fully idle. Two separate conditions can keep
@@ -147,6 +149,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         continue;
       }
       break;
+    }
+
+    if (notifiedDraining && onDrainComplete) {
+      onDrainComplete();
     }
   }
 
@@ -302,6 +308,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             try {
               await runPromptAndFollowUps(entry, text, () => {
                 eventQueue.push({ type: "draining" });
+                resolve?.();
+              }, () => {
+                eventQueue.push({ type: "drain_complete" });
                 resolve?.();
               });
               // Final drain — guarantees all subscriber events have been delivered

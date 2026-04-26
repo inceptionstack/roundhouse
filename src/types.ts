@@ -11,6 +11,7 @@ export type AgentStreamEvent =
   | { type: "tool_end"; toolName: string; toolCallId: string; isError: boolean }
   | { type: "turn_end" }
   | { type: "draining" }
+  | { type: "drain_complete" }
   | { type: "agent_end" }
   | { type: "custom_message"; customType: string; content: string };
 

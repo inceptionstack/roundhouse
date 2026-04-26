@@ -368,6 +368,17 @@ export class Gateway {
           break;
         }
 
+        case "drain_complete": {
+          if (hasTextInCurrentTurn) {
+            await flushCurrentStream();
+            hasTextInCurrentTurn = false;
+          }
+          try {
+            await thread.post("✅ All done — waiting for your input.");
+          } catch {}
+          break;
+        }
+
         case "agent_end": {
           if (hasTextInCurrentTurn) {
             await flushCurrentStream();
