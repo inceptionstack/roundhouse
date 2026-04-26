@@ -48,6 +48,44 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   const creating = new Map<string, Promise<SessionEntry>>();
   let reapInterval: ReturnType<typeof setInterval> | undefined;
 
+  async function drainSessionEvents(session: AgentSession): Promise<void> {
+    // AgentSession._handleAgentEvent queues event processing on a private
+    // promise chain (_agentEventQueue). session.prompt() / agent.continue()
+    // resolve when the agent loop finishes, but NOT when the queue drains.
+    // We must await the queue so that:
+    //   1. agent_end extension handlers (e.g. pi-lgtm review) complete
+    //   2. followUp messages they queue are visible via hasQueuedMessages()
+    //   3. message_end events for custom messages reach our subscribe() handler
+    //      BEFORE we unsubscribe in the finally block.
+    const queue = (session as unknown as { _agentEventQueue?: Promise<void> })._agentEventQueue;
+    if (queue) {
+      await queue;
+    }
+  }
+
+  function customContentToText(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((part): part is { type: "text"; text: string } =>
+          !!part && typeof part === "object" && (part as any).type === "text"
+        )
+        .map((part) => part.text)
+        .join("");
+    }
+    return "";
+  }
+
+  async function runPromptAndFollowUps(entry: SessionEntry, text: string): Promise<void> {
+    await entry.session.prompt(text);
+    await drainSessionEvents(entry.session);
+
+    while (entry.session.agent.hasQueuedMessages()) {
+      await entry.session.agent.continue();
+      await drainSessionEvents(entry.session);
+    }
+  }
+
   async function createSession(threadId: string): Promise<SessionEntry> {
     const threadDir = join(sessionsDir, threadIdToDir(threadId));
     await mkdir(threadDir, { recursive: true });
@@ -171,9 +209,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 streamEvent = { type: "text_delta", text: event.assistantMessageEvent.delta };
               } else if (event.type === "message_end" && (event.message as any).role === "custom" && (event.message as any).display) {
                 // Extension messages (e.g. code review results) — emit as distinct event
-                const content = (event.message as any).content;
+                const content = customContentToText((event.message as any).content);
                 const customType = (event.message as any).customType ?? "";
-                if (typeof content === "string" && content.trim()) {
+                if (content.trim()) {
                   streamEvent = { type: "custom_message", customType, content };
                 }
               } else if (event.type === "tool_execution_start") {
@@ -191,12 +229,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             });
 
             try {
-              await entry.session.prompt(text);
-              // Process follow-up messages queued by extension agent_end handlers
-              // (e.g. pi-lgtm review results sent via pi.sendMessage with deliverAs: "followUp")
-              while (entry.session.agent.hasQueuedMessages()) {
-                await entry.session.agent.continue();
-              }
+              await runPromptAndFollowUps(entry, text);
+              // Final drain — guarantees all subscriber events have been delivered
+              // before we unsubscribe below.
+              await drainSessionEvents(entry.session);
             } finally {
               unsub();
               eventQueue.push({ type: "agent_end" });
@@ -256,18 +292,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         (event.message as any).role === "custom" &&
         (event.message as any).display
       ) {
-        const content = (event.message as any).content;
-        if (typeof content === "string" && content.trim()) {
+        const content = customContentToText((event.message as any).content);
+        if (content.trim()) {
           fullText += "\n\n" + content;
         }
       }
     });
 
     try {
-      await entry.session.prompt(text);
-      while (entry.session.agent.hasQueuedMessages()) {
-        await entry.session.agent.continue();
-      }
+      await runPromptAndFollowUps(entry, text);
+      await drainSessionEvents(entry.session);
     } finally {
       unsub();
     }
