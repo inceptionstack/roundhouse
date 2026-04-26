@@ -90,16 +90,66 @@ export class Gateway {
 
       if (!userText.trim() || userText === "/start") return;
 
-      // Handle /restart command — dispose current session, start fresh
-      if (userText.trim() === "/restart") {
+      // Handle /new command — dispose current session, start fresh
+      if (userText.trim() === "/new") {
         const agent = this.router.resolve(thread.id);
         if (agent.restart) {
           await agent.restart(thread.id);
           await thread.post("🔄 Session restarted. Send a message to begin a new conversation.");
         } else {
-          await thread.post("⚠️ Restart not supported for this agent.");
+          await thread.post("⚠️ New session not supported for this agent.");
         }
-        console.log(`[roundhouse] /restart for thread=${thread.id}`);
+        console.log(`[roundhouse] /new for thread=${thread.id}`);
+        return;
+      }
+
+      // Handle /restart command — restart the gateway process
+      // Only available when an allowlist is configured (all allowed users can restart)
+      if (userText.trim() === "/restart") {
+        if (allowedUsers.length === 0) {
+          await thread.post("⚠️ /restart requires an allowedUsers list to be configured.");
+          return;
+        }
+        console.log(`[roundhouse] /restart requested by @${authorName} in thread=${thread.id}`);
+        await thread.post("🔄 Restarting gateway...");
+        // Graceful shutdown then exit with non-zero so systemd Restart=on-failure brings us back
+        setTimeout(async () => {
+          console.log("[roundhouse] shutting down for restart");
+          try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
+          process.exit(75);
+        }, 1000);
+        return;
+      }
+
+      // Handle /status command — show gateway details
+      if (userText.trim() === "/status") {
+        const agent = this.router.resolve(thread.id);
+        const uptimeSec = process.uptime();
+        const uptimeStr = uptimeSec < 3600
+          ? `${Math.floor(uptimeSec / 60)}m ${Math.floor(uptimeSec % 60)}s`
+          : `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
+        const platforms = Object.keys(this.config.chat.adapters).join(", ");
+        const debugStream = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
+        const nodeVer = process.version;
+        const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
+
+        const lines = [
+          `📊 *Roundhouse Status*`,
+          ``,
+          `🤖 Agent: \`${agent.name}\``,
+          `💬 Platforms: ${platforms}`,
+          `👤 Bot: @${this.config.chat.botUsername}`,
+          `⏱ Uptime: ${uptimeStr}`,
+          `💾 Memory: ${memMB} MB`,
+          `🟢 Node: ${nodeVer}`,
+          `🔧 Debug stream: ${debugStream ? "on" : "off"}`,
+        ];
+
+        const allowedCount = allowedUsers.length;
+        lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);
+
+        await thread.post({ markdown: lines.join("\n") });
+        console.log(`[roundhouse] /status for thread=${thread.id}`);
         return;
       }
 
@@ -355,6 +405,7 @@ export class Gateway {
   }
 
   async stop() {
+    try { await this.chat?.shutdown(); } catch (e) { console.warn("[roundhouse] chat shutdown error:", e); }
     await this.router.dispose();
     console.log("[roundhouse] stopped");
   }

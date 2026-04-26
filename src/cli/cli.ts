@@ -183,12 +183,77 @@ async function cmdUpdate() {
   }
 }
 
-function cmdStatus() {
-  try {
-    run(`systemctl status ${SERVICE_NAME}`);
-  } catch {
-    console.log("Daemon is not installed. Run: roundhouse install");
+async function cmdStatus() {
+  // Show systemd status
+  const isActive = run(`systemctl is-active ${SERVICE_NAME}`, { silent: true }) === "active";
+
+  if (!isActive) {
+    console.log("\n  ❌ Roundhouse is not running.\n");
+    console.log("  Install with: roundhouse install");
+    console.log("  Or start foreground: roundhouse start\n");
+    return;
   }
+
+  // Load config for details
+  let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+  try {
+    config = await loadConfig();
+  } catch {}
+
+  // Gather systemd info
+  const pid = run(`systemctl show -p MainPID --value ${SERVICE_NAME}`, { silent: true });
+  const activeState = run(`systemctl show -p ActiveState --value ${SERVICE_NAME}`, { silent: true });
+  const startedAt = run(`systemctl show -p ActiveEnterTimestamp --value ${SERVICE_NAME}`, { silent: true });
+
+  // Compute uptime
+  let uptimeStr = "unknown";
+  if (startedAt) {
+    const startMs = new Date(startedAt).getTime();
+    if (!isNaN(startMs)) {
+      const sec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+      if (sec < 3600) uptimeStr = `${Math.floor(sec / 60)}m ${sec % 60}s`;
+      else uptimeStr = `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+    }
+  }
+
+  // Memory from PID
+  let memStr = "unknown";
+  if (pid && pid !== "0" && /^\d+$/.test(pid)) {
+    const rssKb = run(`ps -o rss= -p ${pid}`, { silent: true }).trim();
+    if (rssKb) {
+      const parsed = parseInt(rssKb, 10);
+      if (!isNaN(parsed)) memStr = `${(parsed / 1024).toFixed(1)} MB`;
+    }
+  }
+
+  // Read env file for debug flags
+  let debugStream = false;
+  try {
+    const envContent = await readFile(ENV_FILE_PATH, "utf8");
+    debugStream = envContent.includes("ROUNDHOUSE_DEBUG_STREAM=1") || envContent.includes('ROUNDHOUSE_DEBUG_STREAM="1"');
+  } catch {}
+
+  console.log("\n  🟢 Roundhouse is running\n");
+  console.log(`  State:          ${activeState}`);
+  console.log(`  PID:            ${pid}`);
+  console.log(`  Uptime:         ${uptimeStr}`);
+  console.log(`  Memory:         ${memStr}`);
+
+  if (config) {
+    const platforms = Object.keys(config.chat.adapters).join(", ");
+    const allowedCount = config.chat.allowedUsers?.length ?? 0;
+    console.log(`  Agent:          ${config.agent.type}`);
+    console.log(`  Agent CWD:      ${config.agent.cwd ?? process.cwd()}`);
+    console.log(`  Platforms:      ${platforms}`);
+    console.log(`  Bot:            @${config.chat.botUsername}`);
+    console.log(`  Allowed users:  ${allowedCount === 0 ? "all (no allowlist)" : config.chat.allowedUsers!.join(", ")}`);
+    console.log(`  Notify chats:   ${config.chat.notifyChatIds?.join(", ") ?? "none"}`);
+  }
+
+  console.log(`  Debug stream:   ${debugStream ? "on" : "off"}`);
+  console.log(`  Config:         ${CONFIG_PATH}`);
+  console.log(`  Env file:       ${ENV_FILE_PATH}`);
+  console.log();
 }
 
 function cmdLogs() {
