@@ -86,14 +86,21 @@ export class Gateway {
         const reply = await agent.prompt(thread.id, userText);
         if (reply.text) {
           for (const chunk of splitMessage(reply.text, 4000)) {
-            await thread.post({ markdown: chunk });
+            try {
+              await thread.post({ markdown: chunk });
+            } catch (postErr) {
+              // Markdown parse failed (e.g. unclosed entities) — retry as plain text
+              console.warn(`[roundhouse] markdown post failed, falling back to plain text:`, (postErr as Error).message);
+              await thread.post(chunk);
+            }
           }
         }
         // No fallback message — tool-only turns legitimately produce no text.
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[roundhouse] agent error:`, err);
         try {
-          await thread.post("⚠️ Something went wrong.");
+          await thread.post(`⚠️ Error: ${errMsg}`);
         } catch {}
       } finally {
         stopTyping();
