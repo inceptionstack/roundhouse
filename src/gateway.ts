@@ -209,7 +209,8 @@ export class Gateway {
     const platforms = Object.keys(this.config.chat.adapters).join(", ");
     console.log(`[roundhouse] gateway ready (platforms: ${platforms})`);
 
-    // ── Startup notification ───────────────────────
+    // ── Register bot commands & send startup notification ───
+    await this.registerBotCommands();
     await this.notifyStartup(platforms);
   }
 
@@ -372,6 +373,39 @@ export class Gateway {
           console.error(`[roundhouse] post failed:`, (err as Error).message);
         }
       }
+    }
+  }
+
+  /**
+   * Register bot commands with Telegram so they appear in the / menu.
+   * Runs on every startup to keep commands in sync with the code.
+   */
+  private async registerBotCommands() {
+    if (!this.config.chat.adapters.telegram) return;
+
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return;
+
+    const commands = [
+      { command: "new", description: "Start a fresh conversation" },
+      { command: "restart", description: "Restart the gateway service" },
+      { command: "status", description: "Show gateway status" },
+    ];
+
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commands }),
+      });
+      if (res.ok) {
+        console.log(`[roundhouse] registered ${commands.length} bot commands with Telegram`);
+      } else {
+        const body = await res.text().catch(() => "");
+        console.warn(`[roundhouse] failed to register bot commands (${res.status}): ${body.slice(0, 200)}`);
+      }
+    } catch (err) {
+      console.warn(`[roundhouse] failed to register bot commands:`, (err as Error).message);
     }
   }
 
