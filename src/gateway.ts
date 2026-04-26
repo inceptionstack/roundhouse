@@ -142,7 +142,7 @@ export class Gateway {
         const nodeVer = process.version;
         const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
 
-        const info = agent.getInfo ? agent.getInfo() : {};
+        const info = agent.getInfo ? agent.getInfo(thread.id) : {};
         const agentVersion = info.version ? `v${info.version}` : "";
         const agentLabel = agentVersion ? `\`${agent.name}\` (${agentVersion})` : `\`${agent.name}\``;
 
@@ -167,6 +167,23 @@ export class Gateway {
 
         const allowedCount = allowedUsers.length;
         lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);
+
+        // Context usage with progress bar
+        if (typeof info.contextTokens === "number" && typeof info.contextWindow === "number" && info.contextWindow > 0) {
+          const pct = Math.min(100, Math.round((info.contextTokens as number) / (info.contextWindow as number) * 100));
+          const barLen = 20;
+          const filled = Math.round(pct / 100 * barLen);
+          const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
+          const tokensK = ((info.contextTokens as number) / 1000).toFixed(1);
+          const windowK = ((info.contextWindow as number) / 1000).toFixed(0);
+          lines.push(``);
+          lines.push(`📝 Context: \`${bar}\` ${pct}%`);
+          lines.push(`   ${tokensK}K / ${windowK}K tokens`);
+        } else if (typeof info.contextWindow === "number" && info.contextWindow > 0) {
+          const windowK = ((info.contextWindow as number) / 1000).toFixed(0);
+          lines.push(``);
+          lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
+        }
 
         await thread.post({ markdown: lines.join("\n") });
         console.log(`[roundhouse] /status for thread=${thread.id}`);

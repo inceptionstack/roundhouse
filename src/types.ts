@@ -32,7 +32,7 @@ export interface AgentAdapter {
   restart?(threadId: string): Promise<void>;
 
   /** Return runtime info about the agent (model, version, etc.) */
-  getInfo?(): Record<string, unknown>;
+  getInfo?(threadId?: string): Record<string, unknown>;
 
   /** Tear down all sessions */
   dispose(): Promise<void>;

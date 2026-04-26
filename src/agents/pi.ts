@@ -370,16 +370,26 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
-    getInfo(): Record<string, unknown> {
-      // Get model from most recently used session, or fall back to configured default
+    getInfo(threadId?: string): Record<string, unknown> {
+      // Get model from the requested thread's session, or most recently used
       let modelInfo: string | undefined;
-      let latestUsed = 0;
-      for (const [, entry] of sessions) {
-        if (entry.lastUsed > latestUsed) {
-          latestUsed = entry.lastUsed;
-          const model = entry.session.model;
-          if (model) {
-            modelInfo = `${model.provider}/${model.id}`;
+      let contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+      const threadEntry = threadId ? sessions.get(threadId) : undefined;
+
+      if (threadEntry) {
+        const model = threadEntry.session.model;
+        if (model) modelInfo = `${model.provider}/${model.id}`;
+        contextUsage = threadEntry.session.getContextUsage() ?? undefined;
+      }
+
+      if (!modelInfo) {
+        let latestUsed = 0;
+        for (const [, entry] of sessions) {
+          if (entry.lastUsed > latestUsed) {
+            latestUsed = entry.lastUsed;
+            const model = entry.session.model;
+            if (model) modelInfo = `${model.provider}/${model.id}`;
+            if (!contextUsage) contextUsage = entry.session.getContextUsage() ?? undefined;
           }
         }
       }
@@ -409,6 +419,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         model: modelInfo ?? "unknown",
         activeSessions: sessions.size,
         cwd,
+        contextTokens: contextUsage?.tokens ?? null,
+        contextWindow: contextUsage?.contextWindow ?? null,
+        contextPercent: contextUsage?.percent ?? null,
       };
     },
   };
