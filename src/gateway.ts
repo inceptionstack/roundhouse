@@ -137,13 +137,22 @@ export class Gateway {
           `📊 *Roundhouse Status*`,
           ``,
           `🤖 Agent: \`${agent.name}\``,
-          `💬 Platforms: ${platforms}`,
+        ];
+
+        if (agent.getInfo) {
+          const info = agent.getInfo();
+          if (info.model) lines.push(`🧠 Model: \`${info.model}\``);
+          if (info.activeSessions !== undefined) lines.push(`💬 Active sessions: ${info.activeSessions}`);
+        }
+
+        lines.push(
+          `🌐 Platforms: ${platforms}`,
           `👤 Bot: @${this.config.chat.botUsername}`,
           `⏱ Uptime: ${uptimeStr}`,
           `💾 Memory: ${memMB} MB`,
           `🟢 Node: ${nodeVer}`,
           `🔧 Debug stream: ${debugStream ? "on" : "off"}`,
-        ];
+        );
 
         const allowedCount = allowedUsers.length;
         lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);

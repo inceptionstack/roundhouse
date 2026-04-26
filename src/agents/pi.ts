@@ -346,6 +346,26 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // Next prompt() or promptStream() call will create a fresh session
       });
     },
+
+    getInfo(): Record<string, unknown> {
+      // Get model info from the most recently used session
+      let modelInfo: string | undefined;
+      let latestUsed = 0;
+      for (const [, entry] of sessions) {
+        if (entry.lastUsed > latestUsed) {
+          latestUsed = entry.lastUsed;
+          const model = entry.session.model;
+          if (model) {
+            modelInfo = `${model.provider}/${model.id}`;
+          }
+        }
+      }
+      return {
+        model: modelInfo ?? "no active sessions",
+        activeSessions: sessions.size,
+        cwd,
+      };
+    },
   };
 
   async function doPrompt(threadId: string, text: string): Promise<AgentResponse> {
