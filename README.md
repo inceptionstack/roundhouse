@@ -57,7 +57,7 @@ See [architecture.md](architecture.md) for full system diagrams, data flow, conf
 - **One gateway = one agent target.** The `agent` block in config picks the type and its settings. All chat inputs route to this single agent instance.
 - **Multiple chat inputs into the same agent.** Telegram and Slack messages go to the same agent, each on their own session thread (`telegram:<id>`, `slack:<id>`).
 - **AgentRouter is a seam.** Today it's `SingleAgentRouter` (hardcoded pass-through). The interface exists so we can later swap in per-thread routing, multi-agent, or load-balanced strategies without changing the gateway or adapters.
-- **AgentAdapter is the only abstraction we own.** The chat side is Vercel Chat SDK — we don't wrap it. The agent side is our `AgentAdapter` interface: `prompt(threadId, text) → AgentResponse`.
+- **AgentAdapter is the only abstraction we own.** The chat side is Vercel Chat SDK — we don't wrap it. The agent side is our `AgentAdapter` interface: `prompt(threadId, message) → AgentResponse`.
 - **Config-driven.** `gateway.config.json` (or `--config` flag, or env vars) determines everything at startup. No runtime reconfiguration.
 - **Persistent sessions.** Each thread gets its own session file on disk. Gateway restarts resume from the same file. Pi CLI can join the same session.
 
@@ -215,6 +215,49 @@ When extensions (e.g. code review) queue follow-up work after the agent responds
 
 Fast operations that complete within 2 seconds show no extra messages.
 
+## File attachments
+
+Roundhouse handles voice messages, images, documents, and other file attachments from Telegram:
+
+1. Files are downloaded and saved to `~/.roundhouse/incoming/<thread>/<message>/`
+2. A structured `AgentMessage` with typed `MessageAttachment[]` metadata is passed to the agent
+3. The agent receives file paths, MIME types, sizes, and can inspect files with its tools
+4. Files are marked as untrusted user-provided input
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Max file size | 20 MB per file |
+| Max attachments | 5 per message |
+| Filename length | 100 characters (sanitized to ASCII) |
+
+Supported types: voice messages, audio, images, video, documents (PDF, etc.)
+
+The incoming directory can be overridden with `ROUNDHOUSE_INCOMING_DIR` environment variable.
+
+### How the agent sees attachments
+
+The Pi adapter formats attachments as a fenced JSON manifest:
+
+```
+Chat attachments saved locally. Inspect these files with tools before making claims about their contents.
+```json
+[
+  {
+    "id": "att_a1b2c3d4",
+    "type": "audio",
+    "name": "audio.ogg",
+    "localPath": "/home/user/.roundhouse/incoming/telegram_c123/1745.../0-audio.ogg",
+    "mime": "audio/ogg",
+    "sizeBytes": 43520,
+    "untrusted": true
+  }
+]
+```
+
+Other agent adapters can format attachments differently — the `AgentMessage.attachments` array provides structured data.
+
 ## Extensions
 
 ### Code review extension
@@ -237,8 +280,9 @@ import type { AgentAdapter, AgentAdapterFactory } from "../types";
 export const createKiroAgentAdapter: AgentAdapterFactory = (config) => {
   return {
     name: "kiro",
-    async prompt(threadId, text) {
-      // your implementation
+    async prompt(threadId, message) {
+      // message.text contains user text
+      // message.attachments contains saved file metadata
       return { text: "response" };
     },
     async dispose() {},

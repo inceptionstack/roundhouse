@@ -2,6 +2,8 @@
  * util.ts — Pure utility functions for roundhouse
  */
 
+import { randomBytes } from "node:crypto";
+
 /**
  * Debug flag for per-event stream logging. Enabled via
  * ROUNDHOUSE_DEBUG_STREAM=1 in the roundhouse env file. Evaluated once at
@@ -92,4 +94,11 @@ export function threadIdToDir(threadId: string): string {
     .replace(/_/g, "_u")    // escape existing underscores first
     .replace(/:/g, "_c")    // encode colons
     .replace(/[^a-zA-Z0-9_-]/g, "_x"); // encode everything else
+}
+
+/**
+ * Generate a short random attachment ID (e.g. "att_a1b2c3d4").
+ */
+export function generateAttachmentId(): string {
+  return `att_${randomBytes(4).toString("hex")}`;
 }

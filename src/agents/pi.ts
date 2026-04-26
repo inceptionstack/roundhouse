@@ -23,7 +23,7 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentResponse, AgentStreamEvent } from "../types";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types";
 import { DEBUG_STREAM, threadIdToDir } from "../util";
 
 interface SessionEntry {
@@ -246,14 +246,46 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     });
   }
 
+  /**
+   * Format an AgentMessage into the text string sent to the Pi session.
+   * Attachments are rendered as a fenced JSON manifest appended to the user text.
+   */
+  function formatMessage(message: AgentMessage): string {
+    let text = message.text;
+    if (message.attachments?.length) {
+      const manifest = JSON.stringify(
+        message.attachments.map((a) => ({
+          id: a.id,
+          type: a.mediaType,
+          name: a.name,
+          localPath: a.localPath,
+          mime: a.mime,
+          sizeBytes: a.sizeBytes,
+          untrusted: true,
+        })),
+        null,
+        2,
+      );
+      const block = [
+        "Chat attachments saved locally. Inspect these files with tools before making claims about their contents.",
+        "```json",
+        manifest,
+        "```",
+      ].join("\n");
+      text = text ? `${text}\n\n${block}` : block;
+    }
+    return text;
+  }
+
   const adapter: AgentAdapter = {
     name: "pi",
 
-    async prompt(threadId: string, text: string): Promise<AgentResponse> {
-      return enqueue(threadId, () => doPrompt(threadId, text));
+    async prompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
+      return enqueue(threadId, () => doPrompt(threadId, formatMessage(message)));
     },
 
-    promptStream(threadId: string, text: string): AsyncIterable<AgentStreamEvent> {
+    promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
+      const text = formatMessage(message);
       // Return an async iterable that is single-use by design.
       // State is scoped inside the iterator factory to prevent sharing.
       let consumed = false;

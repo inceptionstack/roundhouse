@@ -7,11 +7,13 @@
 
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
-import { splitMessage, isAllowed, startTypingLoop, DEBUG_STREAM } from "./util";
+import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
+import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { hostname } from "node:os";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { readFileSync, mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __gatewayDir = dirname(fileURLToPath(import.meta.url));
@@ -52,6 +54,126 @@ const TOOL_ICONS: Record<string, string> = {
 
 function toolIcon(name: string): string {
   return TOOL_ICONS[name] ?? "🔧";
+}
+
+// ── Incoming file storage ─────────────────────────────
+
+const INCOMING_DIR = process.env.ROUNDHOUSE_INCOMING_DIR
+  ?? join(homedir(), ".roundhouse", "incoming");
+
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB per file
+const MAX_ATTACHMENTS = 5;
+
+const MIME_EXTENSIONS: Record<string, string> = {
+  "audio/ogg": ".ogg",
+  "audio/mpeg": ".mp3",
+  "audio/mp4": ".m4a",
+  "audio/wav": ".wav",
+  "audio/webm": ".webm",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "video/mp4": ".mp4",
+  "application/pdf": ".pdf",
+};
+
+/** Sanitize a filename to safe ASCII characters, capped length */
+function safeName(raw: string): string {
+  let name = basename(raw);
+  // Replace anything not alphanumeric, dot, dash, underscore with _
+  name = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  // Cap length (truncate from start to preserve extension)
+  if (name.length > 100) name = name.slice(-100);
+  // Remove leading dashes/dots/underscores (prevent hidden files or option-like names)
+  // Applied AFTER truncation so slice(-100) can't reintroduce them
+  name = name.replace(/^[-_.]+/, "");
+  return name || "attachment";
+}
+
+/** Result of saving attachments: saved files + user-facing warnings */
+interface AttachmentResult {
+  saved: MessageAttachment[];
+  skipped: string[]; // user-facing reasons for skipped attachments
+}
+
+async function saveAttachments(threadId: string, attachments: any[]): Promise<AttachmentResult> {
+  if (!attachments?.length) return { saved: [], skipped: [] };
+
+  const skipped: string[] = [];
+  const toProcess = attachments.slice(0, MAX_ATTACHMENTS);
+  if (attachments.length > MAX_ATTACHMENTS) {
+    skipped.push(`${attachments.length - MAX_ATTACHMENTS} attachment(s) skipped (max ${MAX_ATTACHMENTS} per message)`);
+    console.warn(`[roundhouse] too many attachments (${attachments.length}), processing first ${MAX_ATTACHMENTS}`);
+  }
+
+  // Per-message directory: <thread>/<timestamp_nonce>/
+  const msgDir = join(INCOMING_DIR, threadIdToDir(threadId), `${Date.now()}_${generateAttachmentId()}`);
+  try {
+    mkdirSync(msgDir, { recursive: true });
+  } catch (err) {
+    console.error(`[roundhouse] failed to create incoming dir ${msgDir}:`, (err as Error).message);
+    return { saved: [], skipped: ["Failed to create storage directory"] };
+  }
+
+  const saved: MessageAttachment[] = [];
+  for (let i = 0; i < toProcess.length; i++) {
+    const att = toProcess[i];
+    try {
+      // Check size hint before downloading if available
+      if (att.size && att.size > MAX_FILE_SIZE) {
+        const sizeMB = (att.size / 1024 / 1024).toFixed(1);
+        skipped.push(`${att.name ?? att.type} (${sizeMB} MB) exceeds ${MAX_FILE_SIZE / 1024 / 1024} MB limit`);
+        console.warn(`[roundhouse] attachment too large (${att.size} bytes), skipping: ${att.name ?? att.type}`);
+        continue;
+      }
+
+      const data = att.data ?? (att.fetchData ? await att.fetchData() : null);
+      if (!data) {
+        console.warn(`[roundhouse] attachment has no data: ${att.name ?? att.type}`);
+        continue;
+      }
+
+      const buf = Buffer.isBuffer(data) ? data
+        : ArrayBuffer.isView(data) ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+        : data instanceof ArrayBuffer ? Buffer.from(data)
+        : Buffer.from(await (data as Blob).arrayBuffer());
+
+      if (buf.length > MAX_FILE_SIZE) {
+        const sizeMB = (buf.length / 1024 / 1024).toFixed(1);
+        skipped.push(`${att.name ?? att.type} (${sizeMB} MB) exceeds size limit`);
+        console.warn(`[roundhouse] attachment too large after download (${buf.length} bytes), skipping`);
+        continue;
+      }
+
+      const mime = att.mimeType ?? "application/octet-stream";
+      const ext = att.name
+        ? (att.name.includes(".") ? "" : (MIME_EXTENSIONS[mime] ?? ""))
+        : (MIME_EXTENSIONS[mime] ?? ".bin");
+      const rawName = att.name ? safeName(att.name) + ext : `${att.type ?? "file"}${ext}`;
+      const fileName = `${i}-${rawName}`;
+      const filePath = join(msgDir, fileName);
+
+      await writeFile(filePath, buf);
+
+      const VALID_MEDIA_TYPES = new Set(["audio", "image", "file", "video"]);
+      const mediaType = VALID_MEDIA_TYPES.has(att.type) ? att.type : "file";
+      const id = generateAttachmentId();
+      saved.push({
+        id,
+        mediaType,
+        name: rawName,
+        localPath: filePath,
+        mime,
+        sizeBytes: buf.length,
+        untrusted: true,
+      });
+      console.log(`[roundhouse] saved ${att.type} [${id}]: ${filePath} (${buf.length} bytes)`);
+    } catch (err) {
+      console.error(`[roundhouse] failed to save attachment:`, (err as Error).message);
+    }
+  }
+  return { saved, skipped };
 }
 
 // ── Gateway ──────────────────────────────────────────
@@ -97,9 +219,10 @@ export class Gateway {
     const handle = async (thread: any, message: any) => {
       const userText = message.text ?? "";
       const authorName = message.author?.userName ?? message.author?.userId ?? "?";
+      const rawAttachments = message.attachments ?? [];
 
       console.log(
-        `[roundhouse] ${thread.id} @${authorName}: "${userText.slice(0, 120)}"`
+        `[roundhouse] ${thread.id} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
       if (!isAllowed(message, allowedUsers)) {
@@ -107,7 +230,8 @@ export class Gateway {
         return;
       }
 
-      if (!userText.trim() || userText === "/start") return;
+      if (userText === "/start") return;
+      if (!userText.trim() && !rawAttachments.length) return;
 
       // Handle /new command — dispose current session, start fresh
       if (userText.trim() === "/new") {
@@ -228,6 +352,39 @@ export class Gateway {
         return;
       }
 
+      // Save any attachments (voice messages, images, files, etc.)
+      let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
+      try {
+        attachmentResult = await saveAttachments(thread.id, rawAttachments);
+      } catch (err) {
+        console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
+        if (!userText.trim()) {
+          try { await thread.post("⚠️ Failed to process attachment(s). Please try again."); } catch {}
+          return;
+        }
+      }
+
+      // Notify user about skipped attachments
+      if (attachmentResult.skipped.length > 0) {
+        const skipMsg = attachmentResult.skipped.map((s) => `\u2022 ${s}`).join("\n");
+        try { await thread.post(`⚠️ Some attachments were skipped:\n${skipMsg}`); } catch {}
+      }
+
+      // Build AgentMessage
+      const promptText = userText.trim();
+      const agentMessage: AgentMessage = {
+        text: promptText,
+        attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
+      };
+
+      if (!promptText && !agentMessage.attachments) {
+        if (rawAttachments.length > 0) {
+          // All attachments failed to save but message was attachment-only
+          try { await thread.post("⚠️ Failed to save attachment(s). Please try again."); } catch {}
+        }
+        return;
+      }
+
       const agent = this.router.resolve(thread.id);
 
       // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
@@ -246,13 +403,13 @@ export class Gateway {
           const ac = new AbortController();
           abortControllers.set(thread.id, ac);
           try {
-            await this.handleStreaming(thread, agent.promptStream(thread.id, userText), verboseThreads.has(thread.id), ac.signal);
+            await this.handleStreaming(thread, agent.promptStream(thread.id, agentMessage), verboseThreads.has(thread.id), ac.signal);
           } finally {
             abortControllers.delete(thread.id);
           }
         } else {
           // Fallback: non-streaming prompt
-          const reply = await agent.prompt(thread.id, userText);
+          const reply = await agent.prompt(thread.id, agentMessage);
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }

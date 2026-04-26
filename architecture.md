@@ -98,12 +98,14 @@ User sends "list files" on Telegram
 │  1. Check isAllowed(message.author, allowedUsers)            │
 │  2. Resolve agent via router.resolve(thread.id)              │
 │  3. thread.startTyping()                                     │
-│  4. agent.prompt(thread.id, "list files")                    │
+│  4. Save attachments to ~/.roundhouse/incoming/<thread>/      │
+│  5. Build AgentMessage { text, attachments }                  │
+│  6. agent.promptStream(thread.id, agentMessage)               │
+│     └─▶ Pi adapter formats text + JSON attachment manifest    │
 │     └─▶ Pi SDK creates/resumes session                       │
 │         └─▶ LLM processes, tools execute                     │
-│         └─▶ Returns AgentResponse { text: "..." }            │
-│  5. splitMessage(response.text, 4000)                        │
-│  6. thread.post(chunk) for each chunk                        │
+│         └─▶ Streams AgentStreamEvent back                    │
+│  7. Stream text deltas via thread.handleStream()              │
 └──────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -113,12 +115,29 @@ User sends "list files" on Telegram
 ## Key interfaces
 
 ```typescript
+interface AgentMessage {
+  text: string;
+  attachments?: MessageAttachment[];
+}
+
+interface MessageAttachment {
+  id: string;
+  mediaType: "audio" | "image" | "file" | "video";
+  name: string;
+  localPath: string;
+  mime: string;
+  sizeBytes: number;
+  untrusted: true;
+}
+
 interface AgentAdapter {
   name: string;
-  prompt(threadId: string, text: string): Promise<AgentResponse>;
-  promptStream?(threadId: string, text: string): AsyncIterable<AgentStreamEvent>;
+  prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
+  promptStream?(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent>;
   restart?(threadId: string): Promise<void>;
-  getInfo?(): Record<string, unknown>;
+  compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
+  abort?(threadId: string): Promise<void>;
+  getInfo?(threadId?: string): Record<string, unknown>;
   dispose(): Promise<void>;
 }
 
@@ -214,8 +233,8 @@ index.ts
   │           └── util.ts (threadIdToDir)
   ├── router.ts
   ├── gateway.ts
-  │     └── util.ts (splitMessage, isAllowed)
-  └── types.ts (shared interfaces)
+  │     └── util.ts (splitMessage, isAllowed, threadIdToDir, generateAttachmentId)
+  └── types.ts (shared interfaces, pure types only)
 
 cli/cli.ts
   ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
@@ -223,4 +242,5 @@ cli/cli.ts
   └── (node:fs, node:child_process for daemon management)
 ```
 
-No circular dependencies. `util.ts`, `types.ts`, and `config.ts` are leaf modules.
+No circular dependencies. `types.ts` and `config.ts` are pure leaf modules.
+`util.ts` is a leaf module with runtime helpers (`node:crypto` for attachment IDs).

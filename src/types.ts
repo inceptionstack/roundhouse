@@ -2,7 +2,35 @@
  * types.ts — Core abstractions for roundhouse
  */
 
+// ── Attachments ──────────────────────────────────────
+
+/** A file attachment received from a chat platform and saved locally */
+export interface MessageAttachment {
+  /** Stable attachment ID (e.g. "att_a1b2c3d4") */
+  id: string;
+  /** Attachment type from the chat platform */
+  mediaType: "audio" | "image" | "file" | "video";
+  /** Sanitized filename */
+  name: string;
+  /** Absolute local path where the file was saved */
+  localPath: string;
+  /** MIME type (from platform metadata or fallback) */
+  mime: string;
+  /** File size in bytes */
+  sizeBytes: number;
+  /** Whether this is user-provided (untrusted) content */
+  untrusted: true;
+}
+
 // ── Agent adapter ────────────────────────────────────
+
+/** A user message with optional attachments */
+export interface AgentMessage {
+  /** User's text (may be empty for attachment-only messages) */
+  text: string;
+  /** File attachments saved locally by the gateway */
+  attachments?: MessageAttachment[];
+}
 
 /** Events yielded by the streaming prompt interface */
 export type AgentStreamEvent =
@@ -20,13 +48,13 @@ export interface AgentAdapter {
   name: string;
 
   /** Send a user message and return the full assistant response */
-  prompt(threadId: string, text: string): Promise<AgentResponse>;
+  prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
 
   /**
    * Send a user message and stream back events in real time.
    * Falls back to prompt() if not implemented.
    */
-  promptStream?(threadId: string, text: string): AsyncIterable<AgentStreamEvent>;
+  promptStream?(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent>;
 
   /** Dispose the session for a thread and start fresh on next prompt */
   restart?(threadId: string): Promise<void>;
