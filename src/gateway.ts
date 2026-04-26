@@ -91,16 +91,21 @@ export class Gateway {
             } catch (postErr) {
               // Markdown parse failed (e.g. unclosed entities) — retry as plain text
               console.warn(`[roundhouse] markdown post failed, falling back to plain text:`, (postErr as Error).message);
-              await thread.post(chunk);
+              try {
+                await thread.post(chunk);
+              } catch (plainErr) {
+                console.error(`[roundhouse] plain text post also failed:`, (plainErr as Error).message);
+              }
             }
           }
         }
         // No fallback message — tool-only turns legitimately produce no text.
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
+        const safeMsg = errMsg.split('\n')[0].slice(0, 200);
         console.error(`[roundhouse] agent error:`, err);
         try {
-          await thread.post(`⚠️ Error: ${errMsg}`);
+          await thread.post(`⚠️ Error: ${safeMsg}`);
         } catch {}
       } finally {
         stopTyping();
