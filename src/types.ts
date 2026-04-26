@@ -31,6 +31,9 @@ export interface AgentAdapter {
   /** Dispose the session for a thread and start fresh on next prompt */
   restart?(threadId: string): Promise<void>;
 
+  /** Compact the session context for a thread */
+  compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
+
   /** Return runtime info about the agent (model, version, etc.) */
   getInfo?(threadId?: string): Record<string, unknown>;
 

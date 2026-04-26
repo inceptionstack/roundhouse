@@ -130,6 +130,34 @@ export class Gateway {
         return;
       }
 
+      // Handle /compact command — compact session context
+      if (userText.trim() === "/compact") {
+        const agent = this.router.resolve(thread.id);
+        if (!agent.compact) {
+          await thread.post("⚠️ Compaction not supported for this agent.");
+          return;
+        }
+        console.log(`[roundhouse] /compact for thread=${thread.id}`);
+        await thread.post("📦 Compacting session context...");
+        const stopTyping = startTypingLoop(thread);
+        try {
+          const result = await agent.compact(thread.id);
+          if (!result) {
+            await thread.post("⚠️ No active session to compact. Send a message first.");
+          } else {
+            const beforeK = (result.tokensBefore / 1000).toFixed(1);
+            const afterStr = result.tokensAfter !== null ? `${(result.tokensAfter / 1000).toFixed(1)}K` : "unknown";
+            await thread.post(`✅ Compaction complete\n\nBefore: ${beforeK}K tokens\nAfter: ${afterStr} tokens`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await thread.post(`⚠️ Compaction failed: ${msg.slice(0, 200)}`);
+        } finally {
+          stopTyping();
+        }
+        return;
+      }
+
       // Handle /status command — show gateway details
       if (userText.trim() === "/status") {
         const agent = this.router.resolve(thread.id);
@@ -438,6 +466,7 @@ export class Gateway {
 
     const commands = [
       { command: "new", description: "Start a fresh conversation" },
+      { command: "compact", description: "Compact session context to free up tokens" },
       { command: "restart", description: "Restart the gateway service" },
       { command: "status", description: "Show gateway status" },
     ];

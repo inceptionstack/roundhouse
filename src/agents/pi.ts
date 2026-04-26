@@ -370,6 +370,20 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
+    async compact(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+      return enqueue(threadId, async () => {
+        const entry = sessions.get(threadId);
+        if (!entry) return null;
+
+        const result = await entry.session.compact();
+        const usage = entry.session.getContextUsage();
+        return {
+          tokensBefore: result.tokensBefore,
+          tokensAfter: usage?.tokens ?? null,
+        };
+      });
+    },
+
     getInfo(threadId?: string): Record<string, unknown> {
       // Get model from the requested thread's session, or most recently used
       let modelInfo: string | undefined;
