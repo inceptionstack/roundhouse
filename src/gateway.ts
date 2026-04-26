@@ -19,10 +19,6 @@ const ROUNDHOUSE_VERSION: string = (() => {
   try { return JSON.parse(readFileSync(join(__gatewayDir, "..", "package.json"), "utf8")).version; }
   catch { return "unknown"; }
 })();
-const PI_VERSION: string = (() => {
-  try { return JSON.parse(readFileSync(join(__gatewayDir, "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json"), "utf8")).version; }
-  catch { return "unknown"; }
-})();
 
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
@@ -146,18 +142,19 @@ export class Gateway {
         const nodeVer = process.version;
         const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
 
+        const info = agent.getInfo ? agent.getInfo() : {};
+        const agentVersion = info.version ? `v${info.version}` : "";
+        const agentLabel = agentVersion ? `\`${agent.name}\` (${agentVersion})` : `\`${agent.name}\``;
+
         const lines = [
           `📊 *Roundhouse Status*`,
           ``,
           `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`,
-          `🤖 Agent: \`${agent.name}\` (v${PI_VERSION})`,
+          `🤖 Agent: ${agentLabel}`,
         ];
 
-        if (agent.getInfo) {
-          const info = agent.getInfo();
-          if (info.model) lines.push(`🧠 Model: \`${info.model}\``);
-          if (info.activeSessions !== undefined) lines.push(`💬 Active sessions: ${info.activeSessions}`);
-        }
+        if (info.model) lines.push(`🧠 Model: \`${info.model}\``);
+        if (info.activeSessions !== undefined) lines.push(`💬 Active sessions: ${info.activeSessions}`);
 
         lines.push(
           `🌐 Platforms: ${platforms}`,

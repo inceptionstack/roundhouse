@@ -6,10 +6,13 @@
  *   ~/.pi/agent/gateway-sessions/<thread_id>/<session>.jsonl
  */
 
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+const __piAdapterDir = dirname(fileURLToPath(import.meta.url));
 
 import {
   AuthStorage,
@@ -381,7 +384,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         }
       }
 
+      // Read agent version
+      let version = "unknown";
+      try {
+        const piPkgPath = join(__piAdapterDir, "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
+        version = JSON.parse(readFileSync(piPkgPath, "utf8")).version;
+      } catch {}
+
       return {
+        version,
         model: modelInfo ?? "unknown",
         activeSessions: sessions.size,
         cwd,

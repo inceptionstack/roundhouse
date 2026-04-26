@@ -20,6 +20,7 @@ import {
   fileExists,
   loadConfig,
 } from "../config";
+import { getAgentSdkPackage } from "../agents/registry";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -235,17 +236,21 @@ async function cmdStatus() {
 
   // Read versions
   let roundhouseVersion = "unknown";
-  let piVersion = "unknown";
+  let agentVersion = "unknown";
   try {
     const pkgPath = resolve(__dirname, "..", "..", "package.json");
     const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
     roundhouseVersion = pkg.version;
   } catch {}
-  try {
-    const piPkgPath = resolve(__dirname, "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
-    const piPkg = JSON.parse(await readFile(piPkgPath, "utf8"));
-    piVersion = piPkg.version;
-  } catch {}
+
+  // Resolve agent SDK version from registry
+  const agentPkg = config ? getAgentSdkPackage(config.agent.type) : undefined;
+  if (agentPkg) {
+    try {
+      const agentPkgPath = resolve(__dirname, "..", "..", "node_modules", ...agentPkg.split("/"), "package.json");
+      agentVersion = JSON.parse(await readFile(agentPkgPath, "utf8")).version;
+    } catch {}
+  }
 
   console.log("\n  🟢 Roundhouse is running\n");
   console.log(`  Version:        v${roundhouseVersion}`);
@@ -257,7 +262,7 @@ async function cmdStatus() {
   if (config) {
     const platforms = Object.keys(config.chat.adapters).join(", ");
     const allowedCount = config.chat.allowedUsers?.length ?? 0;
-    console.log(`  Agent:          ${config.agent.type} (v${piVersion})`);
+    console.log(`  Agent:          ${config.agent.type} (v${agentVersion})`);
     console.log(`  Agent CWD:      ${config.agent.cwd ?? process.cwd()}`);
     console.log(`  Platforms:      ${platforms}`);
     console.log(`  Bot:            @${config.chat.botUsername}`);

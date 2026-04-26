@@ -116,6 +116,9 @@ User sends "list files" on Telegram
 interface AgentAdapter {
   name: string;
   prompt(threadId: string, text: string): Promise<AgentResponse>;
+  promptStream?(threadId: string, text: string): AsyncIterable<AgentStreamEvent>;
+  restart?(threadId: string): Promise<void>;
+  getInfo?(): Record<string, unknown>;
   dispose(): Promise<void>;
 }
 
@@ -216,6 +219,7 @@ index.ts
 
 cli/cli.ts
   ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
+  ├── agents/registry.ts (getAgentSdkPackage)
   └── (node:fs, node:child_process for daemon management)
 ```
 

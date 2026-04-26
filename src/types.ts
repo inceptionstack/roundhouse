@@ -30,7 +30,7 @@ export interface AgentAdapter {
   /** Dispose the session for a thread and start fresh on next prompt */
   restart?(threadId: string): Promise<void>;
 
-  /** Return runtime info about the agent (model, etc.) */
+  /** Return runtime info about the agent (model, version, etc.) */
   getInfo?(): Record<string, unknown>;
 
   /** Tear down all sessions */
