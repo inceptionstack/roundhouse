@@ -191,6 +191,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
             try {
               await entry.session.prompt(text);
+              // Process follow-up messages queued by extension agent_end handlers
+              // (e.g. pi-lgtm review results sent via pi.sendMessage with deliverAs: "followUp")
+              while (entry.session.agent.hasQueuedMessages()) {
+                await entry.session.agent.continue();
+              }
             } finally {
               unsub();
               eventQueue.push({ type: "agent_end" });
@@ -250,6 +255,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
     try {
       await entry.session.prompt(text);
+      while (entry.session.agent.hasQueuedMessages()) {
+        await entry.session.agent.continue();
+      }
     } finally {
       unsub();
     }
