@@ -4,12 +4,26 @@
 
 // ── Agent adapter ────────────────────────────────────
 
+/** Events yielded by the streaming prompt interface */
+export type AgentStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_start"; toolName: string; toolCallId: string }
+  | { type: "tool_end"; toolName: string; toolCallId: string; isError: boolean }
+  | { type: "turn_end" }
+  | { type: "agent_end" };
+
 export interface AgentAdapter {
   /** Unique agent name, e.g. "pi", "kiro" */
   name: string;
 
   /** Send a user message and return the full assistant response */
   prompt(threadId: string, text: string): Promise<AgentResponse>;
+
+  /**
+   * Send a user message and stream back events in real time.
+   * Falls back to prompt() if not implemented.
+   */
+  promptStream?(threadId: string, text: string): AsyncIterable<AgentStreamEvent>;
 
   /** Tear down all sessions */
   dispose(): Promise<void>;

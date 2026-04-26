@@ -7,7 +7,7 @@
 
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { AgentRouter, GatewayConfig } from "./types";
+import type { AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
 import { splitMessage, isAllowed, startTypingLoop } from "./util";
 import { hostname } from "node:os";
 
@@ -26,11 +26,23 @@ async function buildChatAdapters(
     });
   }
 
-  // Future:
-  // if (config.slack) { ... }
-  // if (config.discord) { ... }
-
   return adapters;
+}
+
+// ── Tool name formatting ─────────────────────────────
+
+const TOOL_ICONS: Record<string, string> = {
+  bash: "⚡",
+  read: "📖",
+  edit: "✏️",
+  write: "📝",
+  grep: "🔍",
+  find: "🔎",
+  ls: "📂",
+};
+
+function toolIcon(name: string): string {
+  return TOOL_ICONS[name] ?? "🔧";
 }
 
 // ── Gateway ──────────────────────────────────────────
@@ -84,23 +96,15 @@ export class Gateway {
       const stopTyping = startTypingLoop(thread);
 
       try {
-        const reply = await agent.prompt(thread.id, userText);
-        if (reply.text) {
-          for (const chunk of splitMessage(reply.text, 4000)) {
-            try {
-              await thread.post({ markdown: chunk });
-            } catch (postErr) {
-              // Markdown parse failed (e.g. unclosed entities) — retry as plain text
-              console.warn(`[roundhouse] markdown post failed, falling back to plain text:`, (postErr as Error).message);
-              try {
-                await thread.post(chunk);
-              } catch (plainErr) {
-                console.error(`[roundhouse] plain text post also failed:`, (plainErr as Error).message);
-              }
-            }
+        if (agent.promptStream) {
+          await this.handleStreaming(thread, agent.promptStream(thread.id, userText));
+        } else {
+          // Fallback: non-streaming prompt
+          const reply = await agent.prompt(thread.id, userText);
+          if (reply.text) {
+            await this.postWithFallback(thread, reply.text);
           }
         }
-        // No fallback message — tool-only turns legitimately produce no text.
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         const safeMsg = errMsg.split('\n')[0].slice(0, 200);
@@ -135,6 +139,137 @@ export class Gateway {
 
     // ── Startup notification ───────────────────────
     await this.notifyStartup(platforms);
+  }
+
+  /**
+   * Stream agent events to the chat thread.
+   *
+   * Strategy:
+   * - Text deltas are collected per-turn and streamed via thread.handleStream()
+   *   which does post+edit with rate limiting.
+   * - Tool starts/ends are sent as compact status messages.
+   * - Turn boundaries trigger a new message for the next turn's text.
+   */
+  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>) {
+    let textBuffer = "";
+    let textResolve: ((value: IteratorResult<string>) => void) | null = null;
+    let streamingDone = false;
+    let activeTools = new Map<string, string>(); // toolCallId -> toolName
+    let streamPromise: Promise<void> | null = null;
+
+    // Create an async iterable of text chunks that thread.handleStream() consumes
+    const textStream: AsyncIterable<string> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<string>> {
+            if (textBuffer) {
+              const chunk = textBuffer;
+              textBuffer = "";
+              return { value: chunk, done: false };
+            }
+            if (streamingDone) {
+              return { value: undefined as any, done: true };
+            }
+            return new Promise((resolve) => {
+              textResolve = resolve;
+            });
+          },
+        };
+      },
+    };
+
+    const flushTextStream = async () => {
+      streamingDone = true;
+      textResolve?.({ value: undefined as any, done: true });
+      if (streamPromise) {
+        try {
+          await streamPromise;
+        } catch (err) {
+          console.warn(`[roundhouse] stream flush error:`, (err as Error).message);
+        }
+      }
+    };
+
+    const startNewTextStream = () => {
+      textBuffer = "";
+      streamingDone = false;
+      textResolve = null;
+      streamPromise = thread.handleStream(textStream).catch((err: Error) => {
+        console.warn(`[roundhouse] handleStream error:`, err.message);
+      });
+    };
+
+    let hasTextInCurrentTurn = false;
+
+    for await (const event of stream) {
+      switch (event.type) {
+        case "text_delta": {
+          if (!streamPromise) {
+            startNewTextStream();
+          }
+          hasTextInCurrentTurn = true;
+
+          if (textResolve) {
+            const r = textResolve;
+            textResolve = null;
+            r({ value: event.text, done: false });
+          } else {
+            textBuffer += event.text;
+          }
+          break;
+        }
+
+        case "tool_start": {
+          activeTools.set(event.toolCallId, event.toolName);
+          // Send a compact tool status message
+          try {
+            await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
+          } catch {}
+          break;
+        }
+
+        case "tool_end": {
+          activeTools.delete(event.toolCallId);
+          break;
+        }
+
+        case "turn_end": {
+          // Flush current text stream before next turn
+          if (hasTextInCurrentTurn) {
+            await flushTextStream();
+            hasTextInCurrentTurn = false;
+          }
+          break;
+        }
+
+        case "agent_end": {
+          if (hasTextInCurrentTurn) {
+            await flushTextStream();
+          }
+          break;
+        }
+      }
+    }
+
+    // Safety: make sure we flush
+    if (streamPromise && !streamingDone) {
+      await flushTextStream();
+    }
+  }
+
+  /** Post text with markdown, falling back to plain text */
+  private async postWithFallback(thread: any, text: string) {
+    for (const chunk of splitMessage(text, 4000)) {
+      try {
+        await thread.post({ markdown: chunk });
+      } catch {
+        try {
+          await thread.post(chunk);
+        } catch (err) {
+          console.error(`[roundhouse] post failed:`, (err as Error).message);
+        }
+      }
+    }
   }
 
   /**

@@ -19,7 +19,7 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentResponse } from "../types";
+import type { AgentAdapter, AgentAdapterFactory, AgentResponse, AgentStreamEvent } from "../types";
 import { threadIdToDir } from "../util";
 
 interface SessionEntry {
@@ -45,7 +45,6 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   const authStorage = AuthStorage.create();
   const modelRegistry = ModelRegistry.create(authStorage);
   const sessions = new Map<string, SessionEntry>();
-  // Track in-flight session creation to prevent races
   const creating = new Map<string, Promise<SessionEntry>>();
   let reapInterval: ReturnType<typeof setInterval> | undefined;
 
@@ -97,11 +96,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function getOrCreate(threadId: string): Promise<SessionEntry> {
-    // Fast path: already created
     const existing = sessions.get(threadId);
     if (existing) return existing;
 
-    // Prevent concurrent creation for the same threadId
     let pending = creating.get(threadId);
     if (pending) return pending;
 
@@ -123,33 +120,96 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     }
   }
 
-  // Start reaper (unref so it doesn't prevent Node from exiting)
   reapInterval = setInterval(reap, 60_000);
   reapInterval.unref();
 
-  // Per-thread promise chain ensures only one prompt() runs at a time.
-  // Subsequent messages for the same thread wait for prior ones to complete.
-  const threadQueues = new Map<string, Promise<AgentResponse>>();
+  // Per-thread serialization for both prompt() and promptStream()
+  const threadQueues = new Map<string, Promise<any>>();
+
+  function enqueue<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = threadQueues.get(threadId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(fn);
+    threadQueues.set(threadId, current);
+    return current.finally(() => {
+      if (threadQueues.get(threadId) === current) {
+        threadQueues.delete(threadId);
+      }
+    });
+  }
 
   const adapter: AgentAdapter = {
     name: "pi",
 
     async prompt(threadId: string, text: string): Promise<AgentResponse> {
-      // Chain this prompt after any in-flight work for the same thread
-      const previous = threadQueues.get(threadId) ?? Promise.resolve({ text: "" });
-      const current = previous
-        .catch(() => {}) // don't let a prior failure block the chain
-        .then(() => doPrompt(threadId, text));
-      threadQueues.set(threadId, current);
+      return enqueue(threadId, () => doPrompt(threadId, text));
+    },
 
-      try {
-        return await current;
-      } finally {
-        // Clean up if this was the last in the chain
-        if (threadQueues.get(threadId) === current) {
-          threadQueues.delete(threadId);
-        }
-      }
+    promptStream(threadId: string, text: string): AsyncIterable<AgentStreamEvent> {
+      // We need to serialize per-thread. Return an async iterable that
+      // waits for its turn, then streams events from the session.
+      return {
+        [Symbol.asyncIterator]() {
+          let eventQueue: AgentStreamEvent[] = [];
+          let resolve: (() => void) | null = null;
+          let done = false;
+          let error: Error | null = null;
+
+          // Start the prompt in the thread queue
+          const promptDone = enqueue(threadId, async () => {
+            const entry = await getOrCreate(threadId);
+            entry.lastUsed = Date.now();
+
+            const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
+              let streamEvent: AgentStreamEvent | null = null;
+
+              if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+                streamEvent = { type: "text_delta", text: event.assistantMessageEvent.delta };
+              } else if (event.type === "tool_execution_start") {
+                streamEvent = { type: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId };
+              } else if (event.type === "tool_execution_end") {
+                streamEvent = { type: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
+              } else if (event.type === "turn_end") {
+                streamEvent = { type: "turn_end" };
+              }
+
+              if (streamEvent) {
+                eventQueue.push(streamEvent);
+                resolve?.();
+              }
+            });
+
+            try {
+              await entry.session.prompt(text);
+            } finally {
+              unsub();
+              eventQueue.push({ type: "agent_end" });
+              done = true;
+              resolve?.();
+            }
+          });
+
+          promptDone.catch((err) => {
+            error = err instanceof Error ? err : new Error(String(err));
+            done = true;
+            resolve?.();
+          });
+
+          return {
+            async next(): Promise<IteratorResult<AgentStreamEvent>> {
+              while (true) {
+                if (eventQueue.length > 0) {
+                  return { value: eventQueue.shift()!, done: false };
+                }
+                if (error) throw error;
+                if (done) return { value: undefined as any, done: true };
+                // Wait for next event
+                await new Promise<void>((r) => { resolve = r; });
+                resolve = null;
+              }
+            },
+          };
+        },
+      };
     },
 
     async dispose(): Promise<void> {
