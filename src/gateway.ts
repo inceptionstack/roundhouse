@@ -146,8 +146,7 @@ export class Gateway {
             await thread.post("⚠️ No active session to compact. Send a message first.");
           } else {
             const beforeK = (result.tokensBefore / 1000).toFixed(1);
-            const afterStr = result.tokensAfter !== null ? `${(result.tokensAfter / 1000).toFixed(1)}K` : "unknown";
-            await thread.post(`✅ Compaction complete\n\nBefore: ${beforeK}K tokens\nAfter: ${afterStr} tokens`);
+            await thread.post(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
