@@ -351,9 +351,7 @@ export class Gateway {
 
     let hasTextInCurrentTurn = false;
     let eventCount = 0;
-    let drainingTimer: ReturnType<typeof setTimeout> | null = null;
     let drainingNotified = false;
-    let drainingPostPromise: Promise<void> | null = null;
 
     for await (const event of stream) {
       if (DEBUG_STREAM) {
@@ -409,13 +407,10 @@ export class Gateway {
             await flushCurrentStream();
             hasTextInCurrentTurn = false;
           }
-          // Delay the notification — only show if drain takes more than 2s.
-          // Fast drains (no extension follow-ups) won't bother the user.
-          drainingTimer = setTimeout(() => {
-            drainingTimer = null;
+          try {
+            await thread.post("⏳ Hold on — waiting for follow-up messages...");
             drainingNotified = true;
-            drainingPostPromise = thread.post("⏳ Hold on — waiting for follow-up messages...").catch(() => {});
-          }, 2000);
+          } catch {}
           break;
         }
 
@@ -424,17 +419,6 @@ export class Gateway {
             await flushCurrentStream();
             hasTextInCurrentTurn = false;
           }
-          // Cancel the timer if drain finished before it fired
-          if (drainingTimer) {
-            clearTimeout(drainingTimer);
-            drainingTimer = null;
-          }
-          // Wait for in-flight "hold on" post to complete before posting "all done"
-          if (drainingPostPromise) {
-            await drainingPostPromise;
-            drainingPostPromise = null;
-          }
-          // Only post "all done" if the user saw the "hold on" message
           if (drainingNotified) {
             try {
               await thread.post("✅ All done — waiting for your input.");
@@ -453,12 +437,9 @@ export class Gateway {
       }
     }
 
-    // Safety: make sure we flush and clean up
+    // Safety: make sure we flush
     if (currentPromise) {
       await flushCurrentStream();
-    }
-    if (drainingTimer) {
-      clearTimeout(drainingTimer);
     }
   }
 
