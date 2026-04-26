@@ -74,6 +74,19 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       modelRegistry,
     });
 
+    if (result.extensionsResult.extensions.length > 0) {
+      console.log(
+        `[pi-agent] extensions loaded: ${result.extensionsResult.extensions.map((e: any) => e.name || e.path).join(", ")}`
+      );
+    } else {
+      console.log(`[pi-agent] no extensions loaded`);
+    }
+    if (result.extensionsResult.errors.length > 0) {
+      for (const err of result.extensionsResult.errors) {
+        console.warn(`[pi-agent] extension error: ${err.path}: ${err.error}`);
+      }
+    }
+
     if (result.modelFallbackMessage) {
       console.log(`[pi-agent] model fallback: ${result.modelFallbackMessage}`);
     }
