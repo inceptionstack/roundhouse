@@ -34,6 +34,9 @@ export interface AgentAdapter {
   /** Compact the session context for a thread */
   compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
 
+  /** Abort the current agent run for a thread */
+  abort?(threadId: string): Promise<void>;
+
   /** Return runtime info about the agent (model, version, etc.) */
   getInfo?(threadId?: string): Record<string, unknown>;
 

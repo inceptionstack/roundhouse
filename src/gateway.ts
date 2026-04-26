@@ -133,19 +133,16 @@ export class Gateway {
         return;
       }
 
-      // Handle /stop command — graceful shutdown without restart
+      // Handle /stop command — abort current agent run
       if (userText.trim() === "/stop") {
-        if (allowedUsers.length === 0) {
-          await thread.post("⚠️ /stop requires an allowedUsers list to be configured.");
+        const agent = this.router.resolve(thread.id);
+        if (!agent.abort) {
+          await thread.post("⚠️ Abort not supported for this agent.");
           return;
         }
-        console.log(`[roundhouse] /stop requested by @${authorName} in thread=${thread.id}`);
-        await thread.post("🛑 Shutting down gateway...");
-        setTimeout(async () => {
-          console.log("[roundhouse] shutting down (stop)");
-          try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
-          process.exit(0); // exit 0 so systemd does NOT restart
-        }, 1000);
+        await agent.abort(thread.id);
+        await thread.post("⏹️ Stopped the current agent run.");
+        console.log(`[roundhouse] /stop for thread=${thread.id}`);
         return;
       }
 
@@ -507,7 +504,7 @@ export class Gateway {
       { command: "new", description: "Start a fresh conversation" },
       { command: "compact", description: "Compact session context to free up tokens" },
       { command: "verbose", description: "Toggle tool status messages" },
-      { command: "stop", description: "Shut down the gateway" },
+      { command: "stop", description: "Stop the current agent run" },
       { command: "restart", description: "Restart the gateway service" },
       { command: "status", description: "Show gateway status" },
     ];

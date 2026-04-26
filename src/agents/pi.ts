@@ -385,6 +385,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
+    async abort(threadId: string): Promise<void> {
+      const entry = sessions.get(threadId);
+      if (entry) {
+        await entry.session.abort();
+        entry.session.abortCompaction();
+        console.log(`[pi-agent] aborted session for ${threadId}`);
+      }
+    },
+
     getInfo(threadId?: string): Record<string, unknown> {
       // Get model from the requested thread's session, or most recently used
       let modelInfo: string | undefined;
