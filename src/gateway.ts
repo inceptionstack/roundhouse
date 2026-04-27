@@ -26,8 +26,19 @@ function isCommand(text: string, cmd: string): boolean {
 function isCommandWithArgs(text: string, cmd: string): boolean {
   return text === cmd || text.startsWith(`${cmd}@`) || text.startsWith(`${cmd} `);
 }
-import { hostname } from "node:os";
+import { hostname, loadavg, totalmem, freemem, cpus } from "node:os";
 import { homedir } from "node:os";
+
+/** Get system resource info */
+function getSystemResources() {
+  const load1 = loadavg()[0];
+  const cpuCount = cpus().length;
+  const totalGB = (totalmem() / 1024 / 1024 / 1024).toFixed(1);
+  const usedGB = ((totalmem() - freemem()) / 1024 / 1024 / 1024).toFixed(1);
+  const memPct = Math.round(((totalmem() - freemem()) / totalmem()) * 100);
+  const cpuPct = Math.min(100, Math.round((load1 / cpuCount) * 100));
+  return { load1, cpuCount, totalGB, usedGB, memPct, cpuPct };
+}
 import { readFileSync, mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join, dirname, basename } from "node:path";
@@ -370,6 +381,14 @@ export class Gateway {
         const allowedCount = allowedUsers.length;
         lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);
 
+        // System resources
+        const sys = getSystemResources();
+        lines.push(``);
+        lines.push(`🖥 *System*`);
+        lines.push(`   CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`);
+        lines.push(`   RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`);
+        lines.push(`   Process: ${memMB} MB RSS`);
+
         // Context usage with progress bar
         if (typeof info.contextTokens === "number" && typeof info.contextWindow === "number" && info.contextWindow > 0) {
           const pct = Math.min(100, Math.round((info.contextTokens as number) / (info.contextWindow as number) * 100));
@@ -617,18 +636,22 @@ export class Gateway {
     const platforms = Object.keys(this.config.chat.adapters).join(", ");
     console.log(`[roundhouse] gateway ready (platforms: ${platforms})`);
 
-    // ── Register bot commands & send startup notification ───
+    // ── Register bot commands ───
     await this.registerBotCommands();
-    await this.notifyStartup(platforms);
 
-    // Start cron scheduler
+    // Start cron scheduler (await so job counts are available for startup notification)
     this.cronScheduler = new CronSchedulerService({
       agentConfig: this.config.agent,
       notifyChatIds: this.config.chat.notifyChatIds,
     });
-    void this.cronScheduler.start().catch((err) => {
+    try {
+      await this.cronScheduler.start();
+    } catch (err) {
       console.error("[roundhouse] cron scheduler start failed:", (err as Error).message);
-    });
+    }
+
+    // Send startup notification (after cron init so we can include job counts)
+    await this.notifyStartup(platforms);
   }
 
   /**
@@ -879,11 +902,46 @@ export class Gateway {
       return;
     }
 
-    const uptime = process.uptime();
+    const bootTime = process.uptime();
     const host = hostname();
     const agentName = this.config.agent.type;
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
-    const text = `\u2705 Roundhouse is online\n\nHost: ${host}\nPlatforms: ${platforms}\nAgent: ${agentName}\nStarted: ${now}\nBoot time: ${uptime.toFixed(1)}s`;
+    const nodeVer = process.version;
+    const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
+    const sys = getSystemResources();
+
+    // Get agent info if available (use first resolve — SingleAgentRouter always returns same agent)
+    let agentInfo = "";
+    try {
+      const info = this.router.resolve("status").getInfo?.() ?? {};
+      if (info.version) agentInfo += ` v${info.version}`;
+      if (info.model) agentInfo += `\nModel: ${info.model}`;
+    } catch {}
+
+    // Cron info
+    let cronInfo: string | null = null;
+    if (this.cronScheduler) {
+      const cs = this.cronScheduler.getStatus();
+      cronInfo = `Cron jobs: ${cs.enabledCount}/${cs.jobCount} enabled`;
+    }
+
+    const text = [
+      `\u2705 Roundhouse is online`,
+      ``,
+      `Host: ${host}`,
+      `Platforms: ${platforms}`,
+      `Agent: ${agentName}${agentInfo}`,
+      `Roundhouse: v${ROUNDHOUSE_VERSION}`,
+      `Node: ${nodeVer}`,
+      `Started: ${now}`,
+      `Boot time: ${bootTime.toFixed(1)}s`,
+      cronInfo,
+      ``,
+      `System:`,
+      `  CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`,
+      `  RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`,
+      `  Process: ${memMB} MB RSS`,
+    ].filter(line => line != null).join("\n");
 
     await sendTelegramToMany(chatIds, text);
   }
