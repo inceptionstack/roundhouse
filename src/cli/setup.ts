@@ -181,7 +181,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
   }
 
   // Validate
-  if (!opts.botToken) {
+  if (!opts.botToken && !opts.dryRun) {
     throw new Error(
       "Bot token required. Provide via:\n" +
       "  TELEGRAM_BOT_TOKEN=... roundhouse setup --user USERNAME\n" +
