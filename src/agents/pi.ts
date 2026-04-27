@@ -50,6 +50,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   const modelRegistry = ModelRegistry.create(authStorage);
   const sessions = new Map<string, SessionEntry>();
   const creating = new Map<string, Promise<SessionEntry>>();
+  let memoryCapabilities: { hasMemoryExtension: boolean; memoryTools: string[]; extensions: string[] } | undefined;
   let reapInterval: ReturnType<typeof setInterval> | undefined;
 
   async function drainSessionEvents(session: AgentSession): Promise<void> {
@@ -201,6 +202,30 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
     const entry: SessionEntry = { session: result.session, lastUsed: Date.now() };
     sessions.set(threadId, entry);
+
+    // Detect memory capabilities from loaded extensions (first session only)
+    if (!memoryCapabilities) {
+      const allTools = new Set<string>();
+      const extNames: string[] = [];
+      for (const ext of result.extensionsResult.extensions) {
+        extNames.push(ext.sourceInfo?.source || ext.path);
+        for (const toolName of ext.tools.keys()) {
+          allTools.add(toolName);
+        }
+      }
+      memoryCapabilities = {
+        hasMemoryExtension: allTools.has("memory_search") || allTools.has("memory_remember"),
+        memoryTools: ["memory_search", "memory_remember", "memory_forget", "memory_lessons", "memory_stats"]
+          .filter(t => allTools.has(t)),
+        extensions: extNames,
+      };
+      if (memoryCapabilities.hasMemoryExtension) {
+        console.log(`[pi-agent] memory extension detected (tools: ${memoryCapabilities.memoryTools.join(", ")})`);
+      } else {
+        console.log(`[pi-agent] no memory extension detected — roundhouse memory will manage`);
+      }
+    }
+
     return entry;
   }
 
@@ -416,6 +441,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           sessions.delete(threadId);
           console.log(`[pi-agent] disposed session for ${threadId}`);
         }
+        memoryCapabilities = undefined; // re-detect on next session creation
         // Next prompt() or promptStream() call will create a fresh session
       });
     },
@@ -495,6 +521,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         contextTokens: contextUsage?.tokens ?? null,
         contextWindow: contextUsage?.contextWindow ?? null,
         contextPercent: contextUsage?.percent ?? null,
+        hasMemoryExtension: memoryCapabilities?.hasMemoryExtension ?? null,
+        memoryTools: memoryCapabilities?.memoryTools ?? [],
+        extensions: memoryCapabilities?.extensions ?? [],
       };
     },
   };
