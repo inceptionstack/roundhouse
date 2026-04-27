@@ -1,130 +1,178 @@
 # Roundhouse Plan
 
-## Pending Design Decisions & TODOs
+## Priority Order
+1. Config migration (~/.config/roundhouse/ → ~/.roundhouse/)
+2. Cron system (internal scheduler)
+3. Heartbeat / health endpoint
 
-### Config Directory Migration (HIGH PRIORITY — do before cron)
-**Decision: Migrate from `~/.config/roundhouse/` to `~/.roundhouse/`**
+---
 
-Rationale: Currently split — config in `~/.config/roundhouse/`, runtime in `~/.roundhouse/`. Consolidate to `~/.roundhouse/` like `~/.pi/`, `~/.docker/`, `~/.aws/`.
+## 1. Config Directory Migration
+
+**From:** `~/.config/roundhouse/` → **To:** `~/.roundhouse/`
 
 New layout:
 ```
 ~/.roundhouse/
-  gateway.config.json     # gateway config
-  env                     # secrets (0600)
-  crons/                  # cron job definitions
-  cron-runs/              # cron execution history
-  incoming/               # attachment storage (already here)
-  whisper-tmp/            # STT temp (already here)
+  gateway.config.json
+  env
+  crons/              # job definitions
+  cron-state/         # mutable scheduler state
+  cron-runs/          # run history
+  incoming/           # attachment storage (already here)
+  whisper-tmp/        # STT temp (already here)
 ```
 
-Migration:
-- New canonical root: `~/.roundhouse/`
-- On startup: check new path first, fall back to `~/.config/roundhouse/` with deprecation warning
+Migration strategy:
+- New canonical: `~/.roundhouse/`
+- Fallback read from `~/.config/roundhouse/` with deprecation warning
 - `roundhouse install` writes to new path
-- `roundhouse doctor` checks for stale old-path configs
+- Doctor check for stale old-path configs
 
-Files to update: `src/config.ts`, `src/cli/cli.ts` (install), `src/cli/doctor/checks/config.ts`, `src/gateway.ts` (env file path), `architecture.md`, `README.md`.
+Files to update: config.ts, cli.ts (install), doctor checks, gateway.ts, README.md, architecture.md
 
-### Cron System (NEXT — after config migration)
-**Decision: Internal scheduler with persistence (cross-platform)**
+---
 
-Architecture:
+## 2. Cron System — Internal Scheduler (Cross-Platform)
+
+### Architecture
 ```
-Gateway starts
-  → Load jobs from ~/.roundhouse/crons/
-  → Catch up any missed jobs (compare lastRunAt vs schedule)
-  → setInterval(tick, 60_000)  // check every minute
-  → tick():
-      - Which jobs are due? (timezone-aware)
-      - Acquire per-job locks (in-memory)
-      - Execute due jobs (fresh agent session per run)
-      - Save results to ~/.roundhouse/cron-runs/
-      - Notify Telegram/chat targets
-      - Update lastRunAt in job state
-```
-
-Why internal, not OS cron:
-- Cross-platform: works on Linux, macOS, Windows
-- No OS-specific adapters (crontab, launchd, Task Scheduler)
-- Simpler: no env setup, no lock files, no crontab management
-- Catch-up on restart handles missed jobs
-- Gateway is always-on (systemd/launchd restarts on crash)
-
-CLI `roundhouse cron trigger <id>` still works for manual runs.
-
-#### CLI Commands
-```
-roundhouse cron add <id> [flags]    # create job + install tick crontab
-roundhouse cron list                # list all jobs
-roundhouse cron show <id>           # show job details + last run
-roundhouse cron run <id>            # trigger now
-roundhouse cron runs <id>           # show run history
-roundhouse cron edit <id> [flags]   # modify job
-roundhouse cron pause <id>          # disable without removing
-roundhouse cron resume <id>         # re-enable
-roundhouse cron delete <id>         # remove job + clean crontab if last
-roundhouse cron tick                # called by crontab every minute
+Gateway process
+  → CronSchedulerService (started after chat init)
+      → setInterval tick every 60s
+      → Load/hot-reload jobs from ~/.roundhouse/crons/*.json
+      → Check which are due (timezone-aware via croner)
+      → Execute: fresh agent per run, dispose after
+      → Save results to ~/.roundhouse/cron-runs/
+      → Notify Telegram directly
+      → Catch-up missed jobs on startup
 ```
 
-#### Schedule Types
-```
---cron "0 8 * * *" --tz "Asia/Jerusalem"    # standard cron expression
---every "6h"                                  # fixed interval
---at "30m"                                    # one-shot (relative)
---at "2026-04-28T08:00:00"                    # one-shot (absolute)
+### Key design decisions
+- **Internal scheduler, not OS cron** — cross-platform (Linux, Mac, Windows)
+- **Fresh agent per run** — not shared with gateway's interactive agent
+- **croner package** — zero-dep cron expression parser with IANA timezone support
+- **Separate job config and state files** — hot reload without losing state
+- **Catch-up: latest only by default** — prevent runaway after long downtime
+
+### Schedule types
+```json
+{ "type": "cron", "cron": "0 8 * * *", "tz": "Asia/Jerusalem" }
+{ "type": "interval", "every": "6h" }
+{ "type": "once", "at": "2026-04-28T08:00:00", "tz": "Asia/Jerusalem" }
+{ "type": "once", "at": "30m" }
 ```
 
-#### Session Modes
-```
---session isolated     # fresh session per run (default)
---session main         # inject into running gateway session
-```
-
-#### Delivery
-```
---announce                              # send result to chat
---channel telegram --to "123456789"     # target
---no-deliver                            # silent (log only)
-```
-
-#### Job Config Format
-Standalone JSON: `~/.roundhouse/crons/<job-id>.json`
-
-#### New Files
-```
-src/cron/types.ts       # job/run types
-src/cron/store.ts       # read/write/list job JSON
-src/cron/schedule.ts    # schedule → due check + crontab line
-src/cron/tick.ts        # the tick runner
-src/cron/trigger.ts     # render prompt, run agent, notify
-src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
+### Job config (standalone JSON per job)
+```json
+{
+  "id": "daily-report",
+  "enabled": true,
+  "createdAt": "2026-04-27T12:00:00.000Z",
+  "updatedAt": "2026-04-27T12:00:00.000Z",
+  "schedule": { "type": "cron", "cron": "0 8 * * *", "tz": "Asia/Jerusalem" },
+  "prompt": "Prepare my daily report for {{date.local}}.",
+  "timeoutMs": 1800000,
+  "catchUp": { "mode": "latest", "maxRuns": 1 },
+  "notify": {
+    "telegram": { "chatIds": ["123456789"], "onlyOn": "always" }
+  }
+}
 ```
 
-#### Telegram Commands
+### Template variables
+```
+{{job.id}}, {{run.id}}, {{run.scheduledAt}}, {{date.iso}}, {{date.local}}, {{vars.name}}
+```
+Unknown vars fail validation at add/edit time. No JS eval.
+
+### CLI commands
+```
+roundhouse cron add <id> --prompt "..." --cron "0 8 * * *" --tz Asia/Jerusalem --telegram 123
+roundhouse cron add <id> --prompt "..." --every 6h
+roundhouse cron add <id> --prompt "..." --at 30m
+roundhouse cron list [--json]
+roundhouse cron show <id>
+roundhouse cron trigger <id>        # works without gateway running
+roundhouse cron runs <id>
+roundhouse cron edit <id> [flags]
+roundhouse cron pause <id>
+roundhouse cron resume <id>
+roundhouse cron delete <id>
+```
+
+### Telegram /crons
 ```
 /crons                  # list all jobs
 /crons show <id>        # job details + last run
-/crons run <id>         # trigger now
-/crons runs <id>        # recent history
-/crons pause <id>       # disable
-/crons resume <id>      # enable
+/crons trigger <id>     # run now
+/crons pause <id>
+/crons resume <id>
 ```
 
-### Heartbeat / Health Endpoint (AFTER cron)
+### Conversational setup
+User says: "set a cron daily 8am Israel time to give me current AWS costs"
+Agent runs:
+```bash
+roundhouse cron add aws-costs \
+  --cron "0 8 * * *" \
+  --tz "Asia/Jerusalem" \
+  --prompt "Check current AWS costs. Summarize MTD spend, yesterday, major services, anomalies." \
+  --telegram "123456789" \
+  --timeout 30m
+```
+
+### New files
+```
+src/cron/types.ts       # CronJobConfig, CronJobState, CronRunRecord, CronSchedule
+src/cron/durations.ts   # parse "6h", "30m", "2d" → ms
+src/cron/template.ts    # {{var}} renderer
+src/cron/schedule.ts    # isDue(), nextRun() using croner
+src/cron/store.ts       # read/write/list job JSON, state, run records
+src/cron/runner.ts      # create fresh agent, render prompt, run, notify
+src/cron/scheduler.ts   # CronSchedulerService: tick, catch-up, hot reload
+src/cron/format.ts      # Telegram formatting for /crons
+src/cli/cron.ts         # CLI cron subcommands
+src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
+```
+
+### Concurrency
+- In-memory `running` map per job ID
+- Default: skip if already running
+- Update lastScheduledAt even for skips (prevent retry every minute)
+
+### Long-running jobs
+- Default timeout: 30 minutes
+- agent.abort(threadId) on timeout
+- Always dispose fresh agent
+- Stale running state detected on restart → mark as abandoned
+
+### Hot reload
+- Poll job files every tick (check mtime)
+- Optional fs.watch as fast path
+- Invalid JSON → keep last valid, expose error in /status
+
+### Security
+- Cron prompts are privileged automation (can run tools)
+- Only allowed users can manage via Telegram
+- Job files mode 0600
+- Audit: createdAt, updatedAt in job config
+- No secrets in job JSON
+
+---
+
+## 3. Heartbeat / Health Endpoint (after cron)
 ```
 src/heartbeat.ts — node:http on 127.0.0.1:8787
-GET /healthz     — liveness (cheap)
+GET /healthz     — liveness (cheap, always fast)
 GET /readyz      — readiness (chat initialized)
-GET /status.json — rich diagnostics + cached doctor summary
+GET /status.json — rich diagnostics + cached doctor + scheduler state
 ```
 
-### TTS (Outgoing Voice) (FUTURE)
-See /tmp/roundhouse-voice-service-design.md and /tmp/roundhouse-voice-unified-design.md
+---
 
-### Internal Maintenance Timers (FUTURE)
-For process-local housekeeping only (NOT called "crons"):
-- Session compaction at threshold
-- Heartbeat interval
-- Cache cleanup
-- Stale session reaping (already exists in pi.ts)
+## 4. Future Items
+- TTS (outgoing voice replies)
+- Internal maintenance timers (session compaction, cache cleanup) — NOT called "crons"
+- Cross-platform session unification
+- Multi-agent routing
