@@ -137,32 +137,21 @@ src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
 ```
 
 ### Concurrency
-**Global:** max 1 concurrent cron run by default (agents share workspace/LLM)
-**Per-job:** in-memory `running` map prevents same job overlapping itself
+**Strictly serial: one cron run at a time, globally.**
 
-When capacity is full:
-- Due jobs enter a bounded queue (default 15min timeout)
-- If still blocked after timeout → mark `missed` with reason
-- Never silently drop — queue, don't skip
-- Coalesce queued duplicates for "latest only" catch-up jobs
+All due jobs enter a FIFO queue and drain one by one. No parallelism ever.
+- Simple promise chain: each job awaits the previous one
+- Same pattern as the gateway's per-thread lock and STT concurrency semaphore
+- No jitter, no concurrency config, no race conditions
+- If a job takes 30 minutes, the next job waits
 
-Deterministic jitter: hash(job.id) → 0-90s offset to smooth overlapping schedules
+This is intentional:
+- Agents share the workspace and filesystem — concurrent bash tools conflict
+- Agents share LLM rate limits and API quotas
+- Memory: one agent session at a time is predictable
+- Users don't need to think about parallelism
 
-Config:
-```json
-{
-  "scheduler": {
-    "maxConcurrentRuns": 1,
-    "queueTimeoutMs": 900000,
-    "jitterWindowMs": 90000
-  }
-}
-```
-
-User visibility:
-- `cron add` warns about overlapping jobs at same time
-- `/crons list` shows: scheduled, queued, running, missed, failed, completed
-- Run history records: scheduled time, actual start, queue duration, skip reason
+Run statuses: scheduled, queued, running, completed, failed, timeout, abandoned
 
 ### Long-running jobs
 - Default timeout: 30 minutes
