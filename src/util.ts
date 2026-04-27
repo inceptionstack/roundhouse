@@ -97,12 +97,20 @@ export function startTypingLoop(
  * Uses a scheme that avoids collisions between different separators.
  */
 export function threadIdToDir(threadId: string): string {
-  // Escape underscores first, then encode special chars:
-  // ":" → "_c", "_" → "_u", everything else → "_x"
+  // Injective filesystem-safe encoding:
+  // "_" → "__", ":" → "_c", other special → "_xNN" (hex code)
   return threadId
-    .replace(/_/g, "_u")    // escape existing underscores first
-    .replace(/:/g, "_c")    // encode colons
-    .replace(/[^a-zA-Z0-9_-]/g, "_x"); // encode everything else
+    .replace(/_/g, "__")    // escape existing underscores first
+    .replace(/:/g, "_c")    // encode colons (common in thread IDs)
+    .replace(/[^a-zA-Z0-9_-]/g, (ch) => `_x${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** Legacy encoding (v0.3.x) for migration fallback */
+export function threadIdToDirLegacy(threadId: string): string {
+  return threadId
+    .replace(/_/g, "_u")
+    .replace(/:/g, "_c")
+    .replace(/[^a-zA-Z0-9_-]/g, "_x");
 }
 
 /**

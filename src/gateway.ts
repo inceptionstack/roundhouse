@@ -22,13 +22,26 @@ import { maxPressure } from "./memory/policy";
 import type { PressureLevel } from "./memory/types";
 
 /** Match a Telegram command, handling optional @botname suffix */
+/** Bot username for command suffix validation (set during gateway init) */
+let _botUsername = "";
+
 function isCommand(text: string, cmd: string): boolean {
-  return text === cmd || text.startsWith(`${cmd}@`);
+  if (text === cmd) return true;
+  if (!text.startsWith(`${cmd}@`)) return false;
+  if (!_botUsername) return false; // no bot name configured, reject suffixed commands
+  const suffix = text.slice(cmd.length + 1).toLowerCase();
+  return suffix === _botUsername.toLowerCase();
 }
 
 /** Match a command that accepts subcommands (e.g. /crons trigger <id>) */
 function isCommandWithArgs(text: string, cmd: string): boolean {
-  return text === cmd || text.startsWith(`${cmd}@`) || text.startsWith(`${cmd} `);
+  if (text === cmd || text.startsWith(`${cmd} `)) return true;
+  if (!text.startsWith(`${cmd}@`)) return false;
+  if (!_botUsername) return false;
+  const rest = text.slice(cmd.length + 1);
+  const spaceIdx = rest.indexOf(" ");
+  const suffix = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
+  return suffix.toLowerCase() === _botUsername.toLowerCase();
 }
 import { hostname, loadavg, totalmem, freemem, cpus } from "node:os";
 import { homedir } from "node:os";
@@ -166,10 +179,25 @@ async function saveAttachments(threadId: string, attachments: any[]): Promise<At
         continue;
       }
 
-      const buf = Buffer.isBuffer(data) ? data
-        : ArrayBuffer.isView(data) ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-        : data instanceof ArrayBuffer ? Buffer.from(data)
-        : Buffer.from(await (data as Blob).arrayBuffer());
+      // Convert to Buffer with size cap to prevent memory exhaustion
+      let buf: Buffer;
+      if (Buffer.isBuffer(data)) {
+        buf = data;
+      } else if (data instanceof Blob) {
+        // Stream blobs with size cap
+        if (data.size > MAX_FILE_SIZE) {
+          skipped.push(`${att.name ?? att.type} (${(data.size / 1024 / 1024).toFixed(1)} MB) exceeds size limit`);
+          continue;
+        }
+        buf = Buffer.from(await data.arrayBuffer());
+      } else if (ArrayBuffer.isView(data)) {
+        buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+      } else if (data instanceof ArrayBuffer) {
+        buf = Buffer.from(data);
+      } else {
+        console.warn(`[roundhouse] unknown attachment data type, skipping: ${att.name ?? att.type}`);
+        continue;
+      }
 
       if (buf.length > MAX_FILE_SIZE) {
         const sizeMB = (buf.length / 1024 / 1024).toFixed(1);
@@ -220,6 +248,7 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
+    _botUsername = config.chat.botUsername || "";
   }
 
   async start() {
@@ -305,8 +334,8 @@ export class Gateway {
       // Handle /restart command — restart the gateway process
       // Only available when an allowlist is configured (all allowed users can restart)
       if (isCommand(userText.trim(), "/restart")) {
-        if (allowedUsers.length === 0) {
-          await thread.post("⚠️ /restart requires an allowedUsers list to be configured.");
+        if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
+          await thread.post("⚠️ /restart requires an allowlist (allowedUsers or allowedUserIds) to be configured.");
           return;
         }
         console.log(`[roundhouse] /restart requested by @${authorName} in thread=${thread.id}`);

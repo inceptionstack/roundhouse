@@ -155,6 +155,13 @@ describe("threadIdToDir", () => {
     expect(unique.size).toBe(inputs.length);
   });
 
+  it("does not collide different special characters", () => {
+    const a = threadIdToDir("telegram/a");
+    const b = threadIdToDir("telegram?a");
+    const c = threadIdToDir("telegram a");
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
   it("produces only filesystem-safe characters", () => {
     const dir = threadIdToDir("weird/path:with spaces&stuff");
     expect(dir).toMatch(/^[a-zA-Z0-9_-]+$/);

@@ -6,7 +6,7 @@
  *   ~/.pi/agent/gateway-sessions/<thread_id>/<session>.jsonl
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -24,7 +24,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types";
-import { DEBUG_STREAM, threadIdToDir } from "../util";
+import { DEBUG_STREAM, threadIdToDir, threadIdToDirLegacy } from "../util";
 
 interface SessionEntry {
   session: AgentSession;
@@ -159,7 +159,21 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function createSession(threadId: string): Promise<SessionEntry> {
-    const threadDir = join(sessionsDir, threadIdToDir(threadId));
+    let dirName = threadIdToDir(threadId);
+    const newPath = join(sessionsDir, dirName);
+    const legacyPath = join(sessionsDir, threadIdToDirLegacy(threadId));
+    // Migrate: if legacy dir exists but new doesn't, use legacy
+    if (dirName !== threadIdToDirLegacy(threadId)) {
+      try {
+        await stat(legacyPath);
+        // Legacy exists — check if new exists
+        try { await stat(newPath); } catch {
+          // New doesn't exist, use legacy to preserve session history
+          dirName = threadIdToDirLegacy(threadId);
+        }
+      } catch { /* legacy doesn't exist either, use new */ }
+    }
+    const threadDir = join(sessionsDir, dirName);
     await mkdir(threadDir, { recursive: true });
 
     let sessionManager: InstanceType<typeof SessionManager>;

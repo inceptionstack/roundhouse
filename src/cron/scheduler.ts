@@ -276,7 +276,10 @@ export class CronSchedulerService {
           // Skip if already queued — don't write state that could race with the runner
           if (this.queuedJobIds.has(job.id)) continue;
 
-          // Update lastScheduledAt to prevent re-queueing next tick
+          // Update lastScheduledAt to prevent re-queueing next tick.
+          // NOTE: If the process crashes between here and run completion, this
+          // occurrence won't be retried on restart. Acceptable for periodic jobs;
+          // critical one-shot jobs should use external orchestration.
           state.lastScheduledAt = dueAt.toISOString();
           await this.store.writeState(state);
 

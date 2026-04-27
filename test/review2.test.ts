@@ -26,9 +26,9 @@ describe("splitMessage — review #2 findings", () => {
 });
 
 describe("threadIdToDir — review #2 findings", () => {
-  it("comment accuracy: encoding uses _c for colon, _u for underscore", () => {
+  it("comment accuracy: encoding uses _c for colon, __ for underscore", () => {
     // Verify the actual encoding matches documented behavior
     expect(threadIdToDir("a:b")).toBe("a_cb");
-    expect(threadIdToDir("a_b")).toBe("a_ub");
+    expect(threadIdToDir("a_b")).toBe("a__b");
   });
 });

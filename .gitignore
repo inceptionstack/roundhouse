@@ -25,3 +25,4 @@ Thumbs.db
 
 # Pi sessions (persisted locally, not in repo)
 gateway-sessions/
+.codex

@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { readdirSync, statSync } from "node:fs";
-import { execSync, spawn } from "node:child_process";
+import { execSync, execFileSync, spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -40,12 +40,16 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
   }
 }
 
-function runSudo(cmd: string): void {
-  execSync(`sudo ${cmd}`, { stdio: "inherit" });
+function runSudo(...args: string[]): void {
+  // Try non-interactive first, fall back to interactive for password prompts
+  const result = spawnSync("sudo", ["-n", ...args], { stdio: "inherit" });
+  if (result.status !== 0) {
+    execFileSync("sudo", args, { stdio: "inherit" });
+  }
 }
 
 function systemctl(verb: string, message?: string): void {
-  runSudo(`systemctl ${verb} ${SERVICE_NAME}`);
+  runSudo("systemctl", verb, SERVICE_NAME);
   if (message) console.log(`  ✅ ${message}`);
 }
 
@@ -151,9 +155,9 @@ WantedBy=multi-user.target
   const tmpDir = await mkdtemp(resolve(tmpdir(), "roundhouse-"));
   const tmpUnit = resolve(tmpDir, `${SERVICE_NAME}.service`);
   await writeFile(tmpUnit, unit, { mode: 0o600 });
-  runSudo(`cp ${tmpUnit} ${SERVICE_PATH}`);
-  runSudo(`rm -rf -- ${tmpDir}`);
-  runSudo("systemctl daemon-reload");
+  runSudo("cp", tmpUnit, SERVICE_PATH);
+  runSudo("rm", "-rf", "--", tmpDir);
+  runSudo("systemctl", "daemon-reload");
   systemctl("enable");
   systemctl("start", "Daemon installed and started.");
 
@@ -174,8 +178,8 @@ async function cmdUninstall() {
   console.log("[roundhouse] Removing systemd daemon...");
   try { systemctl("stop"); } catch {}
   try { systemctl("disable"); } catch {}
-  try { runSudo(`rm -f ${SERVICE_PATH}`); } catch {}
-  runSudo("systemctl daemon-reload");
+  try { runSudo("rm", "-f", SERVICE_PATH); } catch {}
+  runSudo("systemctl", "daemon-reload");
   console.log("  ✅ Daemon removed. Config preserved at:", CONFIG_PATH);
 }
 
