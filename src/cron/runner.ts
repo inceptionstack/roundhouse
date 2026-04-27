@@ -10,6 +10,7 @@ import { sendTelegramToMany } from "../notify/telegram";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";
 import type { CronJobConfig, CronRunRecord } from "./types";
+import { isBuiltinJob, buildCronThreadId, shouldNotify } from "./helpers";
 import { DEFAULT_TIMEOUT_MS, NOTIFY_MAX_RESPONSE_CHARS, NOTIFY_MAX_ERROR_CHARS, CRON_PROMPT_SUFFIX } from "./constants";
 import { runStatusIcon } from "./format";
 import type { GatewayConfig } from "../types";
@@ -27,7 +28,7 @@ export class CronRunner {
   ): Promise<CronRunRecord> {
     const runId = generateRunId();
     const startedAt = new Date();
-    const threadId = `cron:${job.id}:${runId}`;
+    const threadId = buildCronThreadId(job.id, runId);
     const timeoutMs = job.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     // Render prompt
@@ -89,7 +90,8 @@ export class CronRunner {
     };
 
     // Save run + update state (skip entirely for built-in jobs)
-    const isBuiltin = job.id.startsWith("builtin-");
+    const isBuiltin = isBuiltinJob(job.id);
+
     if (!isBuiltin) {
       try {
         await this.store.appendRun(record);
@@ -126,12 +128,7 @@ export class CronRunner {
     const tg = job.notify?.telegram;
     if (!tg?.chatIds?.length) return;
 
-    const shouldNotify =
-      tg.onlyOn === "always" || !tg.onlyOn ||
-      (tg.onlyOn === "success" && record.status === "completed") ||
-      (tg.onlyOn === "failure" && record.status !== "completed");
-
-    if (!shouldNotify) return;
+    if (!shouldNotify(tg.onlyOn, record.status)) return;
 
     const icon = runStatusIcon(record.status);
     const dur = `${(record.durationMs / 1000).toFixed(1)}s`;

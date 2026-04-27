@@ -188,6 +188,8 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/stop` | Stop the current agent run (abort tools, LLM calls, compaction) |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
 | `/doctor` | Run health checks and show system status |
+| `/crons` | Manage scheduled jobs (list, trigger, pause, resume) |
+| `/jobs` | List scheduled jobs (alias for /crons) |
 
 These appear in Telegram's `/` command menu automatically.
 
@@ -322,6 +324,69 @@ Whisper model sizes: `tiny` (fast, English-only reliable), `base`, `small` (reco
 
 Transcripts are always marked `approximate: true` — the agent is instructed to use the raw file if exact wording matters.
 
+## Cron Jobs (Scheduled Tasks)
+
+Roundhouse includes a built-in cron scheduler for running agent prompts on a schedule.
+
+### CLI Commands
+
+```
+roundhouse cron add <id> [flags]    Create a scheduled job
+roundhouse cron list                List all jobs
+roundhouse cron show <id>           Show job details + recent runs
+roundhouse cron trigger <id>        Run a job now
+roundhouse cron runs <id>           Show run history
+roundhouse cron edit <id> [flags]   Modify a job
+roundhouse cron pause <id>          Disable a job
+roundhouse cron resume <id>         Re-enable a job
+roundhouse cron delete <id>         Delete a job
+```
+
+### Schedule Types
+
+```bash
+# Standard cron with timezone
+roundhouse cron add daily-report --cron "0 8 * * *" --tz Asia/Jerusalem --prompt "..."
+
+# Fixed interval
+roundhouse cron add health-check --every 6h --prompt "..."
+
+# One-shot (relative or absolute)
+roundhouse cron add reminder --at 30m --prompt "..."
+roundhouse cron add meeting --at 2026-04-28T14:00:00 --tz Asia/Jerusalem --prompt "..."
+```
+
+### Notifications
+
+Add `--telegram <chatId>` to send results to Telegram:
+
+```bash
+roundhouse cron add aws-costs --cron "0 8 * * *" --tz Asia/Jerusalem \\
+  --prompt "Check current AWS costs and summarize." \\
+  --telegram 123456789
+```
+
+### Telegram Commands
+
+| Command | Description |
+|---------|-------------|
+| `/crons` or `/jobs` | List all scheduled jobs |
+| `/crons trigger <id>` | Run a job now |
+| `/crons pause <id>` | Disable a job |
+| `/crons resume <id>` | Re-enable a job |
+
+### Conversational Setup
+
+Tell the agent: *"set a cron daily 8am Israel time to give me current AWS costs"* — the agent will run `roundhouse cron add` via its bash tool.
+
+### Heartbeat
+
+Edit `~/.roundhouse/HEARTBEAT.md` with recurring tasks. The scheduler reads it every 30 minutes and runs the instructions as an agent prompt. If the file is empty or contains only the default template, no action is taken.
+
+### Config
+
+Job configs stored as JSON in `~/.roundhouse/crons/`. State in `~/.roundhouse/cron-state/`. Run history in `~/.roundhouse/cron-runs/`.
+
 ## Extensions
 
 ### Code review extension
@@ -380,6 +445,9 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/cli/doctor.ts` | CLI doctor command |
 | `src/cli/doctor/runner.ts` | Shared doctor runner (CLI + gateway) |
 | `src/cli/doctor/checks/` | Individual health check modules |
+| `src/cron/` | Cron scheduler, runner, store, schedule, template, format |
+| `src/cron/helpers.ts` | Shared cron constants and utilities |
+| `src/notify/telegram.ts` | Shared Telegram Bot API sender |
 | `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |

@@ -14,6 +14,7 @@ import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 import { ROUNDHOUSE_DIR } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
+import { isBuiltinJob } from "./cron/helpers";
 import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
 
 /** Match a Telegram command, handling optional @botname suffix */
@@ -549,13 +550,13 @@ export class Gateway {
           if (!this.cronScheduler) {
             await thread.post("⚠️ Cron scheduler not running.");
           } else if (sub === "trigger" && id) {
-            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
+            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
             else { await thread.post(`⏳ Triggering ${id}...`); await this.cronScheduler.trigger(id); await thread.post(`✅ ${id} queued.`); }
           } else if (sub === "pause" && id) {
-            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
+            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
             else { await this.cronScheduler.pauseJob(id); await thread.post(`⏸️ ${id} paused.`); }
           } else if (sub === "resume" && id) {
-            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
+            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
             else { await this.cronScheduler.resumeJob(id); await thread.post(`▶️ ${id} resumed.`); }
           } else {
             // Default: list jobs

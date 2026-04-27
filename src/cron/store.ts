@@ -8,6 +8,18 @@ import { randomBytes } from "node:crypto";
 import { CRON_JOBS_DIR, CRON_STATE_DIR, CRON_RUNS_DIR } from "../config";
 import type { CronJobConfig, CronJobState, CronRunRecord } from "./types";
 
+/** Atomic JSON write: write to temp file then rename. Cleans up on failure. */
+async function writeJsonAtomic(path: string, value: unknown, mode = 0o600): Promise<void> {
+  const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { mode });
+    await rename(tmp, path);
+  } catch (err) {
+    try { await unlink(tmp); } catch {}
+    throw err;
+  }
+}
+
 const JOB_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
 export function validateJobId(id: string): void {
@@ -26,8 +38,6 @@ export class CronStore {
     await mkdir(CRON_STATE_DIR, { recursive: true });
     await mkdir(CRON_RUNS_DIR, { recursive: true });
   }
-
-  // ── Jobs ─────────────────────────────────────────
 
   async listJobs(): Promise<CronJobConfig[]> {
     try {
@@ -60,24 +70,18 @@ export class CronStore {
 
   async writeJob(job: CronJobConfig): Promise<void> {
     validateJobId(job.id);
-    const path = join(CRON_JOBS_DIR, `${job.id}.json`);
-    const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-    await writeFile(tmp, JSON.stringify(job, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, path);
+    await writeJsonAtomic(join(CRON_JOBS_DIR, `${job.id}.json`), job);
   }
 
   async deleteJob(id: string): Promise<void> {
     validateJobId(id);
     try { await unlink(join(CRON_JOBS_DIR, `${id}.json`)); } catch {}
     try { await unlink(join(CRON_STATE_DIR, `${id}.json`)); } catch {}
-    // Clean up run history
     try {
       const { rm } = await import("node:fs/promises");
       await rm(join(CRON_RUNS_DIR, id), { recursive: true });
     } catch {}
   }
-
-  // ── State ────────────────────────────────────────
 
   async getState(id: string): Promise<CronJobState> {
     validateJobId(id);
@@ -92,22 +96,14 @@ export class CronStore {
 
   async writeState(state: CronJobState): Promise<void> {
     validateJobId(state.id);
-    const path = join(CRON_STATE_DIR, `${state.id}.json`);
-    const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-    await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, path);
+    await writeJsonAtomic(join(CRON_STATE_DIR, `${state.id}.json`), state);
   }
-
-  // ── Run records ──────────────────────────────────
 
   async appendRun(record: CronRunRecord): Promise<void> {
     validateJobId(record.jobId);
     const dir = join(CRON_RUNS_DIR, record.jobId);
     await mkdir(dir, { recursive: true });
-    const path = join(dir, `${record.id}.json`);
-    const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-    await writeFile(tmp, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, path);
+    await writeJsonAtomic(join(dir, `${record.id}.json`), record);
   }
 
   async listRuns(jobId: string, limit = 10): Promise<CronRunRecord[]> {

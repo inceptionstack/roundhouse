@@ -213,6 +213,7 @@ Secrets (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) are always env vars, never i
    d. chat.initialize() — starts polling / webhooks
    e. registerBotCommands() — register /new, /restart, /status with Telegram
    f. notifyStartup() — send Telegram notification to configured notifyChatIds
+   g. Start CronSchedulerService — loads jobs, catches up missed runs, ticks every 60s
 7. Running. Ctrl+C → gateway.stop() → router.dispose() → agent.dispose()
 ```
 
@@ -268,9 +269,14 @@ cli/cli.ts
   ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
   ├── agents/registry.ts (getAgentSdkPackage)
   ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
+  ├── cli/cron.ts → cron/store.ts, cron/runner.ts, cron/helpers.ts
   └── (node:fs, node:child_process for daemon management)
 
-gateway.ts also imports cli/doctor/runner.ts for /doctor command
+gateway.ts also imports:
+  → cli/doctor/runner.ts for /doctor command
+  → cron/scheduler.ts → cron/runner.ts → cron/store.ts
+  → cron/helpers.ts, cron/format.ts
+  → notify/telegram.ts
 ```
 
 No circular dependencies. `types.ts` and `config.ts` are pure leaf modules.

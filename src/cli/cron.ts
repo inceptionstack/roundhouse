@@ -3,6 +3,7 @@
  */
 
 import { CronStore, validateJobId } from "../cron/store";
+import { isBuiltinJob } from "../cron/helpers";
 import { CronRunner } from "../cron/runner";
 import { validateSchedule } from "../cron/schedule";
 import { validateTemplate } from "../cron/template";
@@ -12,7 +13,7 @@ import { DEFAULT_TIMEOUT_MS, DEFAULT_TIMEZONE, VALID_NOTIFY_ON, DEFAULT_RUNS_LIM
 import { formatSchedule, formatRunCounts, formatJobSummary, formatJobDetail, formatRunLine, runStatusIcon, jobEnabledIcon } from "../cron/format";
 
 function rejectBuiltin(id: string): void {
-  if (id.startsWith("builtin-")) {
+  if (isBuiltinJob(id)) {
     console.error(`Job ID "${id}" is reserved for built-in jobs.`);
     process.exit(1);
   }

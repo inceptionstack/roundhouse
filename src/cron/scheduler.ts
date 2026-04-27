@@ -10,10 +10,12 @@ import { CronStore } from "./store";
 import { CronRunner } from "./runner";
 import { isDue } from "./schedule";
 import type { CronJobConfig, CronJobState } from "./types";
+import { isBuiltinJob, BUILTIN_HEARTBEAT_JOB_ID, HEARTBEAT_FILE_NAME } from "./helpers";
 import { TICK_MS, SHUTDOWN_TIMEOUT_MS, MAX_CATCHUP_ITERATIONS, HEARTBEAT_INTERVAL_MS, HEARTBEAT_DEFAULT_CONTENT } from "./constants";
 import { emptyState } from "./format";
 import type { GatewayConfig } from "../types";
 import { readFile } from "node:fs/promises";
+
 import { join } from "node:path";
 import { ROUNDHOUSE_DIR } from "../config";
 
@@ -135,7 +137,7 @@ export class CronSchedulerService {
         console.error(`[cron] ${job.id} run failed:`, (err as Error).message);
       } finally {
         this.activeJobId = null;
-        if (job.id.startsWith("builtin-")) this.lastHeartbeatAt = Date.now();
+        if (isBuiltinJob(job.id)) this.lastHeartbeatAt = Date.now();
         this.queuedJobIds.delete(job.id);
       }
     }).catch((err) => {
@@ -194,7 +196,7 @@ export class CronSchedulerService {
   /** Read HEARTBEAT.md and check if it has real content */
   private async readHeartbeat(): Promise<string | null> {
     try {
-      const path = join(ROUNDHOUSE_DIR, "HEARTBEAT.md");
+      const path = join(ROUNDHOUSE_DIR, HEARTBEAT_FILE_NAME);
       const content = await readFile(path, "utf8");
       const trimmed = content.trim();
 
@@ -228,7 +230,7 @@ export class CronSchedulerService {
 
     // Create a synthetic job config for the heartbeat
     const heartbeatJob: CronJobConfig = {
-      id: "builtin-heartbeat",
+      id: BUILTIN_HEARTBEAT_JOB_ID,
       enabled: true,
       description: "Built-in heartbeat",
       createdAt: new Date().toISOString(),
