@@ -562,13 +562,28 @@ export class Gateway {
             // Default: list jobs
             const items = await this.cronScheduler.listJobs();
             if (items.length === 0) {
-              await thread.post("No cron jobs configured.");
+              await thread.post("No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`");
             } else {
-              const lines = ["🕓 *Cron Jobs*", ""];
+              const lines = ["🕓 *Scheduled Jobs*", ""];
               for (const { job, state } of items) {
-                lines.push(`${jobEnabledIcon(job.enabled)} *${job.id}*: ${formatSchedule(job.schedule)}`);
-                lines.push(`   ${formatRunCounts(state)}`);
+                const icon = jobEnabledIcon(job.enabled);
+                const sched = formatSchedule(job.schedule);
+                lines.push(`${icon} *${job.id}*`);
+                lines.push(`   📅 ${sched}`);
+                if (job.description) lines.push(`   📝 ${job.description}`);
+                if (state.totalRuns > 0) {
+                  lines.push(`   📊 ${formatRunCounts(state)}`);
+                  if (state.lastFinishedAt) {
+                    const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
+                    const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
+                    lines.push(`   ⏱ Last run: ${agoStr}`);
+                  }
+                } else {
+                  lines.push(`   📊 No runs yet`);
+                }
+                lines.push("");
               }
+              lines.push(`_${items.length} job(s) configured_`);
               await this.postWithFallback(thread, lines.join("\n"));
             }
           }
