@@ -15,7 +15,7 @@ describe("voice/types", () => {
 describe("SttService", () => {
   it("imports without error", async () => {
     const { SttService, DEFAULT_STT_CONFIG } = await import("../src/voice/stt-service");
-    expect(DEFAULT_STT_CONFIG.enabled).toBe(false);
+    expect(DEFAULT_STT_CONFIG.enabled).toBe(true);
     expect(DEFAULT_STT_CONFIG.mode).toBe("on");
     expect(DEFAULT_STT_CONFIG.chain).toContain("whisper");
   });

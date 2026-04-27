@@ -265,9 +265,9 @@ async function getAudioDuration(filePath: string): Promise<number | null> {
 
 /** Default STT config */
 export const DEFAULT_STT_CONFIG: SttConfig = {
-  enabled: false,
+  enabled: true,
   mode: "on",
-  autoInstall: false,
+  autoInstall: true,
   chain: ["whisper"],
   autoTranscribe: {
     voiceMessages: true,

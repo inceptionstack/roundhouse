@@ -193,23 +193,23 @@ export class Gateway {
   async start() {
     const chatAdapters = await buildChatAdapters(this.config.chat.adapters);
 
-    // Initialize STT service (only if explicitly configured)
-    const sttConfig = this.config.voice?.stt;
-    if (sttConfig?.enabled && sttConfig.mode !== "off") {
-      // Deep merge with defaults to handle partial configs
-      const defaultProviders = DEFAULT_STT_CONFIG.providers;
-      const mergedProviders: Record<string, any> = {};
-      for (const key of new Set([...Object.keys(defaultProviders), ...Object.keys(sttConfig.providers ?? {})])) {
-        mergedProviders[key] = { ...defaultProviders[key], ...(sttConfig.providers ?? {})[key] };
-      }
-      const mergedConfig = {
-        ...DEFAULT_STT_CONFIG,
-        ...sttConfig,
-        autoTranscribe: { ...DEFAULT_STT_CONFIG.autoTranscribe, ...sttConfig.autoTranscribe },
-        providers: mergedProviders,
-      };
-      this.sttService = new SttService(mergedConfig);
-      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")}, autoInstall: ${mergedConfig.autoInstall ?? false})`);
+    // Initialize STT service (enabled by default, can be disabled via config)
+    const rawSttConfig = this.config.voice?.stt;
+    // Deep merge with defaults to handle partial configs
+    const defaultProviders = DEFAULT_STT_CONFIG.providers;
+    const mergedProviders: Record<string, any> = {};
+    for (const key of new Set([...Object.keys(defaultProviders), ...Object.keys(rawSttConfig?.providers ?? {})])) {
+      mergedProviders[key] = { ...defaultProviders[key], ...(rawSttConfig?.providers ?? {})[key] };
+    }
+    const sttConfig = {
+      ...DEFAULT_STT_CONFIG,
+      ...rawSttConfig,
+      autoTranscribe: { ...DEFAULT_STT_CONFIG.autoTranscribe, ...rawSttConfig?.autoTranscribe },
+      providers: mergedProviders,
+    };
+    if (sttConfig.enabled && sttConfig.mode !== "off") {
+      this.sttService = new SttService(sttConfig);
+      console.log(`[roundhouse] STT enabled (chain: ${sttConfig.chain.join(" -> ")}, autoInstall: ${sttConfig.autoInstall ?? false})`);
       // Prepare providers in background (install + warm model if needed)
       void this.sttService.prepareInBackground();
     }
