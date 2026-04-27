@@ -140,10 +140,11 @@ src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
 **Strictly serial: one cron run at a time, globally.**
 
 All due jobs enter a FIFO queue and drain one by one. No parallelism ever.
-- Simple promise chain: each job awaits the previous one
-- Same pattern as the gateway's per-thread lock and STT concurrency semaphore
-- No jitter, no concurrency config, no race conditions
+- Use `p-queue` (0 deps, 14M weekly downloads) with `concurrency: 1`
+- Provides: queue.size, queue.pending, pause/resume, events (idle, active, completed, error)
+- Maps naturally to `/crons` status display and `cron pause/resume` commands
 - If a job takes 30 minutes, the next job waits
+- Consider replacing hand-rolled promise chains in gateway (threadLocks) and STT (activeStt) with p-queue later for consistency
 
 This is intentional:
 - Agents share the workspace and filesystem — concurrent bash tools conflict
