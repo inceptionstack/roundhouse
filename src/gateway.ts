@@ -16,7 +16,7 @@ import { ROUNDHOUSE_DIR } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
 import { isBuiltinJob } from "./cron/helpers";
 import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
-import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "./memory/lifecycle";
+import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel } from "./memory/types";
 
@@ -404,6 +404,16 @@ export class Gateway {
         lines.push(`   CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`);
         lines.push(`   RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`);
         lines.push(`   Process: ${memMB} MB RSS`);
+
+        // Memory system mode
+        const memMode = determineMemoryMode(info);
+        const memEnabled = this.config.memory?.enabled !== false;
+        const memLabel = !memEnabled ? "disabled"
+          : memMode === "complement" ? "complement (agent has memory extension)"
+          : memMode === "full" ? "full (roundhouse manages memory)"
+          : "pending detection";
+        lines.push(``);
+        lines.push(`🧠 Memory: ${memLabel}`);
 
         // Context usage with progress bar
         if (typeof info.contextTokens === "number" && typeof info.contextWindow === "number" && info.contextWindow > 0) {
