@@ -410,6 +410,8 @@ Usage:
   roundhouse <command>
 
 Commands:
+  setup               One-command install & configure (also works via npx)
+  pair                Pair Telegram account for notifications
   start               Start the gateway (foreground)
   tui [thread]        Open agent TUI on a gateway session
   install             Install as a systemd daemon (requires sudo)
@@ -438,10 +440,13 @@ Environment:
 
 import { cmdDoctor } from "./doctor";
 import { cmdCron } from "./cron";
+import { cmdSetup, cmdPair } from "./setup";
 
 const command = process.argv[2];
 
 const commands: Record<string, () => void | Promise<void>> = {
+  setup: () => cmdSetup(process.argv.slice(3)),
+  pair: () => cmdPair(process.argv.slice(3)),
   start: cmdStart,
   install: cmdInstall,
   uninstall: cmdUninstall,

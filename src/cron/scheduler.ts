@@ -41,7 +41,7 @@ export class CronSchedulerService {
   private lastHeartbeatAt = 0; // 0 = fires on first tick after startup (intentional catch-up)
   private tickMs: number;
 
-  constructor(private opts?: { tickMs?: number; agentConfig?: GatewayConfig["agent"]; notifyChatIds?: (string | number)[] }) {
+  constructor(private opts?: { tickMs?: number; agentConfig?: GatewayConfig["agent"]; notifyChatIds?: number[] }) {
     this.store = new CronStore();
     this.runner = new CronRunner(this.store, this.opts?.agentConfig);
     this.queue = new PQueue({ concurrency: 1 });

@@ -64,7 +64,7 @@ export function applyEnvOverrides(config: GatewayConfig): GatewayConfig {
         ? process.env.ALLOWED_USERS.split(",").map((u) => u.trim())
         : config.chat.allowedUsers,
       notifyChatIds: process.env.NOTIFY_CHAT_IDS
-        ? process.env.NOTIFY_CHAT_IDS.split(",").map((id) => id.trim())
+        ? process.env.NOTIFY_CHAT_IDS.split(",").map((id) => Number(id.trim())).filter((n) => !isNaN(n))
         : config.chat.notifyChatIds,
     },
   };

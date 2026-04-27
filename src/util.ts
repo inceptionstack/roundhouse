@@ -46,10 +46,19 @@ export function splitMessage(text: string, maxLen: number): string[] {
  */
 export function isAllowed(
   message: { author?: { userName?: string; userId?: string; fullName?: string } },
-  allowedUsers: string[]
+  allowedUsers: string[],
+  allowedUserIds?: number[],
 ): boolean {
-  if (allowedUsers.length === 0) return true;
+  if (allowedUsers.length === 0 && (!allowedUserIds || allowedUserIds.length === 0)) return true;
   const author = message.author ?? {};
+
+  // Check immutable numeric user ID first
+  if (allowedUserIds?.length && author.userId) {
+    const numericId = parseInt(author.userId, 10);
+    if (!isNaN(numericId) && allowedUserIds.includes(numericId)) return true;
+  }
+
+  // Fall back to username check
   const candidates = [author.userName, author.userId]
     .filter(Boolean)
     .map((s) => String(s).toLowerCase());

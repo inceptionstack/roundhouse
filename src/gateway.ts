@@ -16,6 +16,7 @@ import { ROUNDHOUSE_DIR } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
 import { isBuiltinJob } from "./cron/helpers";
 import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
+import { BOT_COMMANDS } from "./commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel } from "./memory/types";
@@ -259,6 +260,7 @@ export class Gateway {
     const allowedUsers = (this.config.chat.allowedUsers ?? []).map((u) =>
       u.toLowerCase()
     );
+    const allowedUserIds = this.config.chat.allowedUserIds ?? [];
 
     // Per-thread verbose toggle (shows tool_start messages)
     const verboseThreads = new Set<string>();
@@ -279,7 +281,7 @@ export class Gateway {
         `[roundhouse] ${thread.id} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
-      if (!isAllowed(message, allowedUsers)) {
+      if (!isAllowed(message, allowedUsers, allowedUserIds)) {
         console.log(`[roundhouse] blocked @${authorName} (not in allowlist)`);
         return;
       }
@@ -573,7 +575,7 @@ export class Gateway {
       // /stop is handled immediately — abort the in-flight agent run
       // without waiting for the current handler to finish
       if (isCommand(text, "/stop")) {
-        if (!isAllowed(message, allowedUsers)) return;
+        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         const agent = this.router.resolve(thread.id);
         if (agent.abort) {
           await agent.abort(thread.id);
@@ -587,7 +589,7 @@ export class Gateway {
       }
       // /verbose is a gateway toggle — runs immediately, no queuing
       if (isCommand(text, "/verbose")) {
-        if (!isAllowed(message, allowedUsers)) return;
+        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         const threadId = thread.id;
         if (verboseThreads.has(threadId)) {
           verboseThreads.delete(threadId);
@@ -601,7 +603,7 @@ export class Gateway {
       }
       // /doctor runs health checks immediately — no agent access needed
       if (isCommand(text, "/doctor")) {
-        if (!isAllowed(message, allowedUsers)) return;
+        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         const stopTyping = startTypingLoop(thread);
         try {
           const results = await runDoctor(await createDoctorContext());
@@ -617,7 +619,7 @@ export class Gateway {
       }
       // /crons manages scheduled jobs
       if (isCommandWithArgs(text, "/crons") || isCommandWithArgs(text, "/jobs")) {
-        if (!isAllowed(message, allowedUsers)) return;
+        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         const stopTyping = startTypingLoop(thread);
         try {
           const parts = text.split(/\s+/).slice(1); // remove /crons
@@ -950,26 +952,14 @@ export class Gateway {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) return;
 
-    const commands = [
-      { command: "new", description: "Start a fresh conversation" },
-      { command: "compact", description: "Compact session context to free up tokens" },
-      { command: "verbose", description: "Toggle tool status messages" },
-      { command: "stop", description: "Stop the current agent run" },
-      { command: "restart", description: "Restart the gateway service" },
-      { command: "status", description: "Show gateway status" },
-      { command: "doctor", description: "Run health checks" },
-      { command: "crons", description: "Manage scheduled jobs" },
-      { command: "jobs", description: "List scheduled jobs" },
-    ];
-
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ commands }),
+        body: JSON.stringify({ commands: BOT_COMMANDS }),
       });
       if (res.ok) {
-        console.log(`[roundhouse] registered ${commands.length} bot commands with Telegram`);
+        console.log(`[roundhouse] registered ${BOT_COMMANDS.length} bot commands with Telegram`);
       } else {
         const body = await res.text().catch(() => "");
         console.warn(`[roundhouse] failed to register bot commands (${res.status}): ${body.slice(0, 200)}`);

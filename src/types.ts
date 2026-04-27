@@ -105,8 +105,10 @@ export interface GatewayConfig {
   chat: {
     botUsername: string;
     allowedUsers?: string[];
+    /** Immutable Telegram user IDs (paired during setup) */
+    allowedUserIds?: number[];
     /** Telegram chat IDs to notify on startup */
-    notifyChatIds?: (string | number)[];
+    notifyChatIds?: number[];
     adapters: {
       telegram?: Record<string, unknown>;
       slack?: Record<string, unknown>;
