@@ -267,7 +267,10 @@ index.ts
 cli/cli.ts
   ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
   ├── agents/registry.ts (getAgentSdkPackage)
+  ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
   └── (node:fs, node:child_process for daemon management)
+
+gateway.ts also imports cli/doctor/runner.ts for /doctor command
 ```
 
 No circular dependencies. `types.ts` and `config.ts` are pure leaf modules.

@@ -9,7 +9,9 @@ import { run, runLoose } from "../shell";
 function redactSecrets(line: string): string {
   return line
     .replace(/\b\d{8,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED:TOKEN]")
-    .replace(/\b(sk-|pk-|key-)[A-Za-z0-9]{20,}\b/g, "[REDACTED:KEY]");
+    .replace(/\b(sk-|pk-|key-|sk-proj-|sk-ant-)[A-Za-z0-9_-]{10,}\b/g, "[REDACTED:KEY]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer [REDACTED]")
+    .replace(/(https?:\/\/)[^:]+:[^@]+@/g, "$1[REDACTED]@");
 }
 
 export const systemdChecks: DoctorCheck[] = [

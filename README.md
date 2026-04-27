@@ -187,6 +187,7 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
 | `/stop` | Stop the current agent run (abort tools, LLM calls, compaction) |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
+| `/doctor` | Run health checks and show system status |
 
 These appear in Telegram's `/` command menu automatically.
 
@@ -376,6 +377,9 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/types.ts` | Core interfaces: `AgentAdapter`, `AgentStreamEvent`, `AgentRouter`, `GatewayConfig` |
 | `src/util.ts` | Pure utilities: `splitMessage`, `isAllowed`, `threadIdToDir`, `startTypingLoop` |
 | `src/cli/cli.ts` | CLI: start, install, tui, update, logs, etc. |
+| `src/cli/doctor.ts` | CLI doctor command |
+| `src/cli/doctor/runner.ts` | Shared doctor runner (CLI + gateway) |
+| `src/cli/doctor/checks/` | Individual health check modules |
 | `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |

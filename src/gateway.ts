@@ -10,6 +10,13 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
+import { runDoctor, formatDoctorTelegram } from "./cli/doctor/runner";
+import { CONFIG_PATH, SERVICE_NAME } from "./config";
+
+/** Match a Telegram command, handling optional @botname suffix */
+function isCommand(text: string, cmd: string): boolean {
+  return text === cmd || text.startsWith(`${cmd}@`);
+}
 import { hostname } from "node:os";
 import { homedir } from "node:os";
 import { readFileSync, mkdirSync } from "node:fs";
@@ -253,11 +260,11 @@ export class Gateway {
         return;
       }
 
-      if (userText === "/start") return;
+      if (isCommand(userText, "/start")) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
       // Handle /new command — dispose current session, start fresh
-      if (userText.trim() === "/new") {
+      if (isCommand(userText.trim(), "/new")) {
         const agent = this.router.resolve(thread.id);
         if (agent.restart) {
           await agent.restart(thread.id);
@@ -271,7 +278,7 @@ export class Gateway {
 
       // Handle /restart command — restart the gateway process
       // Only available when an allowlist is configured (all allowed users can restart)
-      if (userText.trim() === "/restart") {
+      if (isCommand(userText.trim(), "/restart")) {
         if (allowedUsers.length === 0) {
           await thread.post("⚠️ /restart requires an allowedUsers list to be configured.");
           return;
@@ -288,7 +295,7 @@ export class Gateway {
       }
 
       // Handle /compact command — compact session context
-      if (userText.trim() === "/compact") {
+      if (isCommand(userText.trim(), "/compact")) {
         const agent = this.router.resolve(thread.id);
         if (!agent.compact) {
           await thread.post("⚠️ Compaction not supported for this agent.");
@@ -315,7 +322,7 @@ export class Gateway {
       }
 
       // Handle /status command — show gateway details
-      if (userText.trim() === "/status") {
+      if (isCommand(userText.trim(), "/status")) {
         const agent = this.router.resolve(thread.id);
         const uptimeSec = process.uptime();
         const uptimeStr = uptimeSec < 3600
@@ -478,7 +485,7 @@ export class Gateway {
       const text = (message.text ?? "").trim();
       // /stop is handled immediately — abort the in-flight agent run
       // without waiting for the current handler to finish
-      if (text === "/stop") {
+      if (isCommand(text, "/stop")) {
         if (!isAllowed(message, allowedUsers)) return;
         const agent = this.router.resolve(thread.id);
         if (agent.abort) {
@@ -492,7 +499,7 @@ export class Gateway {
         return;
       }
       // /verbose is a gateway toggle — runs immediately, no queuing
-      if (text === "/verbose") {
+      if (isCommand(text, "/verbose")) {
         if (!isAllowed(message, allowedUsers)) return;
         const threadId = thread.id;
         if (verboseThreads.has(threadId)) {
@@ -503,6 +510,32 @@ export class Gateway {
           try { await thread.post("📢 Verbose mode ON — showing tool calls."); } catch {}
         }
         console.log(`[roundhouse] /verbose for thread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
+        return;
+      }
+      // /doctor runs health checks immediately — no agent access needed
+      if (isCommand(text, "/doctor")) {
+        if (!isAllowed(message, allowedUsers)) return;
+        const stopTyping = startTypingLoop(thread);
+        try {
+          const ctx = {
+            fix: false,
+            verbose: false,
+            json: false,
+            configPath: CONFIG_PATH,
+            envFilePath: join(homedir(), ".config", "roundhouse", "env"),
+            serviceName: SERVICE_NAME,
+            now: new Date(),
+            env: process.env,
+          };
+          const results = await runDoctor(ctx);
+          const report = formatDoctorTelegram(results);
+          await this.postWithFallback(thread, report);
+        } catch (err) {
+          try { await thread.post(`⚠️ Doctor failed: ${(err as Error).message}`); } catch {}
+        } finally {
+          stopTyping();
+        }
+        console.log(`[roundhouse] /doctor for thread=${thread.id}`);
         return;
       }
       await handle(thread, message);
@@ -744,6 +777,7 @@ export class Gateway {
       { command: "stop", description: "Stop the current agent run" },
       { command: "restart", description: "Restart the gateway service" },
       { command: "status", description: "Show gateway status" },
+      { command: "doctor", description: "Run health checks" },
     ];
 
     try {
