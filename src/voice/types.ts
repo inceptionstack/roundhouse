@@ -51,6 +51,7 @@ export interface SttProviderConfig {
 export interface SttConfig {
   enabled: boolean;
   mode: "on" | "off";
+  autoInstall?: boolean;
   chain: string[];
   autoTranscribe: {
     voiceMessages: boolean;

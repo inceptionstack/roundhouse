@@ -7,19 +7,19 @@
 
 import type { SttProvider, SttInput, SttConfig, AttachmentTranscript } from "./types";
 import type { MessageAttachment } from "../types";
-import { createWhisperProvider } from "./providers/whisper";
+import { createWhisperProvider, type InstallableWhisperProvider } from "./providers/whisper";
 
 // Provider factory registry
 const PROVIDER_FACTORIES: Record<string, (config: any) => SttProvider> = {
   whisper: createWhisperProvider,
 };
 
-
 export class SttService {
   private providers: SttProvider[] = [];
   private config: SttConfig;
   private initPromise: Promise<void> | null = null;
   private activeStt: Promise<void> = Promise.resolve(); // global concurrency: 1 at a time
+  private installNoticeSent = false;
 
   constructor(config: SttConfig) {
     this.config = config;
@@ -36,7 +36,6 @@ export class SttService {
   }
 
   private async doInit(): Promise<void> {
-
     for (const providerName of this.config.chain) {
       const providerConfig = this.config.providers[providerName];
       if (!providerConfig) {
@@ -45,8 +44,7 @@ export class SttService {
       }
 
       const type = providerConfig.type;
-      let factory = PROVIDER_FACTORIES[type];
-
+      const factory = PROVIDER_FACTORIES[type];
 
       if (!factory) {
         console.warn(`[stt] unknown provider type "${type}", skipping`);
@@ -54,7 +52,12 @@ export class SttService {
       }
 
       try {
-        this.providers.push(factory(providerConfig));
+        // Pass autoInstall from service-level config into provider config
+        const mergedProviderConfig = {
+          ...providerConfig,
+          autoInstall: this.config.autoInstall ?? providerConfig.autoInstall ?? true,
+        };
+        this.providers.push(factory(mergedProviderConfig));
         console.log(`[stt] loaded provider: ${providerName} (${type})`);
       } catch (err) {
         console.warn(`[stt] failed to create provider "${providerName}":`, (err as Error).message);
@@ -63,6 +66,34 @@ export class SttService {
 
     if (this.providers.length === 0) {
       console.warn(`[stt] no providers available — transcription disabled`);
+    }
+  }
+
+  /**
+   * Prepare providers in background (install + warm model).
+   * Called from gateway.start() — non-blocking, never throws.
+   */
+  async prepareInBackground(): Promise<void> {
+    try {
+      await this.ensureInitialized();
+    } catch {
+      return;
+    }
+
+    for (const provider of this.providers) {
+      if ("ensureInstalled" in provider && typeof (provider as any).ensureInstalled === "function") {
+        try {
+          const installable = provider as InstallableWhisperProvider;
+          const ok = await installable.ensureInstalled();
+          if (ok) {
+            console.log(`[stt] ${provider.name} ready (installed + model warmed)`);
+          } else {
+            console.warn(`[stt] ${provider.name} not available after prepare`);
+          }
+        } catch (err) {
+          console.warn(`[stt] ${provider.name} prepare failed:`, (err as Error).message);
+        }
+      }
     }
   }
 
@@ -88,7 +119,11 @@ export class SttService {
    * Try to transcribe an attachment using the provider chain.
    * Returns null on all failures — never throws to callers.
    */
-  async tryTranscribe(attachment: MessageAttachment, languageHint?: string): Promise<AttachmentTranscript | null> {
+  async tryTranscribe(
+    attachment: MessageAttachment,
+    languageHint?: string,
+    notify?: (text: string) => Promise<void>,
+  ): Promise<AttachmentTranscript | null> {
     try {
       await this.ensureInitialized();
     } catch (err) {
@@ -134,6 +169,24 @@ export class SttService {
       for (const provider of this.providers) {
         if (!provider.canTranscribe(input)) continue;
 
+        // Send one-time install notice if provider needs to install
+        if (!this.installNoticeSent && notify) {
+          const installable = provider as InstallableWhisperProvider;
+          if (installable.ensureInstalled) {
+            // Check if install is actually needed (binary not found)
+            try {
+              this.installNoticeSent = true;
+              const isReady = await installable.ensureInstalled();
+              if (!isReady) {
+                await notify("🎤 Voice transcription not available. Install whisper: `pip3 install --user openai-whisper`");
+                continue;
+              }
+            } catch {
+              continue;
+            }
+          }
+        }
+
         try {
           console.log(`[stt] trying ${provider.name} for ${attachment.name}...`);
           const result = await provider.transcribe(input);
@@ -178,12 +231,13 @@ export class SttService {
 export async function enrichAttachmentsWithTranscripts(
   attachments: MessageAttachment[],
   sttService: SttService | null,
+  notify?: (text: string) => Promise<void>,
 ): Promise<void> {
   if (!sttService) return;
 
   for (const att of attachments) {
     try {
-      const transcript = await sttService.tryTranscribe(att);
+      const transcript = await sttService.tryTranscribe(att, undefined, notify);
       if (transcript) {
         att.transcript = transcript;
       }
@@ -195,9 +249,9 @@ export async function enrichAttachmentsWithTranscripts(
 
 /** Get audio duration using ffprobe. Returns null if ffprobe is unavailable. */
 async function getAudioDuration(filePath: string): Promise<number | null> {
-  const { execFile } = await import("node:child_process");
+  const { execFile: exec } = await import("node:child_process");
   return new Promise((resolve) => {
-    execFile(
+    exec(
       "ffprobe",
       ["-i", filePath, "-show_entries", "format=duration", "-v", "quiet", "-of", "csv=p=0"],
       { timeout: 5000 },
@@ -214,6 +268,7 @@ async function getAudioDuration(filePath: string): Promise<number | null> {
 export const DEFAULT_STT_CONFIG: SttConfig = {
   enabled: false,
   mode: "on",
+  autoInstall: true,
   chain: ["whisper"],
   autoTranscribe: {
     voiceMessages: true,

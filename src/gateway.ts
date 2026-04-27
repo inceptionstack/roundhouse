@@ -209,7 +209,9 @@ export class Gateway {
         providers: mergedProviders,
       };
       this.sttService = new SttService(mergedConfig);
-      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")})`);
+      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")}, autoInstall: ${mergedConfig.autoInstall ?? true})`);
+      // Prepare providers in background (install + warm model if needed)
+      void this.sttService.prepareInBackground();
     }
 
     if (Object.keys(chatAdapters).length === 0) {
@@ -420,7 +422,7 @@ export class Gateway {
       // Enrich audio attachments with transcripts (STT) — inside thread lock to prevent stampede
       if (this.sttService && agentMessage.attachments?.length) {
         try {
-          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService);
+          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
           // Update text for voice-only messages after transcription
           if (!agentMessage.text) {
             const transcripts = agentMessage.attachments
