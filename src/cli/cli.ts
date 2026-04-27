@@ -422,6 +422,7 @@ Commands:
   config              Show config path and contents
   doctor [--fix]       Check system health and configuration
                        Options: --fix, --json, --verbose
+  cron <command>       Manage scheduled jobs (add, list, trigger, etc.)
 
 Config:
   ~/.roundhouse/gateway.config.json
@@ -436,6 +437,7 @@ Environment:
 // ── Main ────────────────────────────────────────────
 
 import { cmdDoctor } from "./doctor";
+import { cmdCron } from "./cron";
 
 const command = process.argv[2];
 
@@ -451,6 +453,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   config: cmdConfig,
   tui: cmdTui,
   doctor: () => cmdDoctor(process.argv.slice(3)),
+  cron: () => cmdCron(process.argv.slice(3)),
 };
 
 const fn = command ? commands[command] : undefined;

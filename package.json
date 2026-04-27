@@ -40,6 +40,8 @@
     "@chat-adapter/telegram": "latest",
     "@mariozechner/pi-coding-agent": "latest",
     "chat": "latest",
+    "croner": "^10.0.1",
+    "p-queue": "^9.2.0",
     "tsx": "^4.0.0"
   },
   "devDependencies": {

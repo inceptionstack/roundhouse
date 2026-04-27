@@ -10,12 +10,20 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
+import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 import { ROUNDHOUSE_DIR } from "./config";
+import { CronSchedulerService } from "./cron/scheduler";
+import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
 
 /** Match a Telegram command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
   return text === cmd || text.startsWith(`${cmd}@`);
+}
+
+/** Match a command that accepts subcommands (e.g. /crons trigger <id>) */
+function isCommandWithArgs(text: string, cmd: string): boolean {
+  return text === cmd || text.startsWith(`${cmd}@`) || text.startsWith(`${cmd} `);
 }
 import { hostname } from "node:os";
 import { homedir } from "node:os";
@@ -191,6 +199,7 @@ export class Gateway {
   private router: AgentRouter;
   private config: GatewayConfig;
   private sttService: SttService | null = null;
+  private cronScheduler: CronSchedulerService | null = null;
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -528,6 +537,49 @@ export class Gateway {
         console.log(`[roundhouse] /doctor for thread=${thread.id}`);
         return;
       }
+      // /crons manages scheduled jobs
+      if (isCommandWithArgs(text, "/crons") || isCommandWithArgs(text, "/jobs")) {
+        if (!isAllowed(message, allowedUsers)) return;
+        const stopTyping = startTypingLoop(thread);
+        try {
+          const parts = text.split(/\s+/).slice(1); // remove /crons
+          const sub = parts[0];
+          const id = parts[1];
+
+          if (!this.cronScheduler) {
+            await thread.post("⚠️ Cron scheduler not running.");
+          } else if (sub === "trigger" && id) {
+            await thread.post(`⏳ Triggering ${id}...`);
+            await this.cronScheduler.trigger(id);
+            await thread.post(`✅ ${id} queued.`);
+          } else if (sub === "pause" && id) {
+            await this.cronScheduler.pauseJob(id);
+            await thread.post(`⏸️ ${id} paused.`);
+          } else if (sub === "resume" && id) {
+            await this.cronScheduler.resumeJob(id);
+            await thread.post(`▶️ ${id} resumed.`);
+          } else {
+            // Default: list jobs
+            const items = await this.cronScheduler.listJobs();
+            if (items.length === 0) {
+              await thread.post("No cron jobs configured.");
+            } else {
+              const lines = ["🕓 *Cron Jobs*", ""];
+              for (const { job, state } of items) {
+                lines.push(`${jobEnabledIcon(job.enabled)} *${job.id}*: ${formatSchedule(job.schedule)}`);
+                lines.push(`   ${formatRunCounts(state)}`);
+              }
+              await this.postWithFallback(thread, lines.join("\n"));
+            }
+          }
+        } catch (err) {
+          try { await thread.post(`⚠️ Cron error: ${(err as Error).message}`); } catch {}
+        } finally {
+          stopTyping();
+        }
+        console.log(`[roundhouse] /crons for thread=${thread.id}`);
+        return;
+      }
       await handle(thread, message);
     };
 
@@ -553,6 +605,12 @@ export class Gateway {
     // ── Register bot commands & send startup notification ───
     await this.registerBotCommands();
     await this.notifyStartup(platforms);
+
+    // Start cron scheduler
+    this.cronScheduler = new CronSchedulerService({ agentConfig: this.config.agent });
+    void this.cronScheduler.start().catch((err) => {
+      console.error("[roundhouse] cron scheduler start failed:", (err as Error).message);
+    });
   }
 
   /**
@@ -768,6 +826,8 @@ export class Gateway {
       { command: "restart", description: "Restart the gateway service" },
       { command: "status", description: "Show gateway status" },
       { command: "doctor", description: "Run health checks" },
+      { command: "crons", description: "Manage scheduled jobs" },
+      { command: "jobs", description: "List scheduled jobs" },
     ];
 
     try {
@@ -796,8 +856,7 @@ export class Gateway {
     const chatIds = this.config.chat.notifyChatIds;
     if (!chatIds?.length) return;
 
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) {
+    if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.warn("[roundhouse] notifyChatIds configured but TELEGRAM_BOT_TOKEN not set — skipping startup notification");
       return;
     }
@@ -808,24 +867,13 @@ export class Gateway {
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
     const text = `\u2705 Roundhouse is online\n\nHost: ${host}\nPlatforms: ${platforms}\nAgent: ${agentName}\nStarted: ${now}\nBoot time: ${uptime.toFixed(1)}s`;
 
-    for (const chatId of chatIds) {
-      try {
-        const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text }),
-        });
-        if (!res.ok) {
-          const body = await res.text().catch(() => "");
-          console.warn(`[roundhouse] startup notification to ${chatId} failed (${res.status}): ${body.slice(0, 200)}`);
-        }
-      } catch (err) {
-        console.warn(`[roundhouse] failed to send startup notification to ${chatId}:`, (err as Error).message);
-      }
-    }
+    await sendTelegramToMany(chatIds, text);
   }
 
   async stop() {
+    if (this.cronScheduler) {
+      try { await this.cronScheduler.stop(); } catch (e) { console.warn("[roundhouse] cron stop error:", e); }
+    }
     try { await this.chat?.shutdown(); } catch (e) { console.warn("[roundhouse] chat shutdown error:", e); }
     await this.router.dispose();
     console.log("[roundhouse] stopped");
