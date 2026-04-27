@@ -609,12 +609,23 @@ const commands: Record<string, () => void | Promise<void>> = {
   agent: cmdAgent,
 };
 
-const fn = command ? commands[command] : undefined;
-if (fn) {
-  Promise.resolve(fn()).catch((err) => {
-    console.error(`[roundhouse] ${command} failed:`, err);
-    process.exit(1);
-  });
+if (command === "--version" || command === "-v") {
+  try {
+    const pkg = JSON.parse(
+      await readFile(resolve(__dirname, "..", "..", "package.json"), "utf8")
+    );
+    console.log(pkg.version);
+  } catch {
+    console.log("unknown");
+  }
 } else {
-  printHelp();
+  const fn = command ? commands[command] : undefined;
+  if (fn) {
+    Promise.resolve(fn()).catch((err) => {
+      console.error(`[roundhouse] ${command} failed:`, err);
+      process.exit(1);
+    });
+  } else {
+    printHelp();
+  }
 }
