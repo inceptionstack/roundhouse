@@ -319,8 +319,7 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
   // Roundhouse
   const rhInstalled = whichSync("roundhouse");
   if (rhInstalled && !opts.force) {
-    const ver = execSafe("roundhouse", ["--version"], { silent: true }) || "installed";
-    ok(`@inceptionstack/roundhouse (${ver}, already installed)`);
+    ok(`@inceptionstack/roundhouse (already installed)`);
   } else {
     log("   Installing @inceptionstack/roundhouse...");
     execOrFail("npm", ["install", "-g", "@inceptionstack/roundhouse"], "roundhouse install");
@@ -330,12 +329,35 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
   // Pi agent
   const piInstalled = whichSync("pi");
   if (piInstalled && !opts.force) {
-    const ver = execSafe("pi", ["--version"], { silent: true }) || "installed";
-    ok(`@mariozechner/pi-coding-agent (${ver}, already installed)`);
+    ok(`@mariozechner/pi-coding-agent (already installed)`);
   } else {
     log("   Installing @mariozechner/pi-coding-agent...");
     execOrFail("npm", ["install", "-g", "@mariozechner/pi-coding-agent"], "pi install");
     ok("@mariozechner/pi-coding-agent");
+  }
+
+  // psst-cli (requires bun runtime)
+  if (opts.psst) {
+    // Install bun if not present (psst-cli shebang is #!/usr/bin/env bun)
+    if (!whichSync("bun")) {
+      log("   Installing bun runtime (required by psst)...");
+      try {
+        execFileSync("bash", ["-c", "curl -fsSL https://bun.sh/install | bash"], {
+          encoding: "utf8", stdio: "pipe", timeout: 120_000,
+          env: { ...process.env, HOME: homedir() },
+        });
+        // bun installs to ~/.bun/bin/bun
+        const bunPath = resolve(homedir(), ".bun", "bin");
+        process.env.PATH = `${bunPath}:${process.env.PATH}`;
+        ok("bun runtime");
+      } catch (err: any) {
+        warn(`bun install failed: ${err.message}`);
+        warn("psst requires bun — install manually: curl -fsSL https://bun.sh/install | bash");
+        opts.psst = false;
+      }
+    } else {
+      ok("bun runtime (already installed)");
+    }
   }
 
   // psst-cli
@@ -345,8 +367,19 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
       ok(`psst-cli (already installed)`);
     } else {
       log("   Installing psst-cli...");
-      execOrFail("npm", ["install", "-g", "psst-cli"], "psst-cli install");
-      ok("psst-cli");
+      try {
+        execFileSync("npm", ["install", "-g", "psst-cli"], {
+          encoding: "utf8", stdio: "pipe", timeout: 120_000,
+        });
+      } catch {
+        // npm may exit non-zero due to postinstall warnings — check if binary exists
+      }
+      if (whichSync("psst")) {
+        ok("psst-cli");
+      } else {
+        warn("psst-cli install failed");
+        opts.psst = false;
+      }
     }
 
     // Initialize psst vault
@@ -880,6 +913,7 @@ function printDryRun(opts: SetupOptions): void {
   log(`Would install: npm install -g @inceptionstack/roundhouse`);
   log(`Would install: npm install -g @mariozechner/pi-coding-agent`);
   if (opts.psst) {
+    log(`Would install: bun runtime (if not present)`);
     log(`Would install: npm install -g psst-cli`);
     log(`Would initialize psst vault`);
     log(`Would install: pi-psst extension`);
