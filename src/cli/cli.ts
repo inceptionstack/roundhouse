@@ -414,6 +414,8 @@ Commands:
   stop                Stop the daemon
   restart             Restart the daemon
   config              Show config path and contents
+  doctor [--fix]       Check system health and configuration
+                       Options: --fix, --json, --verbose
 
 Config:
   ~/.config/roundhouse/gateway.config.json
@@ -426,6 +428,8 @@ Environment:
 }
 
 // ── Main ────────────────────────────────────────────
+
+import { cmdDoctor } from "./doctor";
 
 const command = process.argv[2];
 
@@ -440,6 +444,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   restart: cmdRestart,
   config: cmdConfig,
   tui: cmdTui,
+  doctor: () => cmdDoctor(process.argv.slice(3)),
 };
 
 const fn = command ? commands[command] : undefined;
