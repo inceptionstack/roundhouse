@@ -409,8 +409,8 @@ export class Gateway {
         const memMode = determineMemoryMode(info);
         const memEnabled = this.config.memory?.enabled !== false;
         const memLabel = !memEnabled ? "disabled"
-          : memMode === "complement" ? "complement (agent has memory extension)"
-          : memMode === "full" ? "full (roundhouse manages memory)"
+          : memMode === "complement" ? "agent-managed (pi-memory)"
+          : memMode === "full" ? "roundhouse-managed"
           : "pending detection";
         lines.push(``);
         lines.push(`🧠 Memory: ${memLabel}`);
