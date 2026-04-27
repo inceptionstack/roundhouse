@@ -59,8 +59,9 @@ async function cmdStart() {
   if (await fileExists(jsPath)) {
     await import(jsPath);
   } else {
+    const tsxPath = resolve(__dirname, "..", "..", "node_modules", "tsx", "dist", "cli.mjs");
     execSync(
-      `node ${resolve(__dirname, "..", "node_modules", "tsx", "dist", "cli.mjs")} ${indexPath}`,
+      `node ${tsxPath} ${indexPath}`,
       { stdio: "inherit", env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH } },
     );
   }
@@ -111,7 +112,7 @@ async function cmdInstall() {
   // Resolve paths — prefer the installed bin, fall back to tsx + source
   const binPath = run("which roundhouse", { silent: true });
   const nodePath = run("which node", { silent: true }) || process.execPath;
-  const tsxPath = resolve(__dirname, "..", "node_modules", ".bin", "tsx");
+  const tsxPath = resolve(__dirname, "..", "..", "node_modules", ".bin", "tsx");
   const srcIndex = resolve(__dirname, "..", "index.ts");
 
   let execStart: string;
