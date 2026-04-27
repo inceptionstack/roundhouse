@@ -10,8 +10,7 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
-import { runDoctor, formatDoctorTelegram } from "./cli/doctor/runner";
-import { CONFIG_PATH, SERVICE_NAME } from "./config";
+import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 
 /** Match a Telegram command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
@@ -517,17 +516,7 @@ export class Gateway {
         if (!isAllowed(message, allowedUsers)) return;
         const stopTyping = startTypingLoop(thread);
         try {
-          const ctx = {
-            fix: false,
-            verbose: false,
-            json: false,
-            configPath: CONFIG_PATH,
-            envFilePath: join(homedir(), ".config", "roundhouse", "env"),
-            serviceName: SERVICE_NAME,
-            now: new Date(),
-            env: process.env,
-          };
-          const results = await runDoctor(ctx);
+          const results = await runDoctor(createDoctorContext());
           const report = formatDoctorTelegram(results);
           await this.postWithFallback(thread, report);
         } catch (err) {

@@ -2,12 +2,9 @@
  * cli/doctor.ts — roundhouse doctor CLI command
  */
 
-import { join } from "node:path";
-import { homedir } from "node:os";
-import type { DoctorContext, DoctorCategory } from "./doctor/types";
+import type { DoctorCategory } from "./doctor/types";
 import { formatResult, formatSummary, formatCategoryHeader } from "./doctor/output";
-import { runDoctor } from "./doctor/runner";
-import { CONFIG_PATH, SERVICE_NAME } from "../config";
+import { runDoctor, createDoctorContext } from "./doctor/runner";
 
 const CATEGORY_ORDER: DoctorCategory[] = [
   "system", "config", "credentials", "agent", "stt", "disk", "systemd",
@@ -18,16 +15,7 @@ export async function cmdDoctor(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const json = args.includes("--json");
 
-  const ctx: DoctorContext = {
-    fix,
-    verbose,
-    json,
-    configPath: CONFIG_PATH,
-    envFilePath: join(homedir(), ".config", "roundhouse", "env"),
-    serviceName: SERVICE_NAME,
-    now: new Date(),
-    env: process.env,
-  };
+  const ctx = createDoctorContext({ fix, verbose, json });
 
   if (!json) {
     console.log("\nRoundhouse Doctor\n");
@@ -36,7 +24,6 @@ export async function cmdDoctor(args: string[]): Promise<void> {
 
   const results = await runDoctor(ctx);
 
-  // Output
   if (json) {
     const counts = { pass: 0, warn: 0, fail: 0, info: 0, fixed: 0 };
     for (const r of results) {

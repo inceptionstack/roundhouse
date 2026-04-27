@@ -5,6 +5,9 @@
  */
 
 import type { DoctorCheck, DoctorCheckResult, DoctorContext } from "./types";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { CONFIG_PATH, SERVICE_NAME } from "../../config";
 import { systemChecks } from "./checks/system";
 import { configChecks } from "./checks/config";
 import { credentialChecks } from "./checks/credentials";
@@ -12,6 +15,21 @@ import { agentChecks } from "./checks/agent";
 import { systemdChecks } from "./checks/systemd";
 import { diskChecks } from "./checks/disk";
 import { sttChecks } from "./checks/stt";
+
+/** Create a DoctorContext with sensible defaults */
+export function createDoctorContext(overrides: Partial<DoctorContext> = {}): DoctorContext {
+  return {
+    fix: false,
+    verbose: false,
+    json: false,
+    configPath: CONFIG_PATH,
+    envFilePath: join(homedir(), ".config", "roundhouse", "env"),
+    serviceName: SERVICE_NAME,
+    now: new Date(),
+    env: process.env,
+    ...overrides,
+  };
+}
 
 const ALL_CHECKS: DoctorCheck[] = [
   ...systemChecks,
