@@ -26,8 +26,7 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "release": "npm version patch && git push origin main --follow-tags"
+    "test:watch": "vitest"
   },
   "files": [
     "src/",

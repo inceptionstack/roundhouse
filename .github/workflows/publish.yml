@@ -2,8 +2,11 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -20,15 +23,31 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
-      - run: npm publish --provenance --access public
+      - name: Bump version and publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version patch --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+
+          # Publish first — if this fails, we don't commit the bump
+          npm publish --provenance --access public
+
+          # Only commit version bump after successful publish
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "v${VERSION} [skip ci]"
+          git pull --rebase origin main
+          git push
