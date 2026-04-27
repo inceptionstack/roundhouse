@@ -27,18 +27,31 @@ Migration:
 Files to update: `src/config.ts`, `src/cli/cli.ts` (install), `src/cli/doctor/checks/config.ts`, `src/gateway.ts` (env file path), `architecture.md`, `README.md`.
 
 ### Cron System (NEXT — after config migration)
-**Decision: Linux cron triggers `roundhouse cron tick` every minute**
+**Decision: Internal scheduler with persistence (cross-platform)**
 
 Architecture:
 ```
-Linux crontab (single entry)
-  → * * * * * roundhouse cron tick
-      → Load jobs from ~/.roundhouse/crons/
-      → Check which are due (timezone-aware)
-      → Execute due jobs (fresh agent session per run)
-      → Save results to ~/.roundhouse/cron-runs/
-      → Notify Telegram/chat targets
+Gateway starts
+  → Load jobs from ~/.roundhouse/crons/
+  → Catch up any missed jobs (compare lastRunAt vs schedule)
+  → setInterval(tick, 60_000)  // check every minute
+  → tick():
+      - Which jobs are due? (timezone-aware)
+      - Acquire per-job locks (in-memory)
+      - Execute due jobs (fresh agent session per run)
+      - Save results to ~/.roundhouse/cron-runs/
+      - Notify Telegram/chat targets
+      - Update lastRunAt in job state
 ```
+
+Why internal, not OS cron:
+- Cross-platform: works on Linux, macOS, Windows
+- No OS-specific adapters (crontab, launchd, Task Scheduler)
+- Simpler: no env setup, no lock files, no crontab management
+- Catch-up on restart handles missed jobs
+- Gateway is always-on (systemd/launchd restarts on crash)
+
+CLI `roundhouse cron trigger <id>` still works for manual runs.
 
 #### CLI Commands
 ```
