@@ -7,7 +7,7 @@
 
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
+import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { sendTelegramToMany } from "./notify/telegram";
@@ -16,6 +16,9 @@ import { ROUNDHOUSE_DIR } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
 import { isBuiltinJob } from "./cron/helpers";
 import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
+import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "./memory/lifecycle";
+import { maxPressure } from "./memory/policy";
+import type { PressureLevel } from "./memory/types";
 
 /** Match a Telegram command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
@@ -315,7 +318,7 @@ export class Gateway {
         return;
       }
 
-      // Handle /compact command — compact session context
+      // Handle /compact command — flush memory then compact session context
       if (isCommand(userText.trim(), "/compact")) {
         const agent = this.router.resolve(thread.id);
         if (!agent.compact) {
@@ -323,15 +326,28 @@ export class Gateway {
           return;
         }
         console.log(`[roundhouse] /compact for thread=${thread.id}`);
-        await thread.post("📦 Compacting session context...");
+        await thread.post("📝 Saving memory and compacting...");
         const stopTyping = startTypingLoop(thread);
         try {
-          const result = await agent.compact(thread.id);
-          if (!result) {
-            await thread.post("⚠️ No active session to compact. Send a message first.");
+          const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
+          const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
+          // If memory is disabled, compact directly without flush
+          if (this.config.memory?.enabled === false) {
+            const result = await agent.compact(thread.id);
+            if (!result) {
+              await thread.post("⚠️ No active session to compact. Send a message first.");
+            } else {
+              const beforeK = (result.tokensBefore / 1000).toFixed(1);
+              await thread.post(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
+            }
           } else {
-            const beforeK = (result.tokensBefore / 1000).toFixed(1);
-            await thread.post(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
+            const result = await flushMemoryThenCompact(thread.id, agent, memoryRoot, "manual", this.config.memory);
+            if (!result) {
+              await thread.post("⚠️ No active session to compact. Send a message first.");
+            } else {
+              const beforeK = (result.tokensBefore / 1000).toFixed(1);
+              await thread.post(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
+            }
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -431,7 +447,7 @@ export class Gateway {
 
       // Build AgentMessage
       const promptText = userText.trim();
-      const agentMessage: AgentMessage = {
+      let agentMessage: AgentMessage = {
         text: promptText,
         attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
       };
@@ -475,6 +491,17 @@ export class Gateway {
         }
       }
 
+      // ── Memory: pre-turn injection (Full mode only) ───
+      const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
+      const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
+      let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
+      try {
+        memoryPrepared = await prepareMemoryForTurn(thread.id, agentMessage, agent, memoryRoot, this.config.memory);
+        agentMessage = memoryPrepared.message;
+      } catch (err) {
+        console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
+      }
+
       const stopTyping = startTypingLoop(thread);
 
       try {
@@ -492,6 +519,27 @@ export class Gateway {
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }
+        }
+
+        // ── Memory: post-turn finalize + pressure check ───
+        try {
+          const pressure = await finalizeMemoryForTurn(
+            thread.id,
+            memoryPrepared?.beforeDigest ?? null,
+            agent, memoryRoot, this.config.memory,
+          );
+          // Use higher severity between pending compact and current pressure
+          const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
+          if (effectivePressure !== "none") {
+            // Run flush/compact INSIDE the thread lock to prevent race with next user message
+            try {
+              await this.handleContextPressure(thread, agent, memoryRoot, effectivePressure);
+            } catch (err) {
+              console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
+            }
+          }
+        } catch (err) {
+          console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -652,6 +700,39 @@ export class Gateway {
 
     // Send startup notification (after cron init so we can include job counts)
     await this.notifyStartup(platforms);
+  }
+
+  /**
+   * Handle context pressure — flush memory and/or compact.
+   * Runs inside the thread lock after a turn completes.
+   */
+  private async handleContextPressure(thread: any, agent: AgentAdapter, memoryRoot: string, pressure: PressureLevel) {
+    if (pressure === "none") return;
+
+    console.log(`[roundhouse] context pressure: ${pressure} for thread=${thread.id}`);
+
+    if (pressure === "soft") {
+      // Soft: prompt agent to save facts, no compact
+      // Cooldown is checked inside flushMemoryThenCompact (returns null if skipped)
+      try {
+        await flushMemoryThenCompact(thread.id, agent, memoryRoot, "soft", this.config.memory);
+      } catch (err) {
+        console.error(`[roundhouse] soft flush error:`, (err as Error).message);
+      }
+      return;
+    }
+
+    // Hard or emergency: flush + compact
+    try {
+      await thread.post(`📝 ${pressure === "emergency" ? "⚠️ Context nearly full! " : ""}Saving memory and compacting...`);
+      const result = await flushMemoryThenCompact(thread.id, agent, memoryRoot, pressure, this.config.memory);
+      if (result) {
+        const beforeK = (result.tokensBefore / 1000).toFixed(1);
+        await thread.post(`✅ Auto-compacted: ${beforeK}K tokens → summary.`);
+      }
+    } catch (err) {
+      console.error(`[roundhouse] ${pressure} compact error:`, (err as Error).message);
+    }
   }
 
   /**

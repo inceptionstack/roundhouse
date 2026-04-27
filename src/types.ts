@@ -117,4 +117,5 @@ export interface GatewayConfig {
   voice?: {
     stt?: import("./voice/types").SttConfig;
   };
+  memory?: import("./memory/types").MemoryConfig;
 }
