@@ -388,8 +388,30 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
       ok("psst vault exists");
     } else {
       log("   Initializing psst vault...");
-      execOrFail("psst", ["init"], "psst init");
-      ok("psst vault initialized");
+      // On headless servers, no keychain is available — use PSST_PASSWORD
+      const psstEnv = { ...process.env };
+      if (!psstEnv.PSST_PASSWORD) {
+        // Generate a random password and store it for future use
+        const psstPw = randomBytes(32).toString("base64");
+        const pwFile = resolve(ROUNDHOUSE_DIR, ".psst-password");
+        await atomicWriteText(pwFile, psstPw + "\n", 0o600);
+        psstEnv.PSST_PASSWORD = psstPw;
+        // Also set for subsequent psst calls in this process
+        process.env.PSST_PASSWORD = psstPw;
+      }
+      try {
+        execFileSync("psst", ["init"], {
+          encoding: "utf8", stdio: "pipe", timeout: 30_000,
+          env: psstEnv,
+        });
+        ok("psst vault initialized");
+      } catch (err: any) {
+        warn(`psst vault init failed: ${err.stderr?.trim() || err.message}`);
+        // Clean up orphan password file
+        try { await unlink(resolve(ROUNDHOUSE_DIR, ".psst-password")); } catch {}
+        delete process.env.PSST_PASSWORD;
+        opts.psst = false;
+      }
     }
 
     // Install pi-psst extension
@@ -547,6 +569,18 @@ async function stepConfigure(
     envLines.push(`TELEGRAM_BOT_TOKEN=${envQuote(opts.botToken)}`);
     envLines.push(`BOT_USERNAME=${envQuote(botInfo.username)}`);
     envLines.push(`ALLOWED_USERS=${envQuote(opts.users.join(","))}`);
+  }
+
+  // If psst uses a generated password (headless), include it in env for systemd.
+  // Threat model tradeoff: the vault key is plaintext in a 0600 file, but this is
+  // unavoidable on headless servers with no keychain. The benefit is that individual
+  // secrets are still managed centrally via psst and injected at runtime.
+  if (opts.psst) {
+    const pwFile = resolve(ROUNDHOUSE_DIR, ".psst-password");
+    if (await fileExists(pwFile)) {
+      const pw = (await readFile(pwFile, "utf8")).trim();
+      envLines.push(`PSST_PASSWORD=${envQuote(pw)}`);
+    }
   }
 
   if (opts.provider === "amazon-bedrock") {
