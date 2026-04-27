@@ -12,18 +12,28 @@ export const agentChecks: DoctorCheck[] = [
   {
     id: "pi-sdk", category: "agent", name: "Pi SDK",
     async run() {
+      const PI_PKG = join("@mariozechner", "pi-coding-agent", "package.json");
+      const searchPaths = [
+        join(process.cwd(), "node_modules", PI_PKG),
+      ];
+      // Also check global npm root
       try {
-        const pkgPath = join(process.cwd(), "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
-        const raw = await readFile(pkgPath, "utf8");
-        const ver = JSON.parse(raw).version;
-        return { id: "pi-sdk", category: "agent", name: "Pi SDK", status: "pass", summary: `v${ver}` };
-      } catch {
-        return {
-          id: "pi-sdk", category: "agent", name: "Pi SDK", status: "fail", summary: "not found",
+        const { execFileSync } = await import("node:child_process");
+        const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+        searchPaths.push(join(globalRoot, PI_PKG));
+      } catch {}
+      for (const pkgPath of searchPaths) {
+        try {
+          const raw = await readFile(pkgPath, "utf8");
+          const ver = JSON.parse(raw).version;
+          return { id: "pi-sdk", category: "agent", name: "Pi SDK", status: "pass" as const, summary: `v${ver}` };
+        } catch {}
+      }
+      return {
+          id: "pi-sdk", category: "agent", name: "Pi SDK", status: "fail" as const, summary: "not found",
           details: ["@mariozechner/pi-coding-agent not installed"],
           fix: { description: "Install pi SDK", command: "npm install @mariozechner/pi-coding-agent" },
         };
-      }
     },
   },
 

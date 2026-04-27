@@ -451,7 +451,11 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
 }
 
 async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<void> {
-  if (!opts.psst) return;
+  if (!opts.psst) {
+    step("⑥", "Storing secrets...");
+    ok("Skipped (--no-psst)");
+    return;
+  }
 
   step("⑥", "Storing secrets in psst...");
 
