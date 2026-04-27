@@ -10,7 +10,7 @@ import { sendTelegramToMany } from "../notify/telegram";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";
 import type { CronJobConfig, CronRunRecord } from "./types";
-import { DEFAULT_TIMEOUT_MS, NOTIFY_MAX_RESPONSE_CHARS, NOTIFY_MAX_ERROR_CHARS } from "./constants";
+import { DEFAULT_TIMEOUT_MS, NOTIFY_MAX_RESPONSE_CHARS, NOTIFY_MAX_ERROR_CHARS, CRON_PROMPT_SUFFIX } from "./constants";
 import { runStatusIcon } from "./format";
 import type { GatewayConfig } from "../types";
 
@@ -33,7 +33,7 @@ export class CronRunner {
     // Render prompt
     const tz = job.schedule.type === "cron" ? job.schedule.tz : job.schedule.type === "once" ? job.schedule.tz : undefined;
     const ctx = buildTemplateContext(job.id, job.description, runId, scheduledAt, startedAt, tz, process.cwd(), job.vars ?? {});
-    const prompt = renderTemplate(job.prompt, ctx);
+    const prompt = renderTemplate(job.prompt, ctx) + CRON_PROMPT_SUFFIX;
 
     console.log(`[cron] starting ${job.id} [${runId}] kind=${kind}`);
 

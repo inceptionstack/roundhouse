@@ -30,3 +30,8 @@ export const NOTIFY_MAX_ERROR_CHARS = 500;
 /** Valid notify-on values */
 export const VALID_NOTIFY_ON = ["always", "success", "failure"] as const;
 export type NotifyOn = (typeof VALID_NOTIFY_ON)[number];
+
+/** Suffix appended to every cron prompt to constrain agent output */
+export const CRON_PROMPT_SUFFIX = `
+
+IMPORTANT: You are running as an automated cron job. Your entire text output will be sent as a notification message. Output ONLY the requested content — no preamble, no explanation of what you are, no offers to help with other things. Do not repeat the request. Be concise and direct.`;
