@@ -11,6 +11,13 @@ import type { CronJobConfig, CronSchedule } from "../cron/types";
 import { DEFAULT_TIMEOUT_MS, DEFAULT_TIMEZONE, VALID_NOTIFY_ON, DEFAULT_RUNS_LIMIT } from "../cron/constants";
 import { formatSchedule, formatRunCounts, formatJobSummary, formatJobDetail, formatRunLine, runStatusIcon, jobEnabledIcon } from "../cron/format";
 
+function rejectBuiltin(id: string): void {
+  if (id.startsWith("builtin-")) {
+    console.error(`Job ID "${id}" is reserved for built-in jobs.`);
+    process.exit(1);
+  }
+}
+
 function validateNotifyOn(value?: string): "always" | "success" | "failure" {
   const v = value ?? "always";
   if (!(VALID_NOTIFY_ON as readonly string[]).includes(v)) {
@@ -48,6 +55,7 @@ export async function cmdCron(args: string[]): Promise<void> {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron add <id> --prompt '...' --cron '...' --tz '...'"); process.exit(1); }
       validateJobId(id);
+      rejectBuiltin(id);
 
       const existing = await store.getJob(id);
       if (existing && !flags.replace) {
@@ -157,6 +165,7 @@ export async function cmdCron(args: string[]): Promise<void> {
     case "run": {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron trigger <id>"); process.exit(1); }
+      rejectBuiltin(id);
       const job = await store.getJob(id);
       if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
       console.log(`Triggering ${id}...`);
@@ -188,6 +197,7 @@ export async function cmdCron(args: string[]): Promise<void> {
     case "pause": {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron pause <id>"); process.exit(1); }
+      rejectBuiltin(id);
       const job = await store.getJob(id);
       if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
       job.enabled = false;
@@ -200,6 +210,7 @@ export async function cmdCron(args: string[]): Promise<void> {
     case "resume": {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron resume <id>"); process.exit(1); }
+      rejectBuiltin(id);
       const job = await store.getJob(id);
       if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
       job.enabled = true;
@@ -212,6 +223,7 @@ export async function cmdCron(args: string[]): Promise<void> {
     case "edit": {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron edit <id> [--prompt '...'] [--cron '...'] ..."); process.exit(1); }
+      rejectBuiltin(id);
       const job = await store.getJob(id);
       if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
 
@@ -246,6 +258,7 @@ export async function cmdCron(args: string[]): Promise<void> {
     case "delete": {
       const id = positional[1];
       if (!id) { console.error("Usage: roundhouse cron delete <id>"); process.exit(1); }
+      rejectBuiltin(id);
       const job = await store.getJob(id);
       if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
       await store.deleteJob(id);

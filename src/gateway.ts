@@ -549,15 +549,14 @@ export class Gateway {
           if (!this.cronScheduler) {
             await thread.post("⚠️ Cron scheduler not running.");
           } else if (sub === "trigger" && id) {
-            await thread.post(`⏳ Triggering ${id}...`);
-            await this.cronScheduler.trigger(id);
-            await thread.post(`✅ ${id} queued.`);
+            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
+            else { await thread.post(`⏳ Triggering ${id}...`); await this.cronScheduler.trigger(id); await thread.post(`✅ ${id} queued.`); }
           } else if (sub === "pause" && id) {
-            await this.cronScheduler.pauseJob(id);
-            await thread.post(`⏸️ ${id} paused.`);
+            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
+            else { await this.cronScheduler.pauseJob(id); await thread.post(`⏸️ ${id} paused.`); }
           } else if (sub === "resume" && id) {
-            await this.cronScheduler.resumeJob(id);
-            await thread.post(`▶️ ${id} resumed.`);
+            if (id.startsWith("builtin-")) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
+            else { await this.cronScheduler.resumeJob(id); await thread.post(`▶️ ${id} resumed.`); }
           } else {
             // Default: list jobs
             const items = await this.cronScheduler.listJobs();
@@ -607,7 +606,10 @@ export class Gateway {
     await this.notifyStartup(platforms);
 
     // Start cron scheduler
-    this.cronScheduler = new CronSchedulerService({ agentConfig: this.config.agent });
+    this.cronScheduler = new CronSchedulerService({
+      agentConfig: this.config.agent,
+      notifyChatIds: this.config.chat.notifyChatIds,
+    });
     void this.cronScheduler.start().catch((err) => {
       console.error("[roundhouse] cron scheduler start failed:", (err as Error).message);
     });

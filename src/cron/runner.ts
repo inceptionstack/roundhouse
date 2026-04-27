@@ -88,26 +88,29 @@ export class CronRunner {
       error,
     };
 
-    // Save run + update state (catch errors to prevent unhandled rejections)
-    try {
-      await this.store.appendRun(record);
-      const state = await this.store.getState(job.id);
-      state.lastRunId = runId;
-      state.lastStartedAt = startedAt.toISOString();
-      state.lastFinishedAt = finishedAt.toISOString();
-      state.totalRuns++;
-      if (status === "completed") {
-        state.lastSuccessAt = finishedAt.toISOString();
-        state.totalSuccesses++;
-        state.lastError = undefined;
-      } else {
-        state.lastFailureAt = finishedAt.toISOString();
-        state.totalFailures++;
-        state.lastError = error ?? status;
+    // Save run + update state (skip entirely for built-in jobs)
+    const isBuiltin = job.id.startsWith("builtin-");
+    if (!isBuiltin) {
+      try {
+        await this.store.appendRun(record);
+        const state = await this.store.getState(job.id);
+        state.lastRunId = runId;
+        state.lastStartedAt = startedAt.toISOString();
+        state.lastFinishedAt = finishedAt.toISOString();
+        state.totalRuns++;
+        if (status === "completed") {
+          state.lastSuccessAt = finishedAt.toISOString();
+          state.totalSuccesses++;
+          state.lastError = undefined;
+        } else {
+          state.lastFailureAt = finishedAt.toISOString();
+          state.totalFailures++;
+          state.lastError = error ?? status;
+        }
+        await this.store.writeState(state);
+      } catch (err) {
+        console.error(`[cron] ${job.id} [${runId}] failed to persist run:`, (err as Error).message);
       }
-      await this.store.writeState(state);
-    } catch (err) {
-      console.error(`[cron] ${job.id} [${runId}] failed to persist run:`, (err as Error).message);
     }
 
     // Notify (catch errors)

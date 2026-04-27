@@ -383,7 +383,7 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
-| `test/` | Unit tests (vitest, 48 passing) |
+| `test/` | Unit tests (vitest, 75 passing) |
 
 ## CI/CD
 
