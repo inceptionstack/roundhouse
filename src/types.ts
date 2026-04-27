@@ -98,6 +98,8 @@ export interface AgentRouter {
 // ── Gateway config ───────────────────────────────────
 
 export interface GatewayConfig {
+  /** Config schema version for future migrations */
+  _version?: number;
   agent: {
     type: string;
     [key: string]: unknown;

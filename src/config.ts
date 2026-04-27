@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG: GatewayConfig = {
     cwd: homedir(),
   },
   chat: {
-    botUsername: "roundhouse_bot",
+    botUsername: "",
     allowedUsers: [],
     adapters: {
       telegram: { mode: "polling" },

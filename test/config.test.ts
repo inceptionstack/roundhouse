@@ -12,8 +12,8 @@ describe("DEFAULT_CONFIG", () => {
     expect(DEFAULT_CONFIG.agent.cwd).toBe(homedir());
   });
 
-  it("has static botUsername, not env-derived", () => {
-    expect(DEFAULT_CONFIG.chat.botUsername).toBe("roundhouse_bot");
+  it("has empty default botUsername", () => {
+    expect(DEFAULT_CONFIG.chat.botUsername).toBe("");
   });
 
   it("has empty allowedUsers, not env-derived", () => {

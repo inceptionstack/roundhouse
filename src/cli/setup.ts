@@ -189,7 +189,10 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     );
   }
   if (opts.users.length === 0) {
-    throw new Error("At least one --user USERNAME is required.");
+    throw new Error(
+      "At least one --user USERNAME is required.\n" +
+      "This is your Telegram username (without @).",
+    );
   }
   for (const ext of opts.extensions) {
     if (!EXTENSION_NAME_RE.test(ext)) {
@@ -254,9 +257,23 @@ async function stepPreflight(opts: SetupOptions): Promise<void> {
     const hasAws =
       process.env.AWS_ACCESS_KEY_ID ||
       process.env.AWS_PROFILE ||
-      await fileExists(resolve(homedir(), ".aws", "credentials"));
+      await fileExists(resolve(homedir(), ".aws", "credentials")) ||
+      await fileExists(resolve(homedir(), ".aws", "config"));
+
+    // Also check instance metadata (EC2 IAM role)
+    let hasInstanceRole = false;
+    if (!hasAws) {
+      try {
+        const result = execSafe("curl", ["-sf", "--max-time", "2",
+          "http://169.254.169.254/latest/meta-data/iam/security-credentials/"], { silent: true });
+        hasInstanceRole = result.length > 0;
+      } catch {}
+    }
+
     if (hasAws) {
       ok("AWS credentials found");
+    } else if (hasInstanceRole) {
+      ok("AWS credentials found (instance IAM role)");
     } else {
       warn("AWS credentials not found — configure before first use");
     }
@@ -436,7 +453,7 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
 async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<void> {
   if (!opts.psst) return;
 
-  step("⑤", "Storing secrets in psst...");
+  step("⑥", "Storing secrets in psst...");
 
   const secrets: [string, string][] = [
     ["TELEGRAM_BOT_TOKEN", opts.botToken],
@@ -477,7 +494,7 @@ async function stepConfigure(
   botInfo: BotInfo,
   pairResult: PairResult | null,
 ): Promise<void> {
-  step("⑥", "Configuring...");
+  step("⑦", "Configuring...");
 
   await mkdir(ROUNDHOUSE_DIR, { recursive: true });
   await mkdir(dirname(PI_SETTINGS_PATH), { recursive: true });
@@ -602,6 +619,10 @@ async function stepConfigure(
     if (!envLines.some((l) => l.startsWith("AWS_DEFAULT_REGION="))) {
       envLines.push(`AWS_DEFAULT_REGION=${existingEnv.AWS_DEFAULT_REGION ?? '"us-east-1"'}`);
     }
+    // Pi agent requires AWS_REGION (not just AWS_DEFAULT_REGION) to discover Bedrock models
+    if (!envLines.some((l) => l.startsWith("AWS_REGION="))) {
+      envLines.push(`AWS_REGION=${existingEnv.AWS_REGION ?? existingEnv.AWS_DEFAULT_REGION ?? '"us-east-1"'}`);
+    }
   }
 
   await atomicWriteText(ENV_PATH, envLines.join("\n") + "\n");
@@ -609,7 +630,7 @@ async function stepConfigure(
 }
 
 async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResult | null> {
-  step("⑦", "Pairing with Telegram...");
+  step("⑤", "Pairing with Telegram...");
 
   // Skip if chat IDs already known
   if (opts.notifyChatIds.length > 0) {
@@ -651,6 +672,11 @@ async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResul
 
   if (result) {
     ok(`Paired with @${result.username} (user id: ${result.userId}, chat: ${result.chatId})`);
+    // Add paired username to allowedUsers if not already present
+    const lcUsername = result.username.toLowerCase();
+    if (!opts.users.some((u) => u.toLowerCase() === lcUsername)) {
+      opts.users.push(result.username);
+    }
     return result;
   }
 
@@ -814,11 +840,11 @@ export async function cmdSetup(argv: string[]): Promise<void> {
     // Phase 2: Install packages
     await stepInstallPackages(opts);
 
-    // Phase 3: Store secrets
-    await stepStoreSecrets(opts, botInfo);
-
-    // Phase 4: Pair (before config, so we can include chat ID)
+    // Phase 3: Pair (before secrets/config, so paired username is included)
     const pairResult = await stepPair(opts, botInfo);
+
+    // Phase 4: Store secrets (after pairing, so ALLOWED_USERS includes paired user)
+    await stepStoreSecrets(opts, botInfo);
 
     // Phase 5: Write config (includes pair data)
     await stepConfigure(opts, botInfo, pairResult);
@@ -951,18 +977,20 @@ function printDryRun(opts: SetupOptions): void {
     log(`Would install: npm install -g psst-cli`);
     log(`Would initialize psst vault`);
     log(`Would install: pi-psst extension`);
-    log(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
   }
   for (const ext of opts.extensions) log(`Would install extension: ${ext}`);
+  if (!opts.nonInteractive && opts.notifyChatIds.length === 0) {
+    log(`Would pair via Telegram (interactive)`);
+  }
+  if (opts.psst) {
+    log(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
+  }
   log(`Would configure: ~/.pi/agent/settings.json`);
   log(`  Set defaultProvider: ${opts.provider}`);
   log(`  Set defaultModel: ${opts.model}`);
   log(`Would write: ~/.roundhouse/gateway.config.json`);
   log(`Would write: ~/.roundhouse/env${opts.psst ? " (non-secret config only)" : ""}`);
   log(`Would register ${BOT_COMMANDS.length} bot commands`);
-  if (!opts.nonInteractive && opts.notifyChatIds.length === 0) {
-    log(`Would pair via Telegram (interactive)`);
-  }
   if (opts.systemd) log(`Would install systemd service`);
   log("\nNo changes made.\n");
 }
