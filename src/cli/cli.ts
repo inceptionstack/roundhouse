@@ -422,6 +422,9 @@ Commands:
   stop                Stop the daemon
   restart             Restart the daemon
   config              Show config path and contents
+  agent <message>     Send a message to the agent and print response
+                       Options: --thread <id>, --stdin, --timeout <sec>,
+                                --no-timeout, --verbose
   doctor [--fix]       Check system health and configuration
                        Options: --fix, --json, --verbose
   cron <command>       Manage scheduled jobs (add, list, trigger, etc.)
@@ -437,6 +440,150 @@ Environment:
 }
 
 // ── Main ────────────────────────────────────────────
+
+async function cmdAgent() {
+  // Usage: roundhouse agent <message>
+  //        roundhouse agent --thread <id> <message>
+  //        echo "message" | roundhouse agent --stdin
+  const args = process.argv.slice(3);
+  let threadId = "";
+  let messageText = "";
+  let useStdin = false;
+  let timeoutMs = 120_000;
+  let verbose = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--thread" && args[i + 1]) {
+      threadId = args[++i];
+    } else if (args[i] === "--stdin") {
+      useStdin = true;
+    } else if (args[i] === "--timeout" && args[i + 1]) {
+      const val = parseInt(args[++i], 10);
+      if (isNaN(val) || val <= 0) { console.error("--timeout must be a positive number (seconds)"); process.exit(1); }
+      timeoutMs = val * 1000;
+    } else if (args[i] === "--no-timeout") {
+      timeoutMs = 0;
+    } else if (args[i] === "--verbose") {
+      verbose = true;
+    } else if (args[i].startsWith("-")) {
+      console.error(`Unknown flag: ${args[i]}`);
+      process.exit(1);
+    } else {
+      messageText = args.slice(i).join(" ");
+      break;
+    }
+  }
+
+  if (useStdin) {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const MAX_INPUT = 1024 * 1024; // 1 MB
+    for await (const chunk of process.stdin) {
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_INPUT) {
+        console.error(`Input exceeds ${MAX_INPUT / 1024}KB limit. Use a file instead.`);
+        process.exit(1);
+      }
+      chunks.push(chunk);
+    }
+    // Strip single trailing newline (shell echo adds one)
+    let raw = Buffer.concat(chunks).toString("utf8");
+    if (raw.endsWith("\n")) raw = raw.slice(0, -1);
+    messageText = raw;
+  }
+
+  if (!messageText) {
+    console.error("Usage: roundhouse agent <message>");
+    console.error("       roundhouse agent --thread <id> <message>");
+    console.error("       echo \"message\" | roundhouse agent --stdin");
+    console.error("       roundhouse agent --timeout 60 <message>");
+    console.error("       roundhouse agent --verbose <message>");
+    process.exit(1);
+  }
+
+  // Default: ephemeral thread ID (no session persistence across invocations)
+  // --thread <id> opts into persistent/shared sessions
+  if (!threadId) {
+    threadId = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // Suppress debug/info logs unless --verbose
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  if (!verbose) {
+    console.log = () => {};
+    console.warn = () => {};
+  }
+
+  let agent: import("../types").AgentAdapter | undefined;
+  let aborted = false;
+
+  // Clean abort on SIGINT/SIGTERM
+  const handleSignal = async () => {
+    if (aborted) return;
+    aborted = true;
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+    try { await agent?.abort?.(threadId); } catch {}
+    try { await agent?.dispose(); } catch {}
+    process.exit(130);
+  };
+  process.on("SIGINT", handleSignal);
+  process.on("SIGTERM", handleSignal);
+
+  // Timeout race
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = timeoutMs > 0
+    ? new Promise<never>((_, reject) => {
+        timer = setTimeout(async () => {
+          aborted = true;
+          try { await agent?.abort?.(threadId); } catch {}
+          reject(new Error(`Timeout after ${timeoutMs / 1000}s`));
+        }, timeoutMs);
+      })
+    : null;
+
+  try {
+    const config = await loadConfig();
+    const { getAgentFactory } = await import("../agents/registry");
+    const factory = getAgentFactory(config.agent.type);
+    agent = factory(config.agent);
+
+    const runAgent = async () => {
+      if (agent!.promptStream) {
+        for await (const event of agent!.promptStream(threadId, { text: messageText })) {
+          if (event.type === "text_delta") {
+            process.stdout.write(event.text);
+          }
+        }
+        process.stdout.write("\n");
+      } else {
+        const response = await agent!.prompt(threadId, { text: messageText });
+        origLog(response.text);
+      }
+    };
+
+    if (timeoutPromise) {
+      await Promise.race([runAgent(), timeoutPromise]);
+    } else {
+      await runAgent();
+    }
+  } catch (err: any) {
+    console.error = origError;
+    console.error(`Error: ${err.message}`);
+    process.exit(aborted ? 124 : 1); // 124 = timeout (like coreutils)
+  } finally {
+    if (timer) clearTimeout(timer);
+    process.off("SIGINT", handleSignal);
+    process.off("SIGTERM", handleSignal);
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+    if (!aborted) await agent?.dispose();
+  }
+}
 
 import { cmdDoctor } from "./doctor";
 import { cmdCron } from "./cron";
@@ -459,6 +606,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   tui: cmdTui,
   doctor: () => cmdDoctor(process.argv.slice(3)),
   cron: () => cmdCron(process.argv.slice(3)),
+  agent: cmdAgent,
 };
 
 const fn = command ? commands[command] : undefined;
