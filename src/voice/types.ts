@@ -45,6 +45,7 @@ export interface AttachmentTranscript {
 export interface SttProviderConfig {
   type: string;
   timeoutMs?: number;
+  autoInstall?: boolean;
   [key: string]: unknown;
 }
 

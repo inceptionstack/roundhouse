@@ -209,7 +209,7 @@ export class Gateway {
         providers: mergedProviders,
       };
       this.sttService = new SttService(mergedConfig);
-      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")}, autoInstall: ${mergedConfig.autoInstall ?? true})`);
+      console.log(`[roundhouse] STT enabled (chain: ${mergedConfig.chain.join(" -> ")}, autoInstall: ${mergedConfig.autoInstall ?? false})`);
       // Prepare providers in background (install + warm model if needed)
       void this.sttService.prepareInBackground();
     }

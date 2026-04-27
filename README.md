@@ -155,6 +155,7 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `chat.notifyChatIds` | Telegram chat IDs to notify on startup (env: `NOTIFY_CHAT_IDS`) |
 | `chat.adapters.telegram` | `{ "mode": "polling" \| "webhook" \| "auto" }` |
 | `voice.stt.enabled` | Enable automatic voice transcription (default: off unless configured) |
+| `voice.stt.autoInstall` | Auto-install whisper via pip3 if missing (default: false) |
 | `voice.stt.chain` | STT provider chain, e.g. `["whisper"]` |
 | `voice.stt.providers.whisper` | `{ "model": "small", "timeoutMs": 30000 }` |
 
@@ -270,6 +271,8 @@ Roundhouse can automatically transcribe voice messages using [OpenAI Whisper](ht
 pip install openai-whisper
 ```
 
+Or set `autoInstall: true` in config to have roundhouse install whisper automatically on first voice message.
+
 **Enable in config:**
 ```json
 {
@@ -277,6 +280,7 @@ pip install openai-whisper
     "stt": {
       "enabled": true,
       "mode": "on",
+      "autoInstall": true,
       "chain": ["whisper"],
       "autoTranscribe": {
         "voiceMessages": true,

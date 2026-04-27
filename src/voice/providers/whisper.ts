@@ -72,6 +72,7 @@ async function installWhisperWithPip(): Promise<string | null> {
       ["install", "--user", "openai-whisper"],
       {
         timeout: 300_000, // 5 min for install
+        maxBuffer: 10 * 1024 * 1024, // 10MB for pip output
         env: { ...process.env },
       },
       async (err, stdout, stderr) => {
@@ -111,8 +112,8 @@ async function installWhisperWithPip(): Promise<string | null> {
  * Warm the whisper model by running a tiny transcription.
  * This forces the model download (~461MB for small).
  */
-async function warmWhisperModel(binary: string, model: string): Promise<void> {
-  const warmupDir = join(homedir(), ".roundhouse", "whisper-warmup");
+async function warmWhisperModel(binary: string, model: string): Promise<boolean> {
+  const warmupDir = join(homedir(), ".roundhouse", "whisper-warmup", randomBytes(4).toString("hex"));
   mkdirSync(warmupDir, { recursive: true });
 
   // Generate a tiny silent WAV file (1 second, 16kHz, mono, 16-bit)
@@ -141,7 +142,7 @@ async function warmWhisperModel(binary: string, model: string): Promise<void> {
 
   console.log(`[stt/whisper] warming model '${model}' (may download ~461MB)...`);
 
-  return new Promise<void>((resolve) => {
+  return new Promise<boolean>((resolve) => {
     execFile(
       binary,
       [wavPath, "--model", model, "--output_format", "json", "--output_dir", warmupDir],
@@ -158,10 +159,11 @@ async function warmWhisperModel(binary: string, model: string): Promise<void> {
 
         if (err) {
           console.warn(`[stt/whisper] model warmup failed: ${err.message}`);
+          resolve(false);
         } else {
           console.log(`[stt/whisper] model '${model}' ready`);
+          resolve(true);
         }
-        resolve(); // never reject — warmup failure is not fatal
       },
     );
   });
@@ -174,14 +176,17 @@ export interface InstallableWhisperProvider extends SttProvider {
   ensureInstalled(): Promise<boolean>;
 }
 
-// Singleton install promise to prevent concurrent installs
+// Singleton promises to prevent concurrent installs
 let installPromise: Promise<string | null> | null = null;
+let installFailed = false; // sticky failure to prevent retry spam
 
 export function createWhisperProvider(config: SttProviderConfig): InstallableWhisperProvider {
   const model = (config.model as string) ?? "small";
   const timeoutMs = config.timeoutMs ?? 30000;
-  const autoInstall = config.autoInstall !== false; // default true
+  const autoInstall = config.autoInstall === true; // explicit opt-in only
   let modelWarmed = false;
+  let warmFailed = false; // sticky failure to prevent warmup retry spam
+  let warmPromise: Promise<boolean> | null = null;
 
   const WHISPER_LANGS = new Set(["af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","yue","zh"]);
 
@@ -192,11 +197,15 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
 
     // Try auto-install
     if (!autoInstall) return null;
+    if (installFailed) return null; // sticky failure — don't retry every message
 
     // Singleton: join existing install or start new one
     if (!installPromise) {
-      installPromise = installWhisperWithPip().finally(() => {
-        installPromise = null; // allow retry on next failure
+      installPromise = installWhisperWithPip().then((result) => {
+        if (!result) installFailed = true;
+        return result;
+      }).finally(() => {
+        installPromise = null;
       });
     }
     return installPromise;
@@ -213,23 +222,37 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
       const binary = await getBinary();
       if (!binary) return false;
 
-      // Warm model if not already done
-      if (!modelWarmed) {
-        // Check if model already cached
-        const modelDir = join(homedir(), ".cache", "whisper");
-        try {
-          const files = await readdir(modelDir);
-          if (files.some((f) => f.includes(model))) {
-            modelWarmed = true;
-          }
-        } catch {}
+      // Warm model with singleton promise
+      if (!modelWarmed && !warmFailed) {
+        if (!warmPromise) {
+          warmPromise = (async () => {
+            // Check if model already cached
+            const modelDir = join(homedir(), ".cache", "whisper");
+            try {
+              const files = await readdir(modelDir);
+              if (files.some((f) => f.startsWith(model) && f.includes("."))) {
+                modelWarmed = true;
+                return true;
+              }
+            } catch {}
 
-        if (!modelWarmed) {
-          await warmWhisperModel(binary, model);
-          modelWarmed = true;
+            // Run warmup — catch everything so it never rejects
+            try {
+              const ok = await warmWhisperModel(binary, model);
+              if (!ok) warmFailed = true;
+              modelWarmed = ok;
+              return ok;
+            } catch (err) {
+              console.warn(`[stt/whisper] warmup error: ${(err as Error).message}`);
+              warmFailed = true;
+              modelWarmed = false;
+              return false;
+            }
+          })().finally(() => { warmPromise = null; });
         }
+        await warmPromise;
       }
-      return true;
+      return modelWarmed;
     },
 
     async transcribe(input: SttInput): Promise<TranscriptionResult> {

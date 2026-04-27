@@ -55,7 +55,7 @@ export class SttService {
         // Pass autoInstall from service-level config into provider config
         const mergedProviderConfig = {
           ...providerConfig,
-          autoInstall: this.config.autoInstall ?? providerConfig.autoInstall ?? true,
+          autoInstall: providerConfig.autoInstall ?? this.config.autoInstall ?? false,
         };
         this.providers.push(factory(mergedProviderConfig));
         console.log(`[stt] loaded provider: ${providerName} (${type})`);
@@ -169,21 +169,20 @@ export class SttService {
       for (const provider of this.providers) {
         if (!provider.canTranscribe(input)) continue;
 
-        // Send one-time install notice if provider needs to install
-        if (!this.installNoticeSent && notify) {
-          const installable = provider as InstallableWhisperProvider;
-          if (installable.ensureInstalled) {
-            // Check if install is actually needed (binary not found)
-            try {
-              this.installNoticeSent = true;
-              const isReady = await installable.ensureInstalled();
-              if (!isReady) {
-                await notify("🎤 Voice transcription not available. Install whisper: `pip3 install --user openai-whisper`");
-                continue;
+        // Ensure provider is installed (with one-time user notification)
+        const installable = provider as InstallableWhisperProvider;
+        if (installable.ensureInstalled && typeof installable.ensureInstalled === "function") {
+          try {
+            const isReady = await installable.ensureInstalled();
+            if (!isReady) {
+              if (!this.installNoticeSent && notify) {
+                this.installNoticeSent = true;
+                try { await notify("🎤 Voice transcription not available. Whisper install or model download failed."); } catch {}
               }
-            } catch {
               continue;
             }
+          } catch {
+            continue;
           }
         }
 
@@ -268,7 +267,7 @@ async function getAudioDuration(filePath: string): Promise<number | null> {
 export const DEFAULT_STT_CONFIG: SttConfig = {
   enabled: false,
   mode: "on",
-  autoInstall: true,
+  autoInstall: false,
   chain: ["whisper"],
   autoTranscribe: {
     voiceMessages: true,
