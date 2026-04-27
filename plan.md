@@ -137,9 +137,32 @@ src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
 ```
 
 ### Concurrency
-- In-memory `running` map per job ID
-- Default: skip if already running
-- Update lastScheduledAt even for skips (prevent retry every minute)
+**Global:** max 1 concurrent cron run by default (agents share workspace/LLM)
+**Per-job:** in-memory `running` map prevents same job overlapping itself
+
+When capacity is full:
+- Due jobs enter a bounded queue (default 15min timeout)
+- If still blocked after timeout → mark `missed` with reason
+- Never silently drop — queue, don't skip
+- Coalesce queued duplicates for "latest only" catch-up jobs
+
+Deterministic jitter: hash(job.id) → 0-90s offset to smooth overlapping schedules
+
+Config:
+```json
+{
+  "scheduler": {
+    "maxConcurrentRuns": 1,
+    "queueTimeoutMs": 900000,
+    "jitterWindowMs": 90000
+  }
+}
+```
+
+User visibility:
+- `cron add` warns about overlapping jobs at same time
+- `/crons list` shows: scheduled, queued, running, missed, failed, completed
+- Run history records: scheduled time, actual start, queue duration, skip reason
 
 ### Long-running jobs
 - Default timeout: 30 minutes
