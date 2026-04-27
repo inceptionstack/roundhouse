@@ -81,7 +81,7 @@ export async function runDoctor(ctx: DoctorContext): Promise<DoctorCheckResult[]
   return results;
 }
 
-/** Format results for Telegram (Markdown) */
+/** Format results for Telegram (Markdown) — shows every check */
 export function formatDoctorTelegram(results: DoctorCheckResult[]): string {
   const counts = { pass: 0, warn: 0, fail: 0, info: 0, fixed: 0 };
   for (const r of results) {
@@ -89,12 +89,19 @@ export function formatDoctorTelegram(results: DoctorCheckResult[]): string {
     else counts[r.status]++;
   }
 
+  const STATUS_ICON: Record<string, string> = {
+    pass: "✅",
+    warn: "⚠️",
+    fail: "❌",
+    info: "ℹ️",
+  };
+
   const lines: string[] = [
     "🩺 *Roundhouse Doctor*",
     "",
   ];
 
-  // Status summary
+  // Status summary line
   const statusParts: string[] = [];
   if (counts.fail) statusParts.push(`❌ ${counts.fail} fail`);
   if (counts.warn) statusParts.push(`⚠️ ${counts.warn} warn`);
@@ -102,36 +109,26 @@ export function formatDoctorTelegram(results: DoctorCheckResult[]): string {
   statusParts.push(`✅ ${counts.pass} pass`);
   lines.push(statusParts.join(" · "));
 
-  // Show failures and warnings with details
-  const issues = results.filter((r) => r.status === "fail" || r.status === "warn");
-  if (issues.length > 0) {
+  // Group by category, show every check
+  const categories = [...new Set(results.map((r) => r.category))];
+  for (const cat of categories) {
+    const catResults = results.filter((r) => r.category === cat);
     lines.push("");
-    for (const r of issues) {
-      const icon = r.status === "fail" ? "❌" : "⚠️";
-      lines.push(`${icon} *${capitalize(r.category)} / ${esc(r.name)}*`);
-      lines.push(esc(r.summary));
-      if (r.details?.length) {
+    lines.push(`*${capitalize(cat)}*`);
+    for (const r of catResults) {
+      const icon = r.fixed ? "🔧" : (STATUS_ICON[r.status] ?? "❓");
+      lines.push(`${icon} ${esc(r.name)}: ${esc(r.summary)}`);
+
+      // Show details for warnings and failures
+      if ((r.status === "fail" || r.status === "warn") && r.details?.length) {
         for (const d of r.details.slice(0, 3)) {
-          lines.push(esc(d));
+          lines.push(`    ${esc(d)}`);
         }
       }
-      if (r.fix?.command) {
-        lines.push(`Fix: \`${esc(r.fix.command)}\``);
+      if (r.fix?.command && (r.status === "fail" || r.status === "warn") && !r.fixed) {
+        lines.push(`    Fix: \`${esc(r.fix.command)}\``);
       }
-      lines.push("");
     }
-  }
-
-  // Passed categories summary
-  const catPasses = new Map<string, number>();
-  for (const r of results) {
-    if (r.status === "pass" || r.fixed) {
-      catPasses.set(r.category, (catPasses.get(r.category) ?? 0) + 1);
-    }
-  }
-  if (catPasses.size > 0) {
-    const passStr = [...catPasses.entries()].map(([c, n]) => `${c} ${n}`).join(", ");
-    lines.push(`✅ Passed: ${passStr}`);
   }
 
   return lines.join("\n");
