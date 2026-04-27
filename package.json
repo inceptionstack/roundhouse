@@ -1,6 +1,6 @@
 {
   "name": "@inceptionstack/roundhouse",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
   "license": "MIT",
@@ -26,7 +26,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "release": "npm version patch --no-git-tag-version && npm install --package-lock-only && git add package.json package-lock.json && git commit -m \"v$(node -p 'require(\"./package.json\").version')\" && git push origin main && npm publish --access public"
   },
   "files": [
     "src/",
