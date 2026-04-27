@@ -15,10 +15,12 @@ import { fileURLToPath } from "node:url";
 import {
   CONFIG_DIR,
   CONFIG_PATH,
+  ENV_FILE_PATH,
   DEFAULT_CONFIG,
   SERVICE_NAME,
   fileExists,
   loadConfig,
+  resolveEnvFilePath,
 } from "../config";
 import { getAgentSdkPackage } from "../agents/registry";
 
@@ -26,7 +28,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
-const ENV_FILE_PATH = resolve(CONFIG_DIR, "env");
 
 // ── Shell helpers ───────────────────────────────────
 
@@ -80,8 +81,9 @@ async function cmdInstall() {
   // Write environment file for secrets — merge with existing to preserve manually-added keys
   const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS", "NOTIFY_CHAT_IDS", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
   const existing = new Map<string, string>();
-  if (await fileExists(ENV_FILE_PATH)) {
-    const raw = await readFile(ENV_FILE_PATH, "utf8");
+  const resolvedEnvPath = await resolveEnvFilePath();
+  if (await fileExists(resolvedEnvPath)) {
+    const raw = await readFile(resolvedEnvPath, "utf8");
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
@@ -98,6 +100,9 @@ async function cmdInstall() {
     }
   }
   if (envChanged || !(await fileExists(ENV_FILE_PATH))) {
+    if (resolvedEnvPath !== ENV_FILE_PATH && await fileExists(resolvedEnvPath)) {
+      console.log(`  Copying env file from ${resolvedEnvPath} to ${ENV_FILE_PATH}`);
+    }
     const envFileContent = [...existing.entries()].map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
     await writeFile(ENV_FILE_PATH, envFileContent, { mode: 0o600 });
     console.log(`  Environment file: ${ENV_FILE_PATH}`);
@@ -229,8 +234,9 @@ async function cmdStatus() {
 
   // Read env file for debug flags
   let debugStream = false;
+  const statusEnvPath = await resolveEnvFilePath();
   try {
-    const envContent = await readFile(ENV_FILE_PATH, "utf8");
+    const envContent = await readFile(statusEnvPath, "utf8");
     debugStream = envContent.includes("ROUNDHOUSE_DEBUG_STREAM=1") || envContent.includes('ROUNDHOUSE_DEBUG_STREAM="1"');
   } catch {}
 
@@ -272,7 +278,7 @@ async function cmdStatus() {
 
   console.log(`  Debug stream:   ${debugStream ? "on" : "off"}`);
   console.log(`  Config:         ${CONFIG_PATH}`);
-  console.log(`  Env file:       ${ENV_FILE_PATH}`);
+  console.log(`  Env file:       ${statusEnvPath}`);
   console.log();
 }
 
@@ -418,7 +424,7 @@ Commands:
                        Options: --fix, --json, --verbose
 
 Config:
-  ~/.config/roundhouse/gateway.config.json
+  ~/.roundhouse/gateway.config.json
 
 Environment:
   TELEGRAM_BOT_TOKEN    Telegram bot token

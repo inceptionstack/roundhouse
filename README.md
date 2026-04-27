@@ -123,7 +123,7 @@ roundhouse tui telegram_c12345    # exact thread match
 
 ## Config
 
-Place `gateway.config.json` in `~/.config/roundhouse/` (created by `roundhouse install`), or in the project root, or use `--config path`:
+Place `gateway.config.json` in `~/.roundhouse/` (created by `roundhouse install`), or in the project root, or use `--config path`:
 
 ```json
 {

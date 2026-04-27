@@ -15,7 +15,7 @@ export async function cmdDoctor(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const json = args.includes("--json");
 
-  const ctx = createDoctorContext({ fix, verbose, json });
+  const ctx = await createDoctorContext({ fix, verbose, json });
 
   if (!json) {
     console.log("\nRoundhouse Doctor\n");

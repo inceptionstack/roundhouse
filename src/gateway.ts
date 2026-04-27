@@ -11,6 +11,7 @@ import type { AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, Messag
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
+import { ROUNDHOUSE_DIR } from "./config";
 
 /** Match a Telegram command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
@@ -66,7 +67,7 @@ function toolIcon(name: string): string {
 // ── Incoming file storage ─────────────────────────────
 
 const INCOMING_DIR = process.env.ROUNDHOUSE_INCOMING_DIR
-  ?? join(homedir(), ".roundhouse", "incoming");
+  ?? join(ROUNDHOUSE_DIR, "incoming");
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB per file
 const MAX_ATTACHMENTS = 5;
@@ -516,7 +517,7 @@ export class Gateway {
         if (!isAllowed(message, allowedUsers)) return;
         const stopTyping = startTypingLoop(thread);
         try {
-          const results = await runDoctor(createDoctorContext());
+          const results = await runDoctor(await createDoctorContext());
           const report = formatDoctorTelegram(results);
           await this.postWithFallback(thread, report);
         } catch (err) {
