@@ -6,10 +6,9 @@
 
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
-import { execSync, execFileSync, spawnSync, spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -23,11 +22,20 @@ import {
   resolveEnvFilePath,
 } from "../config";
 import { getAgentSdkPackage } from "../agents/registry";
+import { parseEnvFile, serializeEnvFile, envQuote } from "./env-file";
+import {
+  SERVICE_PATH,
+  systemctl,
+  runSudo,
+  isServiceInstalled,
+  isServiceActive,
+  resolveExecStart,
+  generateUnit,
+  writeServiceUnit,
+} from "./systemd";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 
 // ── Shell helpers ───────────────────────────────────
 
@@ -40,27 +48,11 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
   }
 }
 
-function runSudo(...args: string[]): void {
-  // Try non-interactive first, fall back to interactive for password prompts
-  const result = spawnSync("sudo", ["-n", ...args], { stdio: "inherit" });
-  if (result.status !== 0) {
-    execFileSync("sudo", args, { stdio: "inherit" });
-  }
-}
-
-function systemctl(verb: string, message?: string): void {
-  runSudo("systemctl", verb, SERVICE_NAME);
-  if (message) console.log(`  ✅ ${message}`);
-}
-
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
-  // If systemd service is installed, start via systemctl
-  const serviceInstalled = run(`systemctl list-unit-files ${SERVICE_NAME}.service`, { silent: true }).includes(SERVICE_NAME);
-  if (serviceInstalled) {
-    const isActive = run(`systemctl is-active ${SERVICE_NAME}`, { silent: true }) === "active";
-    if (isActive) {
+  if (isServiceInstalled()) {
+    if (isServiceActive()) {
       console.log("Roundhouse is already running.");
       console.log("  Use: roundhouse restart   to restart");
       console.log("       roundhouse status    to check status");
@@ -107,22 +99,16 @@ async function cmdInstall() {
 
   // Write environment file for secrets — merge with existing to preserve manually-added keys
   const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS", "NOTIFY_CHAT_IDS", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
-  const existing = new Map<string, string>();
   const resolvedEnvPath = await resolveEnvFilePath();
-  if (await fileExists(resolvedEnvPath)) {
-    const raw = await readFile(resolvedEnvPath, "utf8");
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq > 0) existing.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
-    }
-  }
+  const existing = await fileExists(resolvedEnvPath)
+    ? parseEnvFile(await readFile(resolvedEnvPath, "utf8"))
+    : new Map<string, string>();
+
   // Override with current env vars for known keys
   let envChanged = false;
   for (const key of ENV_KEYS) {
     if (process.env[key]) {
-      existing.set(key, `"${process.env[key].replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$$").replace(/`/g, "\\`").replace(/\n/g, "\\n")}"`);
+      existing.set(key, envQuote(process.env[key]));
       envChanged = true;
     }
   }
@@ -130,56 +116,14 @@ async function cmdInstall() {
     if (resolvedEnvPath !== ENV_FILE_PATH && await fileExists(resolvedEnvPath)) {
       console.log(`  Copying env file from ${resolvedEnvPath} to ${ENV_FILE_PATH}`);
     }
-    const envFileContent = [...existing.entries()].map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
-    await writeFile(ENV_FILE_PATH, envFileContent, { mode: 0o600 });
+    await writeFile(ENV_FILE_PATH, serializeEnvFile(existing), { mode: 0o600 });
     console.log(`  Environment file: ${ENV_FILE_PATH}`);
   }
 
-  // Resolve paths — prefer the installed bin, fall back to tsx + source
-  const binPath = run("which roundhouse", { silent: true });
-  const nodePath = run("which node", { silent: true }) || process.execPath;
-  const tsxPath = resolve(__dirname, "..", "..", "node_modules", ".bin", "tsx");
-
-  let execStart: string;
-  if (binPath) {
-    execStart = `${nodePath} ${binPath} run`;
-  } else {
-    // No global install — run CLI via tsx with 'run' subcommand
-    const tsxBin = run("which tsx", { silent: true }) || tsxPath;
-    const cliPath = resolve(__dirname, "cli.ts");
-    execStart = `${tsxBin} ${cliPath} run`;
-  }
-
-  // Compute PATH that includes node's bin dir (for mise/nvm setups)
-  const nodeBinDir = dirname(nodePath);
-  const pathValue = `${nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
-
-  const unit = `[Unit]
-Description=Roundhouse Chat Gateway
-After=network.target
-
-[Service]
-Type=simple
-User=${process.env.USER || "root"}
-WorkingDirectory=${homedir()}
-ExecStart=${execStart}
-Restart=on-failure
-RestartSec=5
-EnvironmentFile=-${ENV_FILE_PATH}
-Environment=ROUNDHOUSE_CONFIG=${CONFIG_PATH}
-Environment=NODE_ENV=production
-Environment=PATH=${pathValue}
-
-[Install]
-WantedBy=multi-user.target
-`;
-
-  const tmpDir = await mkdtemp(resolve(tmpdir(), "roundhouse-"));
-  const tmpUnit = resolve(tmpDir, `${SERVICE_NAME}.service`);
-  await writeFile(tmpUnit, unit, { mode: 0o600 });
-  runSudo("cp", tmpUnit, SERVICE_PATH);
-  runSudo("rm", "-rf", "--", tmpDir);
-  runSudo("systemctl", "daemon-reload");
+  // Generate and install systemd unit
+  const { execStart, nodeBinDir } = resolveExecStart();
+  const unit = generateUnit({ execStart, nodeBinDir });
+  await writeServiceUnit(unit);
   systemctl("enable");
   systemctl("start", "Daemon installed and started.");
 

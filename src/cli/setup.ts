@@ -12,7 +12,7 @@
 import { homedir, platform } from "node:os";
 import { resolve, dirname } from "node:path";
 import { readFile, writeFile, mkdir, rename, unlink, realpath, stat } from "node:fs/promises";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { BOT_COMMANDS } from "../commands";
 import {
@@ -21,6 +21,13 @@ import {
   ENV_FILE_PATH as ENV_PATH,
   fileExists,
 } from "../config";
+import { envQuote, parseEnvFile } from "./env-file";
+import {
+  resolveExecStart,
+  generateUnit,
+  writeServiceUnit,
+  hasSudoAccess,
+} from "./systemd";
 import {
   validateBotToken,
   checkWebhook,
@@ -88,18 +95,6 @@ async function atomicWriteText(path: string, content: string, mode = 0o600): Pro
     try { await unlink(tmp); } catch {}
     throw err;
   }
-}
-
-/** Shell-escape a value for env files */
-function envQuote(value: string): string {
-  // Escape backslash, double-quote, dollar, backtick, newline
-  const escaped = value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\$/g, "\\$")
-    .replace(/`/g, "\\`")
-    .replace(/\n/g, "\\n");
-  return `"${escaped}"`;
 }
 
 function execSafe(cmd: string, args: string[], opts: { silent?: boolean; input?: string } = {}): string {
@@ -606,26 +601,21 @@ async function stepConfigure(
 
   if (opts.provider === "amazon-bedrock") {
     // Preserve existing AWS config
-    let existingEnv: Record<string, string> = {};
+    let existingEnv = new Map<string, string>();
     try {
-      const raw = await readFile(ENV_PATH, "utf8");
-      for (const line of raw.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const eq = trimmed.indexOf("=");
-        if (eq > 0) existingEnv[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
-      }
+      existingEnv = parseEnvFile(await readFile(ENV_PATH, "utf8"));
     } catch {}
+    const getExisting = (key: string) => existingEnv.get(key);
 
     if (!envLines.some((l) => l.startsWith("AWS_PROFILE="))) {
-      envLines.push(`AWS_PROFILE=${existingEnv.AWS_PROFILE ?? '"default"'}`);
+      envLines.push(`AWS_PROFILE=${getExisting("AWS_PROFILE") ?? '"default"'}`);
     }
     if (!envLines.some((l) => l.startsWith("AWS_DEFAULT_REGION="))) {
-      envLines.push(`AWS_DEFAULT_REGION=${existingEnv.AWS_DEFAULT_REGION ?? '"us-east-1"'}`);
+      envLines.push(`AWS_DEFAULT_REGION=${getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"'}`);
     }
     // Pi agent requires AWS_REGION (not just AWS_DEFAULT_REGION) to discover Bedrock models
     if (!envLines.some((l) => l.startsWith("AWS_REGION="))) {
-      envLines.push(`AWS_REGION=${existingEnv.AWS_REGION ?? existingEnv.AWS_DEFAULT_REGION ?? '"us-east-1"'}`);
+      envLines.push(`AWS_REGION=${getExisting("AWS_REGION") ?? getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"'}`);
     }
   }
 
@@ -711,19 +701,13 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
   }
 
   // Check sudo
-  const hasSudo = spawnSync("sudo", ["-n", "true"], { stdio: "pipe" }).status === 0;
-  if (!hasSudo) {
+  if (!hasSudoAccess()) {
     warn("No passwordless sudo — cannot install systemd service");
     log("   Run manually: roundhouse start");
     log("   Or install with: sudo roundhouse install");
     return;
   }
 
-  // Resolve paths
-  const roundhouseBin = whichSync("roundhouse") ?? resolve(dirname(process.execPath), "roundhouse");
-  const psstBin = opts.psst ? whichSync("psst") : null;
-  const nodeBin = process.execPath;
-  const nodeBinDir = dirname(nodeBin);
   const user = process.env.USER || process.env.LOGNAME;
   if (!user) {
     warn("Cannot determine current user ($USER not set). Skipping systemd.");
@@ -731,60 +715,16 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
     return;
   }
 
-  // Guard against newline injection in interpolated values
-  const unitPaths = { user, roundhouseBin, nodeBin, nodeBinDir, psstBin, home: homedir(), cwd: opts.cwd };
-  for (const [key, val] of Object.entries(unitPaths)) {
-    if (val && /[\n\r]/.test(val)) {
-      warn(`Unsafe value for ${key} (contains newline). Skipping systemd.`);
-      return;
-    }
-  }
-
-  // Build ExecStart — uses `roundhouse run` (foreground mode for systemd)
-  let execStart: string;
-  if (psstBin) {
-    execStart = `${psstBin} run ${nodeBin} ${roundhouseBin} run`;
-  } else {
-    execStart = `${nodeBin} ${roundhouseBin} run`;
-  }
-
-  // Always include env file for non-secret config (AWS_PROFILE, etc)
-  // When using psst, ExecStart wraps with `psst run` to inject secrets
-  const unit = `[Unit]
-Description=Roundhouse Chat Gateway
-After=network.target
-
-[Service]
-Type=simple
-User=${user}
-WorkingDirectory=${homedir()}
-ExecStart=${execStart}
-Restart=on-failure
-RestartSec=5
-EnvironmentFile=-${ENV_PATH}
-Environment=ROUNDHOUSE_CONFIG=${CONFIG_PATH}
-Environment=NODE_ENV=production
-Environment=PATH=${nodeBinDir}:/usr/local/bin:/usr/bin:/bin
-Environment=HOME=${homedir()}
-
-[Install]
-WantedBy=multi-user.target
-`;
-
-  // Write to tmp, then sudo cp
-  const tmpPath = resolve(ROUNDHOUSE_DIR, `roundhouse.service.tmp.${randomBytes(4).toString("hex")}`);
-  const servicePath = `/etc/systemd/system/roundhouse.service`;
+  const psstBin = opts.psst ? whichSync("psst") : null;
+  const { execStart, nodeBinDir } = resolveExecStart({ psstBin });
+  const unit = generateUnit({ execStart, nodeBinDir, user });
 
   try {
-    await writeFile(tmpPath, unit, { mode: 0o600 });
-    execFileSync("sudo", ["-n", "cp", tmpPath, servicePath], { stdio: "pipe" });
-    await unlink(tmpPath);
-    execFileSync("sudo", ["-n", "systemctl", "daemon-reload"], { stdio: "pipe" });
+    await writeServiceUnit(unit);
     execFileSync("sudo", ["-n", "systemctl", "enable", "roundhouse"], { stdio: "pipe" });
     execFileSync("sudo", ["-n", "systemctl", "start", "roundhouse"], { stdio: "pipe" });
     ok("roundhouse.service enabled and started");
   } catch (err: any) {
-    try { await unlink(tmpPath); } catch {}
     warn(`Systemd install failed: ${err.message}`);
     log("   Run manually: roundhouse start");
   }
@@ -907,9 +847,9 @@ export async function cmdPair(argv: string[]): Promise<void> {
   // Try existing env file
   if (!token) {
     try {
-      const envContent = await readFile(ENV_PATH, "utf8");
-      const match = envContent.match(/TELEGRAM_BOT_TOKEN=["']?([^"'\n]+)["']?/);
-      if (match) token = match[1];
+      const entries = parseEnvFile(await readFile(ENV_PATH, "utf8"));
+      const raw = entries.get("TELEGRAM_BOT_TOKEN");
+      if (raw) token = raw.replace(/^["']|["']$/g, "");
     } catch {}
   }
 
