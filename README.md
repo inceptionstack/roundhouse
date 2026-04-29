@@ -95,6 +95,8 @@ roundhouse install    # installs as systemd service, starts automatically
 roundhouse <command>
 
 Commands:
+  setup               One-command install & configure (also works via npx)
+  pair                Pair Telegram account for notifications
   start               Start the gateway daemon
   run                 Run the gateway in foreground
   tui [thread]        Open agent TUI on a gateway session
@@ -106,6 +108,9 @@ Commands:
   stop                Stop the daemon
   restart             Restart the daemon
   config              Show config path and contents
+  agent <message>     Send a message to the agent and print response
+  doctor [--fix]      Check system health and configuration
+  cron <command>      Manage scheduled jobs (add, list, trigger, etc.)
 ```
 
 ### `roundhouse status`
@@ -442,7 +447,9 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/router.ts` | `AgentRouter` interface + `SingleAgentRouter` |
 | `src/types.ts` | Core interfaces: `AgentAdapter`, `AgentStreamEvent`, `AgentRouter`, `GatewayConfig` |
 | `src/util.ts` | Pure utilities: `splitMessage`, `isAllowed`, `threadIdToDir`, `startTypingLoop` |
-| `src/cli/cli.ts` | CLI: start, install, tui, update, logs, etc. |
+| `src/cli/cli.ts` | CLI: start, run, install, tui, update, logs, etc. |
+| `src/cli/env-file.ts` | Shared env file parsing, serialization, and quoting |
+| `src/cli/systemd.ts` | Shared systemd service management (unit generation, install, status) |
 | `src/cli/doctor.ts` | CLI doctor command |
 | `src/cli/doctor/runner.ts` | Shared doctor runner (CLI + gateway) |
 | `src/cli/doctor/checks/` | Individual health check modules |

@@ -268,9 +268,11 @@ index.ts
 cli/cli.ts
   ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
   ├── agents/registry.ts (getAgentSdkPackage)
+  ├── cli/env-file.ts (parseEnvFile, serializeEnvFile, envQuote)
+  ├── cli/systemd.ts (resolveExecStart, generateUnit, writeServiceUnit, systemctl, etc.)
   ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
   ├── cli/cron.ts → cron/store.ts, cron/runner.ts, cron/helpers.ts
-  └── (node:fs, node:child_process for daemon management)
+  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/setup-telegram.ts
 
 gateway.ts also imports:
   → cli/doctor/runner.ts for /doctor command

@@ -23,6 +23,10 @@ import {
 } from "../config";
 import { envQuote, parseEnvFile } from "./env-file";
 import {
+  whichSync,
+  systemctl,
+  isServiceActive,
+  systemctlShow,
   resolveExecStart,
   generateUnit,
   writeServiceUnit,
@@ -117,11 +121,6 @@ function execOrFail(cmd: string, args: string[], label: string): string {
   } catch (err: any) {
     throw new Error(`${label}: ${err.stderr?.trim() || err.message}`);
   }
-}
-
-function whichSync(cmd: string): string | null {
-  const result = execSafe("which", [cmd], { silent: true });
-  return result || null;
 }
 
 // ── Arg parser ───────────────────────────────────────
@@ -311,11 +310,10 @@ async function stepStopGateway(): Promise<void> {
     return;
   }
 
-  const isActive = execSafe("systemctl", ["is-active", "roundhouse"], { silent: true });
-  if (isActive === "active") {
+  if (isServiceActive()) {
     log("   Stopping existing gateway...");
     try {
-      execFileSync("sudo", ["-n", "systemctl", "stop", "roundhouse"], { stdio: "pipe", timeout: 30_000 });
+      systemctl("stop");
       ok("Service stopped");
     } catch {
       warn("Could not stop service (may need sudo). Continuing anyway.");
@@ -721,8 +719,8 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
 
   try {
     await writeServiceUnit(unit);
-    execFileSync("sudo", ["-n", "systemctl", "enable", "roundhouse"], { stdio: "pipe" });
-    execFileSync("sudo", ["-n", "systemctl", "start", "roundhouse"], { stdio: "pipe" });
+    systemctl("enable");
+    systemctl("start");
     ok("roundhouse.service enabled and started");
   } catch (err: any) {
     warn(`Systemd install failed: ${err.message}`);
@@ -734,9 +732,8 @@ async function stepPostflight(): Promise<void> {
   step("⑩", "Postflight checks...");
 
   if (platform() === "linux") {
-    const isActive = execSafe("systemctl", ["is-active", "roundhouse"], { silent: true });
-    if (isActive === "active") {
-      const pid = execSafe("systemctl", ["show", "-p", "MainPID", "--value", "roundhouse"], { silent: true });
+    if (isServiceActive()) {
+      const pid = systemctlShow("MainPID");
       ok(`Service active (PID ${pid})`);
     } else {
       warn("Service not active — check: roundhouse logs");

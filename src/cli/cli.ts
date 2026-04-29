@@ -29,6 +29,7 @@ import {
   runSudo,
   isServiceInstalled,
   isServiceActive,
+  systemctlShow,
   resolveExecStart,
   generateUnit,
   writeServiceUnit,
@@ -161,10 +162,7 @@ async function cmdUpdate() {
 }
 
 async function cmdStatus() {
-  // Show systemd status
-  const isActive = run(`systemctl is-active ${SERVICE_NAME}`, { silent: true }) === "active";
-
-  if (!isActive) {
+  if (!isServiceActive()) {
     console.log("\n  ❌ Roundhouse is not running.\n");
     console.log("  Install with: roundhouse install");
     console.log("  Or start foreground: roundhouse start\n");
@@ -178,9 +176,9 @@ async function cmdStatus() {
   } catch {}
 
   // Gather systemd info
-  const pid = run(`systemctl show -p MainPID --value ${SERVICE_NAME}`, { silent: true });
-  const activeState = run(`systemctl show -p ActiveState --value ${SERVICE_NAME}`, { silent: true });
-  const startedAt = run(`systemctl show -p ActiveEnterTimestamp --value ${SERVICE_NAME}`, { silent: true });
+  const pid = systemctlShow("MainPID");
+  const activeState = systemctlShow("ActiveState");
+  const startedAt = systemctlShow("ActiveEnterTimestamp");
 
   // Compute uptime
   let uptimeStr = "unknown";

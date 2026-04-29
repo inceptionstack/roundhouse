@@ -25,7 +25,7 @@ export const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 
 // ── Shell helpers ───────────────────────────────────
 
-function whichSync(cmd: string): string | null {
+export function whichSync(cmd: string): string | null {
   try {
     return execFileSync("which", [cmd], { encoding: "utf8", stdio: "pipe" }).trim() || null;
   } catch {
@@ -63,6 +63,13 @@ export function isServiceInstalled(): boolean {
 
 export function isServiceActive(): boolean {
   return execSilent("systemctl", ["is-active", SERVICE_NAME]) === "active";
+}
+
+/**
+ * Query a systemd service property via `systemctl show`.
+ */
+export function systemctlShow(property: string): string {
+  return execSilent("systemctl", ["show", "-p", property, "--value", SERVICE_NAME]);
 }
 
 // ── ExecStart resolution ────────────────────────────
