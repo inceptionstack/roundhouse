@@ -136,7 +136,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     notifyChatIds: [],
     systemd: platform() === "linux",
     voice: true,
-    psst: true,
+    psst: false,
     nonInteractive: false,
     force: false,
     dryRun: false,
@@ -159,7 +159,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       case "--notify-chat": opts.notifyChatIds.push(parseInt(next(), 10)); break;
       case "--no-systemd": opts.systemd = false; break;
       case "--no-voice": opts.voice = false; break;
-      case "--no-psst": opts.psst = false; break;
+      case "--with-psst": opts.psst = true; break;
       case "--non-interactive": opts.nonInteractive = true; break;
       case "--force": opts.force = true; break;
       case "--dry-run": opts.dryRun = true; break;
@@ -446,7 +446,7 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
 async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<void> {
   if (!opts.psst) {
     step("⑥", "Storing secrets...");
-    ok("Skipped (--no-psst)");
+    ok("Skipped (default — use --with-psst to enable)");
     return;
   }
 
@@ -963,7 +963,7 @@ Channel:
 Service:
   --no-systemd               Skip systemd install
   --no-voice                 Disable voice/STT
-  --no-psst                  Skip psst, use plaintext env file
+  --with-psst                Use psst vault for secrets (default: .env file)
 
 Behavior:
   --non-interactive          No pairing, no prompts

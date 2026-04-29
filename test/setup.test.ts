@@ -15,7 +15,7 @@ describe("parseSetupArgs", () => {
       expect(opts.provider).toBe("amazon-bedrock");
       expect(opts.model).toBe("us.anthropic.claude-opus-4-6-v1");
       expect(opts.extensions).toEqual([]);
-      expect(opts.psst).toBe(true);
+      expect(opts.psst).toBe(false);
       expect(opts.force).toBe(false);
       expect(opts.dryRun).toBe(false);
       expect(opts.nonInteractive).toBe(false);
@@ -73,12 +73,12 @@ describe("parseSetupArgs", () => {
   it("parses boolean flags", () => {
     const opts = parseSetupArgs([
       "--bot-token", "t", "--user", "a",
-      "--no-systemd", "--no-voice", "--no-psst",
+      "--no-systemd", "--no-voice", "--with-psst",
       "--non-interactive", "--force", "--dry-run",
     ]);
     expect(opts.systemd).toBe(false);
     expect(opts.voice).toBe(false);
-    expect(opts.psst).toBe(false);
+    expect(opts.psst).toBe(true);
     expect(opts.nonInteractive).toBe(true);
     expect(opts.force).toBe(true);
     expect(opts.dryRun).toBe(true);

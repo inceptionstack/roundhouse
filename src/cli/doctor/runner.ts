@@ -13,6 +13,7 @@ import { agentChecks } from "./checks/agent";
 import { systemdChecks } from "./checks/systemd";
 import { diskChecks } from "./checks/disk";
 import { sttChecks } from "./checks/stt";
+import { telegramChecks } from "./checks/telegram";
 
 /** Create a DoctorContext with sensible defaults */
 export async function createDoctorContext(overrides: Partial<DoctorContext> = {}): Promise<DoctorContext> {
@@ -34,6 +35,7 @@ const ALL_CHECKS: DoctorCheck[] = [
   ...configChecks,
   ...credentialChecks,
   ...agentChecks,
+  ...telegramChecks,
   ...sttChecks,
   ...diskChecks,
   ...systemdChecks,
