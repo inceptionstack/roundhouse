@@ -109,7 +109,10 @@ export interface UnitOptions {
  * Guard against newline injection in values interpolated into the unit template.
  * A crafted $USER or path containing \n/\r could inject arbitrary systemd directives.
  */
-function assertSafeForUnit(label: string, value: string): void {
+function assertSafeForUnit(label: string, value: unknown): void {
+  if (typeof value !== "string") {
+    throw new Error(`Missing or non-string value for ${label} — cannot generate systemd unit`);
+  }
   if (/[\n\r]/.test(value)) {
     throw new Error(`Unsafe value for ${label} (contains newline) — cannot generate systemd unit`);
   }
@@ -127,7 +130,7 @@ export function generateUnit(opts: UnitOptions): string {
   // Validate all interpolated values before generating the unit
   for (const [label, value] of Object.entries({
     user, execStart: opts.execStart, nodeBinDir: opts.nodeBinDir,
-    envFilePath, home, configPath: CONFIG_PATH,
+    envFilePath, home, configPath: CONFIG_PATH, pathValue,
   })) {
     assertSafeForUnit(label, value);
   }
