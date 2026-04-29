@@ -56,6 +56,28 @@ function systemctl(verb: string, message?: string): void {
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
+  // If systemd service is installed, start via systemctl
+  const serviceInstalled = run(`systemctl list-unit-files ${SERVICE_NAME}.service`, { silent: true }).includes(SERVICE_NAME);
+  if (serviceInstalled) {
+    const isActive = run(`systemctl is-active ${SERVICE_NAME}`, { silent: true }) === "active";
+    if (isActive) {
+      console.log("Roundhouse is already running.");
+      console.log("  Use: roundhouse restart   to restart");
+      console.log("       roundhouse status    to check status");
+      console.log("       roundhouse logs      to tail logs");
+      return;
+    }
+    systemctl("start", "Daemon started.");
+    return;
+  }
+
+  // No systemd service — fall back to foreground
+  console.log("No systemd service found. Running in foreground (use Ctrl+C to stop)...");
+  console.log("  Tip: run 'roundhouse install' to set up the systemd daemon.\n");
+  await cmdRun();
+}
+
+async function cmdRun() {
   process.env.ROUNDHOUSE_CONFIG = CONFIG_PATH;
   const indexPath = resolve(__dirname, "..", "index.ts");
   const jsPath = resolve(__dirname, "..", "dist", "index.js");
@@ -121,7 +143,7 @@ async function cmdInstall() {
 
   let execStart: string;
   if (binPath) {
-    execStart = `${nodePath} ${binPath} start`;
+    execStart = `${nodePath} ${binPath} run`;
   } else {
     // No global install — use tsx directly
     const tsxBin = run("which tsx", { silent: true }) || tsxPath;
@@ -417,7 +439,8 @@ Usage:
 Commands:
   setup               One-command install & configure (also works via npx)
   pair                Pair Telegram account for notifications
-  start               Start the gateway (foreground)
+  start               Start the gateway daemon
+  run                 Run the gateway in foreground
   tui [thread]        Open agent TUI on a gateway session
   install             Install as a systemd daemon (requires sudo)
   uninstall           Remove the systemd daemon
@@ -600,6 +623,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   setup: () => cmdSetup(process.argv.slice(3)),
   pair: () => cmdPair(process.argv.slice(3)),
   start: cmdStart,
+  run: cmdRun,
   install: cmdInstall,
   uninstall: cmdUninstall,
   update: cmdUpdate,

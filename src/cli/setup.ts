@@ -740,12 +740,12 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
     }
   }
 
-  // Build ExecStart
+  // Build ExecStart — uses `roundhouse run` (foreground mode for systemd)
   let execStart: string;
   if (psstBin) {
-    execStart = `${psstBin} run ${nodeBin} ${roundhouseBin} start`;
+    execStart = `${psstBin} run ${nodeBin} ${roundhouseBin} run`;
   } else {
-    execStart = `${nodeBin} ${roundhouseBin} start`;
+    execStart = `${nodeBin} ${roundhouseBin} run`;
   }
 
   // Always include env file for non-secret config (AWS_PROFILE, etc)

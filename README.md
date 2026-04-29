@@ -95,7 +95,8 @@ roundhouse install    # installs as systemd service, starts automatically
 roundhouse <command>
 
 Commands:
-  start               Start the gateway (foreground)
+  start               Start the gateway daemon
+  run                 Run the gateway in foreground
   tui [thread]        Open agent TUI on a gateway session
   install             Install as a systemd daemon (requires sudo)
   uninstall           Remove the systemd daemon
