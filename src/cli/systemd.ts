@@ -8,7 +8,7 @@
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { writeFile, unlink } from "node:fs/promises";
-import { execSync, execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -25,16 +25,20 @@ export const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 
 // ── Shell helpers ───────────────────────────────────
 
-function execSilent(cmd: string): string {
+function whichSync(cmd: string): string | null {
   try {
-    return execSync(cmd, { encoding: "utf8", stdio: "pipe" }).trim();
+    return execFileSync("which", [cmd], { encoding: "utf8", stdio: "pipe" }).trim() || null;
   } catch {
-    return "";
+    return null;
   }
 }
 
-function whichSync(cmd: string): string | null {
-  return execSilent(`which ${cmd}`) || null;
+function execSilent(cmd: string, args: string[]): string {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe" }).trim();
+  } catch {
+    return "";
+  }
 }
 
 export function runSudo(...args: string[]): void {
@@ -54,11 +58,11 @@ export function hasSudoAccess(): boolean {
 }
 
 export function isServiceInstalled(): boolean {
-  return execSilent(`systemctl list-unit-files ${SERVICE_NAME}.service`).includes(SERVICE_NAME);
+  return execSilent("systemctl", ["list-unit-files", `${SERVICE_NAME}.service`]).includes(SERVICE_NAME);
 }
 
 export function isServiceActive(): boolean {
-  return execSilent(`systemctl is-active ${SERVICE_NAME}`) === "active";
+  return execSilent("systemctl", ["is-active", SERVICE_NAME]) === "active";
 }
 
 // ── ExecStart resolution ────────────────────────────
@@ -102,12 +106,31 @@ export interface UnitOptions {
 }
 
 /**
+ * Guard against newline injection in values interpolated into the unit template.
+ * A crafted $USER or path containing \n/\r could inject arbitrary systemd directives.
+ */
+function assertSafeForUnit(label: string, value: string): void {
+  if (/[\n\r]/.test(value)) {
+    throw new Error(`Unsafe value for ${label} (contains newline) — cannot generate systemd unit`);
+  }
+}
+
+/**
  * Generate a systemd unit file string.
  */
 export function generateUnit(opts: UnitOptions): string {
   const user = opts.user || process.env.USER || "root";
   const envFilePath = opts.envFilePath || ENV_FILE_PATH;
+  const home = homedir();
   const pathValue = `${opts.nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
+
+  // Validate all interpolated values before generating the unit
+  for (const [label, value] of Object.entries({
+    user, execStart: opts.execStart, nodeBinDir: opts.nodeBinDir,
+    envFilePath, home, configPath: CONFIG_PATH,
+  })) {
+    assertSafeForUnit(label, value);
+  }
 
   return `[Unit]
 Description=Roundhouse Chat Gateway
@@ -116,7 +139,7 @@ After=network.target
 [Service]
 Type=simple
 User=${user}
-WorkingDirectory=${homedir()}
+WorkingDirectory=${home}
 ExecStart=${opts.execStart}
 Restart=on-failure
 RestartSec=5
@@ -124,7 +147,7 @@ EnvironmentFile=-${envFilePath}
 Environment=ROUNDHOUSE_CONFIG=${CONFIG_PATH}
 Environment=NODE_ENV=production
 Environment=PATH=${pathValue}
-Environment=HOME=${homedir()}
+Environment=HOME=${home}
 
 [Install]
 WantedBy=multi-user.target
