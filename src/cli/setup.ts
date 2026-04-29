@@ -232,6 +232,22 @@ async function stepPreflight(opts: SetupOptions): Promise<void> {
     }
   }
 
+  // Seed .env with commented-out example if it doesn't exist yet
+  if (!(await fileExists(ENV_PATH))) {
+    const seed = [
+      "# Roundhouse environment file",
+      "# Uncomment and set values, or use: roundhouse setup",
+      "#",
+      "# TELEGRAM_BOT_TOKEN=\"your-bot-token\"",
+      "# BOT_USERNAME=\"your_bot_username\"",
+      "# ALLOWED_USERS=\"your_telegram_username\"",
+      "# AWS_PROFILE=\"default\"",
+      "# AWS_REGION=\"us-east-1\"",
+      "",
+    ].join("\n");
+    await writeFile(ENV_PATH, seed, { mode: 0o600 });
+  }
+
   // Disk space (rough check)
   try {
     const dfOut = execSafe("df", ["-BG", "--output=avail", homedir()], { silent: true });
