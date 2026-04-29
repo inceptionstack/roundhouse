@@ -41,6 +41,16 @@ import {
   type BotInfo,
   type PairResult,
 } from "./setup-telegram";
+import { promptText, promptMasked } from "./setup-prompts";
+import { createTextLogger, createJsonLogger, type SetupLogger, type SetupDiagnostics, printDiagnosticError } from "./setup-logger";
+import { printQr } from "./qr";
+import {
+  createPairingNonce,
+  createPairingLink,
+  readPendingPairing,
+  writePendingPairing,
+  type PendingPairing,
+} from "../pairing";
 
 // ── Types ────────────────────────────────────────────
 
@@ -58,6 +68,12 @@ interface SetupOptions {
   nonInteractive: boolean;
   force: boolean;
   dryRun: boolean;
+  /** Telegram-focused setup flow */
+  telegram: boolean;
+  /** Fully headless automation (no TTY prompts) */
+  headless: boolean;
+  /** QR code display mode */
+  qr: "auto" | "always" | "never";
 }
 
 type StepStatus = "ok" | "warn" | "skip" | "fail";
@@ -73,11 +89,11 @@ const EXTENSION_NAME_RE = /^@?[a-z0-9][\w.\-/]*$/i;
 
 // ── Helpers ──────────────────────────────────────────
 
-function log(msg: string) { console.log(msg); }
-function step(n: string, label: string) { log(`\n${n} ${label}`); }
-function ok(msg: string) { log(`   ✓ ${msg}`); }
-function warn(msg: string) { log(`   ⚠ ${msg}`); }
-function fail(msg: string) { log(`   ✗ ${msg}`); }
+let log = (msg: string) => { console.log(msg); };
+let step = (n: string, label: string) => { log(`\n${n} ${label}`); };
+let ok = (msg: string) => { log(`   ✓ ${msg}`); };
+let warn = (msg: string) => { log(`   ⚠ ${msg}`); };
+let fail = (msg: string) => { log(`   ✗ ${msg}`); };
 
 async function atomicWriteJson(path: string, data: unknown): Promise<void> {
   const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
@@ -140,6 +156,9 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     nonInteractive: false,
     force: false,
     dryRun: false,
+    telegram: false,
+    headless: false,
+    qr: "auto",
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -161,6 +180,10 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       case "--no-voice": opts.voice = false; break;
       case "--with-psst": opts.psst = true; break;
       case "--non-interactive": opts.nonInteractive = true; break;
+      case "--telegram": opts.telegram = true; break;
+      case "--headless": opts.headless = true; opts.nonInteractive = true; break;
+      case "--qr": opts.qr = "always"; break;
+      case "--no-qr": opts.qr = "never"; break;
       case "--force": opts.force = true; break;
       case "--dry-run": opts.dryRun = true; break;
       default:
@@ -174,15 +197,26 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     opts.botToken = process.env.TELEGRAM_BOT_TOKEN ?? "";
   }
 
+  // Headless: reject --bot-token (argv visible in process listings)
+  if (opts.headless && argv.some((a) => a === "--bot-token")) {
+    throw new Error(
+      "--bot-token is not accepted in --headless mode (argv visible in process listings).\n" +
+      "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --headless --user USERNAME",
+    );
+  }
+
+  // Interactive --telegram defers token/user prompting to the wizard
+  const isInteractiveTelegram = opts.telegram && !opts.headless && !opts.nonInteractive && process.stdin.isTTY;
+
   // Validate
-  if (!opts.botToken && !opts.dryRun) {
+  if (!opts.botToken && !opts.dryRun && !isInteractiveTelegram) {
     throw new Error(
       "Bot token required. Provide via:\n" +
       "  TELEGRAM_BOT_TOKEN=... roundhouse setup --user USERNAME\n" +
       "  roundhouse setup --bot-token TOKEN --user USERNAME",
     );
   }
-  if (opts.users.length === 0) {
+  if (opts.users.length === 0 && !isInteractiveTelegram) {
     throw new Error(
       "At least one --user USERNAME is required.\n" +
       "This is your Telegram username (without @).",
@@ -768,6 +802,250 @@ async function stepPostflight(): Promise<void> {
   }
 }
 
+// ── BotFather Guide ──────────────────────────────────
+
+function printBotFatherGuide(): void {
+  log("");
+  log("  🤖 Create a Telegram Bot");
+  log("  ────────────────────────");
+  log("  1. Open https://t.me/BotFather");
+  log("  2. Send /newbot");
+  log("  3. Choose a display name (e.g. 'My Roundhouse')");
+  log("  4. Choose a username ending in 'bot' (e.g. 'my_roundhouse_bot')");
+  log("  5. Copy the token BotFather returns");
+  log("");
+}
+
+// ── Interactive Telegram Setup ───────────────────────
+
+async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
+  log("\n🔧 Roundhouse Telegram Setup");
+  log("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+  try {
+    // Step 1: Preflight
+    await stepPreflight(opts);
+
+    // Step 2: Get bot token (prompt if not provided)
+    if (!opts.botToken) {
+      log("");
+      printBotFatherGuide();
+      opts.botToken = await promptMasked("  Paste your bot token");
+      if (!opts.botToken) {
+        fail("No token provided");
+        process.exit(2);
+      }
+    }
+    const botInfo = await stepValidateToken(opts);
+
+    // Step 3: Get username (prompt if not provided)
+    if (opts.users.length === 0) {
+      step("③", "Telegram username...");
+      const username = await promptText("  Your Telegram username (without @)");
+      if (!username) {
+        fail("Username required");
+        process.exit(2);
+      }
+      opts.users.push(username.replace(/^@/, ""));
+      ok(`Allowed: ${opts.users.map(u => `@${u}`).join(", ")}`);
+    }
+
+    // Step 4: Stop existing gateway
+    await stepStopGateway();
+
+    // Step 5: Install packages
+    await stepInstallPackages(opts);
+
+    // Step 6: Pair via Telegram
+    step("⑥", "Pairing with Telegram...");
+    const nonce = createPairingNonce();
+    const pairingLink = createPairingLink(botInfo.username, nonce);
+    log(`\n  Open this link to pair:\n`);
+    log(`  🔗 ${pairingLink}\n`);
+    printQr(pairingLink, opts.qr);
+    log(`  Or send /start ${nonce} to @${botInfo.username}`);
+    log("");
+
+    const pairResult = await pairTelegram(
+      opts.botToken, botInfo.username, opts.users,
+      300_000, log, { nonce, showLink: false },
+    );
+    if (!pairResult) {
+      warn("Pairing timed out. Run 'roundhouse pair' later.");
+    } else {
+      ok(`Paired with @${pairResult.username} (chat: ${pairResult.chatId})`);
+      if (!opts.notifyChatIds.includes(pairResult.chatId)) {
+        opts.notifyChatIds.push(pairResult.chatId);
+      }
+    }
+
+    // Step 7: Store secrets
+    await stepStoreSecrets(opts, botInfo);
+
+    // Step 8: Write config
+    await stepConfigure(opts, botInfo, pairResult);
+
+    // Step 9: Register commands + install service
+    await stepRegisterCommands(opts);
+    await stepInstallSystemd(opts);
+
+    // Step 10: Verify
+    await stepPostflight();
+
+    // Done!
+    log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    log("✅ Roundhouse is ready!");
+    log(`   Bot: @${botInfo.username}`);
+    log(`   Send /status to @${botInfo.username} on Telegram.\n`);
+  } catch (err: any) {
+    log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    log(`❌ Setup failed: ${err.message}`);
+    log("   Re-run: roundhouse setup --telegram\n");
+    process.exit(1);
+  }
+}
+
+// ── Headless Telegram Setup ─────────────────────────
+
+async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
+  const logger = createJsonLogger();
+
+  // Override module-level log helpers to emit JSON instead of text
+  const savedLog = log, savedStep = step, savedOk = ok, savedWarn = warn, savedFail = fail;
+  log = (msg) => logger.info("log", msg);
+  step = (_n, label) => logger.info("step", label);
+  ok = (msg) => logger.ok(msg);
+  warn = (msg) => logger.warn("warn", msg);
+  fail = (msg) => logger.fail(msg);
+
+  try {
+    // Validate required inputs
+    if (!opts.botToken) {
+      logger.error("validation.failed", "TELEGRAM_BOT_TOKEN env var required for --headless");
+      process.exit(2);
+    }
+    if (opts.users.length === 0) {
+      logger.error("validation.failed", "--user is required for --headless");
+      process.exit(2);
+    }
+
+    // Step 1: Preflight
+    logger.step(1, 9, "preflight.start", "Running preflight checks");
+    await stepPreflight(opts);
+    logger.ok("Preflight passed");
+
+    // Step 2: Validate token
+    logger.step(2, 9, "telegram.validate", "Validating Telegram bot token");
+    const botInfo = await stepValidateToken(opts);
+    logger.ok(`Bot: @${botInfo.username} (id: ${botInfo.id})`);
+
+    // Step 3: Stop existing gateway
+    logger.step(3, 9, "gateway.stop", "Checking for running gateway");
+    await stepStopGateway();
+
+    // Step 4: Install packages
+    logger.step(4, 9, "packages.install", "Installing packages");
+    await stepInstallPackages(opts);
+    logger.ok("Packages installed");
+
+    // Step 5: Create pending pairing
+    logger.step(5, 9, "pairing.pending", "Creating pending pairing");
+    let nonce: string;
+    const existing = await readPendingPairing();
+    if (existing?.status === "pending" && !opts.force) {
+      nonce = existing.nonce;
+      logger.info("pairing.reuse", `Reusing existing nonce: ${nonce}`);
+    } else {
+      nonce = createPairingNonce();
+    }
+    const pairingLink = createPairingLink(botInfo.username, nonce);
+    const pendingPairing: PendingPairing = {
+      version: 1,
+      nonce,
+      botUsername: botInfo.username,
+      allowedUsers: opts.users,
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    };
+    await writePendingPairing(pendingPairing);
+    logger.info("pairing.link", `Pairing link: ${pairingLink}`, { pairingLink, nonce });
+
+    // Step 6: Store secrets
+    logger.step(6, 9, "secrets.store", "Storing secrets");
+    await stepStoreSecrets(opts, botInfo);
+
+    // Step 7: Write config (no pair result yet — gateway will complete pairing)
+    logger.step(7, 9, "config.write", "Writing configuration");
+    await stepConfigure(opts, botInfo, null);
+    logger.ok("Config written");
+
+    // Step 8: Register commands
+    logger.step(8, 9, "commands.register", "Registering bot commands");
+    await stepRegisterCommands(opts);
+    logger.ok("Bot commands registered");
+
+    // Step 9: Install and start service
+    logger.step(9, 9, "service.install", "Installing and starting service");
+    if (!opts.systemd) {
+      logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
+    } else {
+      await stepInstallSystemd(opts);
+      logger.ok("Service installed and started");
+
+      // Verify service is active
+      try {
+        const { execFileSync } = await import("node:child_process");
+        const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
+        if (state === "active") {
+          logger.ok("Service is active");
+        } else {
+          logger.warn("service.state", `Service state: ${state}`);
+        }
+      } catch {
+        logger.warn("service.state", "Could not verify service state");
+      }
+    }
+
+    // Success
+    logger.info("setup.complete", "Headless setup complete", {
+      botUsername: botInfo.username,
+      pairingLink,
+      pairingStatus: "pending",
+      serviceInstalled: opts.systemd,
+    });
+    log("");
+    log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    log(`✅ Roundhouse installed and running!`);
+    log(``);
+    log(`   Bot: @${botInfo.username}`);
+    log(`   Pairing: Open ${pairingLink} to complete setup`);
+    log(`   Gateway is running and will accept pairing automatically.`);
+    log(``);
+  } catch (err: any) {
+    const diag: SetupDiagnostics = {
+      node: process.version,
+      platform: platform(),
+      arch: process.arch,
+      cwd: process.cwd(),
+      roundhouseDir: ROUNDHOUSE_DIR,
+      configExists: await fileExists(CONFIG_PATH).catch(() => false),
+      envExists: await fileExists(ENV_PATH).catch(() => false),
+      pairingStatus: (await readPendingPairing())?.status ?? "not found",
+      serviceState: "unknown",
+      error: { name: err.name, message: err.message, stack: err.stack },
+    };
+    try {
+      const { execFileSync } = await import("node:child_process");
+      diag.serviceState = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
+    } catch {}
+    printDiagnosticError(diag, true);
+    process.exit(1);
+  } finally {
+    // Restore module-level log helpers
+    log = savedLog; step = savedStep; ok = savedOk; warn = savedWarn; fail = savedFail;
+  }
+}
+
 // ── Orchestrator ─────────────────────────────────────
 
 export async function cmdSetup(argv: string[]): Promise<void> {
@@ -785,6 +1063,17 @@ export async function cmdSetup(argv: string[]): Promise<void> {
     return;
   }
 
+  // Route to --telegram flows
+  if (opts.telegram) {
+    if (opts.headless) {
+      await runHeadlessTelegramSetup(opts);
+    } else {
+      await runInteractiveTelegramSetup(opts);
+    }
+    return;
+  }
+
+  // Legacy flow (no --telegram flag)
   log("\n🔧 Roundhouse Setup");
   log("━━━━━━━━━━━━━━━━━━━");
 
@@ -957,15 +1246,21 @@ function printDryRun(opts: SetupOptions): void {
 function printSetupHelp(): void {
   console.log(`
 Usage:
-  TELEGRAM_BOT_TOKEN=... roundhouse setup --user USERNAME
-  roundhouse setup --bot-token TOKEN --user USERNAME [options]
+  roundhouse setup --telegram                     Interactive wizard (recommended)
+  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --telegram --headless --user USERNAME          Headless automation (SSM/cloud-init)
+  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --user USERNAME                                Legacy (non-wizard) setup
 
-Required:
+Modes:
+  --telegram                 Telegram-focused setup (wizard or headless)
+  --headless                 Non-interactive automation (implies --non-interactive)
+                             Requires TELEGRAM_BOT_TOKEN env var and --user
+
+Required (or prompted in interactive --telegram):
   --user <username>          Telegram username (repeatable, strips @)
 
-Token (one required):
+Token:
   TELEGRAM_BOT_TOKEN env     Preferred — not in shell history
-  --bot-token <token>        Fallback for scripts
+  --bot-token <token>        Accepted in interactive mode only
 
 Agent:
   --provider <provider>      AI provider (default: amazon-bedrock)
@@ -980,6 +1275,10 @@ Service:
   --no-systemd               Skip systemd install
   --no-voice                 Disable voice/STT
   --with-psst                Use psst vault for secrets (default: .env file)
+
+Display:
+  --qr                       Force QR code display
+  --no-qr                    Disable QR code display
 
 Behavior:
   --non-interactive          No pairing, no prompts

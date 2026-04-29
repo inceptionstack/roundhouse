@@ -1,191 +1,166 @@
-# Roundhouse Plan
+# Plan: Setup --telegram (Interactive + Headless)
 
-## Priority Order
-1. Config migration (~/.config/roundhouse/ → ~/.roundhouse/)
-2. Cron system (internal scheduler)
-3. Heartbeat / health endpoint
+## Overview
 
----
+Two modes behind `roundhouse setup --telegram`:
 
-## 1. Config Directory Migration
-
-**From:** `~/.config/roundhouse/` → **To:** `~/.roundhouse/`
-
-New layout:
-```
-~/.roundhouse/
-  gateway.config.json
-  env
-  crons/              # job definitions
-  cron-state/         # mutable scheduler state
-  cron-runs/          # run history
-  incoming/           # attachment storage (already here)
-  whisper-tmp/        # STT temp (already here)
-```
-
-Migration strategy:
-- New canonical: `~/.roundhouse/`
-- Fallback read from `~/.config/roundhouse/` with deprecation warning
-- `roundhouse install` writes to new path
-- Doctor check for stale old-path configs
-
-Files to update: config.ts, cli.ts (install), doctor checks, gateway.ts, README.md, architecture.md
+1. **Interactive wizard** — guides user from zero to chatting on Telegram
+2. **Headless automation** — SSM/cloud-init installs, starts gateway, user pairs later
 
 ---
 
-## 2. Cron System — Internal Scheduler (Cross-Platform)
+## Feature 1: Interactive Wizard
 
-### Architecture
-```
-Gateway process
-  → CronSchedulerService (started after chat init)
-      → setInterval tick every 60s
-      → Load/hot-reload jobs from ~/.roundhouse/crons/*.json
-      → Check which are due (timezone-aware via croner)
-      → Execute: fresh agent per run, dispose after
-      → Save results to ~/.roundhouse/cron-runs/
-      → Notify Telegram directly
-      → Catch-up missed jobs on startup
+### Command
+```bash
+npx @inceptionstack/roundhouse setup --telegram
 ```
 
-### Key design decisions
-- **Internal scheduler, not OS cron** — cross-platform (Linux, Mac, Windows)
-- **Fresh agent per run** — not shared with gateway's interactive agent
-- **croner package** — zero-dep cron expression parser with IANA timezone support
-- **Separate job config and state files** — hot reload without losing state
-- **Catch-up: latest only by default** — prevent runaway after long downtime
+### Flow (10 steps)
+1. Detect TTY → if no TTY, fail with "use --headless for automation"
+2. Print inline BotFather guide (create bot, get token)
+3. Masked token prompt via Node readline (no deps, no shell history)
+4. Prompt for Telegram username (who can use the bot)
+5. Preflight checks (node, npm, disk, AWS creds)
+6. Validate token via `getMe`, discover bot username
+7. Install packages (roundhouse, pi-coding-agent)
+8. Generate nonce, print `t.me/bot?start=nonce` link + QR code
+9. Poll for `/start <nonce>`, capture chat ID + user ID
+10. Write config/env, register bot commands, install+start service, send confirmation
 
-### Schedule types
-```json
-{ "type": "cron", "cron": "0 8 * * *", "tz": "Asia/Jerusalem" }
-{ "type": "interval", "every": "6h" }
-{ "type": "once", "at": "2026-04-28T08:00:00", "tz": "Asia/Jerusalem" }
-{ "type": "once", "at": "30m" }
+### Key Details
+- **Masked input**: `readline.Interface` with `_writeToOutput` override (Node built-in, zero deps)
+- **QR code**: `qrcode-terminal` package (small, mature, purpose-built)
+- **Service auto-detect**: systemd on Linux, skip with instructions on macOS/Windows
+- **Token never in argv or logs** — env var or masked prompt only
+
+---
+
+## Feature 2: Headless Automation
+
+### Command
+```bash
+TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --headless --user royosh
 ```
 
-### Job config (standalone JSON per job)
-```json
-{
-  "id": "daily-report",
-  "enabled": true,
-  "createdAt": "2026-04-27T12:00:00.000Z",
-  "updatedAt": "2026-04-27T12:00:00.000Z",
-  "schedule": { "type": "cron", "cron": "0 8 * * *", "tz": "Asia/Jerusalem" },
-  "prompt": "Prepare my daily report for {{date.local}}.",
-  "timeoutMs": 1800000,
-  "catchUp": { "mode": "latest", "maxRuns": 1 },
-  "notify": {
-    "telegram": { "chatIds": ["123456789"], "onlyOn": "always" }
-  }
+### Flow (9 steps)
+1. Parse flags/env — reject `--bot-token` (argv visible in process listings)
+2. Require `--user` (no empty allowlist)
+3. Preflight checks
+4. Validate token via `getMe`
+5. Install packages
+6. Generate nonce, write `~/.roundhouse/telegram-pairing.json`
+7. Write config/env with `allowedUsers` but empty `allowedUserIds`/`notifyChatIds`
+8. Register bot commands
+9. Install, enable, start systemd → verify active → exit 0
+
+### Post-Setup (gateway handles)
+- Gateway starts immediately and is functional
+- Gateway detects `telegram-pairing.json` with `status: "pending"`
+- When user opens `t.me/bot?start=nonce` and sends `/start`:
+  - Gateway validates username against `allowedUsers`
+  - Captures `chatId`, `userId`, writes them to config
+  - Marks pairing complete
+  - Sends confirmation message
+- Nonce persists across gateway restarts until paired
+
+### Key Details
+- **Structured JSON logging** — one JSON object per line (for SSM/cloud-init/Docker)
+- **Diagnostic errors** — on failure, dump versions, paths, config state, service state
+- **Exit codes**: 0=success, 1=general, 2=usage, 3=preflight, 4=telegram, 5=packages, 6=config, 7=service
+- **Token via env var only** — `--bot-token` rejected in headless mode
+
+---
+
+## New File: `src/pairing.ts`
+
+```ts
+interface PendingPairing {
+  version: 1;
+  nonce: string;           // "rh-" + randomBytes(8).hex
+  botUsername: string;
+  allowedUsers: string[];
+  createdAt: string;       // ISO
+  status: "pending" | "paired";
+  pairedAt?: string;
+  chatId?: number;
+  userId?: number;
+  username?: string;
 }
 ```
 
-### Template variables
-```
-{{job.id}}, {{run.id}}, {{run.scheduledAt}}, {{date.iso}}, {{date.local}}, {{vars.name}}
-```
-Unknown vars fail validation at add/edit time. No JS eval.
+- Atomic writes (tmp+rename, mode 0600)
+- `readPendingPairing()`, `writePendingPairing()`, `completePendingPairing()`
+- Reuse nonce on re-run without `--force`; rotate on `--force`
 
-### CLI commands
-```
-roundhouse cron add <id> --prompt "..." --cron "0 8 * * *" --tz Asia/Jerusalem --telegram 123
-roundhouse cron add <id> --prompt "..." --every 6h
-roundhouse cron add <id> --prompt "..." --at 30m
-roundhouse cron list [--json]
-roundhouse cron show <id>
-roundhouse cron trigger <id>        # works without gateway running
-roundhouse cron runs <id>
-roundhouse cron edit <id> [flags]
-roundhouse cron pause <id>
-roundhouse cron resume <id>
-roundhouse cron delete <id>
+## Gateway Pairing Hook
+
+In `gateway.ts`, before `isAllowed()` check:
+
+```ts
+if (pendingPairing?.status === "pending" && isStartForNonce(text, nonce)) {
+  // Validate username against pendingPairing.allowedUsers
+  // Write chatId + userId to config
+  // Mark pairing complete
+  // Update in-memory config (no restart needed)
+  // Send confirmation
+}
 ```
 
-### Telegram /crons
-```
-/crons                  # list all jobs
-/crons show <id>        # job details + last run
-/crons trigger <id>     # run now
-/crons pause <id>
-/crons resume <id>
-```
+## Files to Modify
 
-### Conversational setup
-User says: "set a cron daily 8am Israel time to give me current AWS costs"
-Agent runs:
-```bash
-roundhouse cron add aws-costs \
-  --cron "0 8 * * *" \
-  --tz "Asia/Jerusalem" \
-  --prompt "Check current AWS costs. Summarize MTD spend, yesterday, major services, anomalies." \
-  --telegram "123456789" \
-  --timeout 30m
-```
+| File | Changes |
+|------|---------|
+| `src/cli/setup.ts` | Extend options, add wizard + headless flows, structured logger |
+| `src/cli/setup-telegram.ts` | Accept caller nonce, export lower-level helpers |
+| `src/gateway.ts` | Pending pairing detection + completion before auth |
+| `src/cli/cli.ts` | Updated help text |
+| `package.json` | Add `qrcode-terminal` dep |
 
-### New files
-```
-src/cron/types.ts       # CronJobConfig, CronJobState, CronRunRecord, CronSchedule
-src/cron/durations.ts   # parse "6h", "30m", "2d" → ms
-src/cron/template.ts    # {{var}} renderer
-src/cron/schedule.ts    # isDue(), nextRun() using croner
-src/cron/store.ts       # read/write/list job JSON, state, run records
-src/cron/runner.ts      # create fresh agent, render prompt, run, notify
-src/cron/scheduler.ts   # CronSchedulerService: tick, catch-up, hot reload
-src/cron/format.ts      # Telegram formatting for /crons
-src/cli/cron.ts         # CLI cron subcommands
-src/notify/telegram.ts  # shared Telegram sender (extract from gateway)
-```
+## Files to Create
 
-### Concurrency
-**Strictly serial: one cron run at a time, globally.**
+| File | Purpose |
+|------|---------|
+| `src/pairing.ts` | Persistent pairing state (pending/paired) |
+| `src/cli/setup-prompts.ts` | `promptText()`, `promptMasked()` — Node readline only |
+| `src/cli/setup-logger.ts` | Text (interactive) + JSON (headless) structured logger |
+| `src/cli/qr.ts` | QR code wrapper (qrcode-terminal) |
 
-All due jobs enter a FIFO queue and drain one by one. No parallelism ever.
-- Use `p-queue` (0 deps, 14M weekly downloads) with `concurrency: 1`
-- Provides: queue.size, queue.pending, pause/resume, events (idle, active, completed, error)
-- Maps naturally to `/crons` status display and `cron pause/resume` commands
-- If a job takes 30 minutes, the next job waits
-- Consider replacing hand-rolled promise chains in gateway (threadLocks) and STT (activeStt) with p-queue later for consistency
+## Backward Compatibility
 
-This is intentional:
-- Agents share the workspace and filesystem — concurrent bash tools conflict
-- Agents share LLM rate limits and API quotas
-- Memory: one agent session at a time is predictable
-- Users don't need to think about parallelism
+- `roundhouse setup --user X` (no `--telegram`) → current flow, unchanged
+- `--non-interactive` → accepted, maps to headless behavior
+- `--bot-token` → accepted for non-headless, discouraged in docs
+- `--notify-chat` → still skips pairing
+- Existing configs preserved unless `--force`
 
-Run statuses: scheduled, queued, running, completed, failed, timeout, abandoned
+## Test Plan
 
-### Long-running jobs
-- Default timeout: 30 minutes
-- agent.abort(threadId) on timeout
-- Always dispose fresh agent
-- Stale running state detected on restart → mark as abandoned
+### Unit Tests
+- Argument parsing: `--telegram`, `--headless` combinations and rejections
+- Prompt helpers: masked input, Ctrl+C handling (fake streams)
+- Pairing persistence: write/read/complete/reuse/force-rotate
+- Gateway pairing: nonce match, username validation, config merge, in-memory update
+- Structured logging: valid JSON lines, no token leakage
+- Service detection: systemd/macOS/container scenarios
+- Error diagnostics: versions, paths, config state
 
-### Hot reload
-- Poll job files every tick (check mtime)
-- Optional fs.watch as fast path
-- Invalid JSON → keep last valid, expose error in /status
+### E2E Smoke Tests
+- Fresh EC2: `--telegram --headless --user X` → service active, config written, pairing pending
+- Open pairing link → gateway completes pairing, sends confirmation
+- macOS interactive → reaches manual-start instructions
+- Docker with `--service skip` → config written, exits successfully
 
-### Security
-- Cron prompts are privileged automation (can run tools)
-- Only allowed users can manage via Telegram
-- Job files mode 0600
-- Audit: createdAt, updatedAt in job config
-- No secrets in job JSON
+## Implementation Order
 
----
-
-## 3. Heartbeat / Health Endpoint (after cron)
-```
-src/heartbeat.ts — node:http on 127.0.0.1:8787
-GET /healthz     — liveness (cheap, always fast)
-GET /readyz      — readiness (chat initialized)
-GET /status.json — rich diagnostics + cached doctor + scheduler state
-```
-
----
-
-## 4. Future Items
-- TTS (outgoing voice replies)
-- Internal maintenance timers (session compaction, cache cleanup) — NOT called "crons"
-- Cross-platform session unification
-- Multi-agent routing
+1. `src/cli/setup-prompts.ts` — masked input, text prompt
+2. `src/cli/setup-logger.ts` — text + JSON structured logger
+3. `src/pairing.ts` — persistent pairing state
+4. `src/cli/qr.ts` — QR wrapper
+5. `src/cli/setup-telegram.ts` — expose lower-level helpers, accept nonce
+6. `src/cli/setup.ts` — Feature 1: interactive wizard flow
+7. Tests for Feature 1
+8. `src/gateway.ts` — pending pairing hook
+9. `src/cli/setup.ts` — Feature 2: headless flow
+10. Tests for Feature 2
+11. E2E on fresh EC2

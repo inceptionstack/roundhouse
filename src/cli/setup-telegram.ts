@@ -24,12 +24,12 @@ export interface PairResult {
 
 // ── API helper ───────────────────────────────────────
 
-function redactToken(token: string): string {
+export function redactToken(token: string): string {
   if (token.length < 10) return "***";
   return token.slice(0, 4) + "..." + token.slice(-4);
 }
 
-async function telegramApi(
+export async function telegramApi(
   token: string,
   method: string,
   params?: Record<string, unknown>,
@@ -78,6 +78,9 @@ export async function sendMessage(token: string, chatId: number, text: string): 
 /**
  * Pair with a Telegram user — wait for them to send /start <nonce>.
  * Returns the user's chat ID and numeric user ID, or null on timeout.
+ *
+ * If opts.nonce is provided, use it instead of generating a new one.
+ * If opts.showLink is false, skip printing the pairing instructions.
  */
 export async function pairTelegram(
   token: string,
@@ -85,8 +88,9 @@ export async function pairTelegram(
   allowedUsers: string[],
   timeoutMs = 300_000,
   log: (msg: string) => void = console.log,
+  opts?: { nonce?: string; showLink?: boolean },
 ): Promise<PairResult | null> {
-  const nonce = `rh-${randomBytes(3).toString("hex")}`;
+  const nonce = opts?.nonce ?? `rh-${randomBytes(8).toString("hex")}`;
   const normalizedUsers = allowedUsers.map((u) => u.replace(/^@/, "").toLowerCase());
 
   // Clear stale updates — advance offset past existing
@@ -101,8 +105,11 @@ export async function pairTelegram(
     // If getUpdates fails, start from 0
   }
 
-  log(`   Open https://t.me/${botUsername} and send: /start ${nonce}`);
-  log(`   Waiting... (Ctrl+C to skip)\n`);
+  if (opts?.showLink !== false) {
+    log(`   Open https://t.me/${botUsername}?start=${nonce} and tap Start`);
+    log(`   Or send /start ${nonce} to @${botUsername}`);
+    log(`   Waiting... (Ctrl+C to skip)\n`);
+  }
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

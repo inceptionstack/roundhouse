@@ -20,6 +20,7 @@ import { BOT_COMMANDS } from "./commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel } from "./memory/types";
+import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
@@ -242,6 +243,7 @@ export class Gateway {
   private chat!: Chat;
   private router: AgentRouter;
   private config: GatewayConfig;
+  private pairingComplete = false;
   private sttService: SttService | null = null;
   private cronScheduler: CronSchedulerService | null = null;
 
@@ -249,6 +251,82 @@ export class Gateway {
     this.router = router;
     this.config = config;
     _botUsername = config.chat.botUsername || "";
+  }
+
+  /** Handle pending Telegram pairing from headless setup. Returns true if handled. */
+  private async handlePendingPairing(
+    text: string,
+    message: any,
+    thread: any,
+    authorName: string,
+  ): Promise<boolean> {
+    try {
+      const pending = await readPendingPairing();
+      if (!pending || pending.status !== "pending" || !isStartForNonce(text, pending.nonce)) {
+        return false;
+      }
+
+      const fromUser = authorName.toLowerCase();
+      const allowed = pending.allowedUsers.map(u => u.toLowerCase());
+      if (!fromUser || !allowed.includes(fromUser)) {
+        console.log(`[roundhouse] Pairing nonce from unauthorized user @${authorName}`);
+        return false;
+      }
+
+      // Extract IDs from the chat adapter message
+      const chatId = typeof message.chatId === "number"
+        ? message.chatId
+        : typeof thread.id === "string" && thread.id.startsWith("telegram:")
+          ? parseInt(thread.id.split(":")[1], 10)
+          : undefined;
+      const userId = typeof message.author?.id === "string"
+        ? parseInt(message.author.id, 10)
+        : undefined;
+
+      if (chatId == null || Number.isNaN(chatId) || userId == null || Number.isNaN(userId)) {
+        console.error(`[roundhouse] Pairing nonce matched but could not extract IDs: chatId=${chatId} userId=${userId}. Pairing left pending.`);
+        await thread.post("⚠️ Pairing nonce accepted but could not capture your Telegram IDs. Try sending /start again, or run: roundhouse pair");
+        return true;
+      }
+
+      await completePendingPairing({ chatId, userId, username: authorName });
+
+      // Update in-memory config
+      if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];
+      if (!this.config.chat.allowedUserIds.includes(userId)) {
+        this.config.chat.allowedUserIds.push(userId);
+      }
+      if (!this.config.chat.notifyChatIds) this.config.chat.notifyChatIds = [];
+      if (!this.config.chat.notifyChatIds.includes(chatId)) {
+        this.config.chat.notifyChatIds.push(chatId);
+      }
+
+      // Atomic config file update
+      try {
+        const { readFile: rf, rename: mvf, writeFile: wf, unlink: ulf } = await import("node:fs/promises");
+        const { randomBytes: rb } = await import("node:crypto");
+        const cfgPath = join(ROUNDHOUSE_DIR, "gateway.config.json");
+        const configRaw = JSON.parse(await rf(cfgPath, "utf8"));
+        if (!configRaw.chat) configRaw.chat = {};
+        if (!configRaw.chat.allowedUserIds) configRaw.chat.allowedUserIds = [];
+        if (!configRaw.chat.allowedUserIds.includes(userId)) configRaw.chat.allowedUserIds.push(userId);
+        if (!configRaw.chat.notifyChatIds) configRaw.chat.notifyChatIds = [];
+        if (!configRaw.chat.notifyChatIds.includes(chatId)) configRaw.chat.notifyChatIds.push(chatId);
+        const tmp = `${cfgPath}.tmp.${rb(4).toString("hex")}`;
+        await wf(tmp, JSON.stringify(configRaw, null, 2) + "\n");
+        await mvf(tmp, cfgPath).catch(async (e) => { try { await ulf(tmp); } catch {} throw e; });
+      } catch (cfgErr) {
+        console.error("[roundhouse] failed to update config after pairing:", cfgErr);
+      }
+
+      console.log(`[roundhouse] Telegram pairing complete: @${authorName} chatId=${chatId} userId=${userId}`);
+      this.pairingComplete = true;
+      await thread.post("✅ Roundhouse paired successfully!\n\nSend /status to verify everything is working.");
+      return true;
+    } catch (err) {
+      console.error("[roundhouse] error checking pending pairing:", err);
+      return false;
+    }
   }
 
   async start() {
@@ -289,7 +367,10 @@ export class Gateway {
     const allowedUsers = (this.config.chat.allowedUsers ?? []).map((u) =>
       u.toLowerCase()
     );
-    const allowedUserIds = this.config.chat.allowedUserIds ?? [];
+    // Ensure arrays exist on config so pairing hook mutations are visible to isAllowed
+    if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];
+    if (!this.config.chat.notifyChatIds) this.config.chat.notifyChatIds = [];
+    const allowedUserIds = this.config.chat.allowedUserIds;
 
     // Per-thread verbose toggle (shows tool_start messages)
     const verboseThreads = new Set<string>();
@@ -309,6 +390,12 @@ export class Gateway {
       console.log(
         `[roundhouse] ${thread.id} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
+
+      // Check for pending Telegram pairing (headless setup)
+      if (userText.trim().startsWith("/start ") && !this.pairingComplete) {
+        const handled = await this.handlePendingPairing(userText.trim(), message, thread, authorName ?? "");
+        if (handled) return;
+      }
 
       if (!isAllowed(message, allowedUsers, allowedUserIds)) {
         console.log(`[roundhouse] blocked @${authorName} (not in allowlist)`);
