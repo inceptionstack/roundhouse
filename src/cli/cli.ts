@@ -139,15 +139,15 @@ async function cmdInstall() {
   const binPath = run("which roundhouse", { silent: true });
   const nodePath = run("which node", { silent: true }) || process.execPath;
   const tsxPath = resolve(__dirname, "..", "..", "node_modules", ".bin", "tsx");
-  const srcIndex = resolve(__dirname, "..", "index.ts");
 
   let execStart: string;
   if (binPath) {
     execStart = `${nodePath} ${binPath} run`;
   } else {
-    // No global install — use tsx directly
+    // No global install — run CLI via tsx with 'run' subcommand
     const tsxBin = run("which tsx", { silent: true }) || tsxPath;
-    execStart = `${tsxBin} ${srcIndex}`;
+    const cliPath = resolve(__dirname, "cli.ts");
+    execStart = `${tsxBin} ${cliPath} run`;
   }
 
   // Compute PATH that includes node's bin dir (for mise/nvm setups)
