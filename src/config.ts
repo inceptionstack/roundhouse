@@ -21,7 +21,10 @@ export const LEGACY_CONFIG_DIR = resolve(homedir(), ".config", "roundhouse");
 /** Active config directory — use ROUNDHOUSE_DIR */
 export const CONFIG_DIR = ROUNDHOUSE_DIR;
 export const CONFIG_PATH = resolve(ROUNDHOUSE_DIR, "gateway.config.json");
-export const ENV_FILE_PATH = resolve(ROUNDHOUSE_DIR, "env");
+export const ENV_FILE_PATH = resolve(ROUNDHOUSE_DIR, ".env");
+
+/** Legacy env file name (deprecated) */
+export const LEGACY_ENV_FILE_PATH = resolve(ROUNDHOUSE_DIR, "env");
 
 /** Cron directories */
 export const CRON_JOBS_DIR = resolve(ROUNDHOUSE_DIR, "crons");
@@ -109,15 +112,26 @@ export async function resolveConfigPath(): Promise<{ path: string; legacy: boole
 let envFileWarned = false;
 
 export async function resolveEnvFilePath(): Promise<string> {
+  // Canonical: ~/.roundhouse/.env
   if (await fileExists(ENV_FILE_PATH)) return ENV_FILE_PATH;
-  const legacyEnv = resolve(LEGACY_CONFIG_DIR, "env");
-  if (await fileExists(legacyEnv)) {
+  // Legacy: ~/.roundhouse/env (old name, same directory)
+  if (await fileExists(LEGACY_ENV_FILE_PATH)) {
     if (!envFileWarned) {
       envFileWarned = true;
-      console.warn(`[roundhouse] \u26a0\ufe0f  Env file found at legacy path: ${legacyEnv}`);
+      console.warn(`[roundhouse] \u26a0\ufe0f  Env file found at legacy path: ${LEGACY_ENV_FILE_PATH}`);
+      console.warn(`[roundhouse]    Rename it to ${ENV_FILE_PATH} \u2014 legacy name will be removed in a future version.`);
+    }
+    return LEGACY_ENV_FILE_PATH;
+  }
+  // Legacy: ~/.config/roundhouse/env (old directory)
+  const legacyDirEnv = resolve(LEGACY_CONFIG_DIR, "env");
+  if (await fileExists(legacyDirEnv)) {
+    if (!envFileWarned) {
+      envFileWarned = true;
+      console.warn(`[roundhouse] \u26a0\ufe0f  Env file found at legacy path: ${legacyDirEnv}`);
       console.warn(`[roundhouse]    Move it to ${ENV_FILE_PATH} \u2014 legacy path will be removed in a future version.`);
     }
-    return legacyEnv;
+    return legacyDirEnv;
   }
   return ENV_FILE_PATH;
 }

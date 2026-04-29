@@ -22,7 +22,7 @@ export const credentialChecks: DoctorCheck[] = [
         return {
           id: "telegram-token", category: "credentials", name: "Telegram bot token",
           status: "fail", summary: "TELEGRAM_BOT_TOKEN not set",
-          details: ["Set TELEGRAM_BOT_TOKEN in your environment or ~/.roundhouse/env"],
+          details: ["Set TELEGRAM_BOT_TOKEN in your environment or ~/.roundhouse/.env"],
         };
       }
       if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {

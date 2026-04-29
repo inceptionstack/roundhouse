@@ -40,7 +40,7 @@ If `promptStream` is missing, `agent.prompt()` is called and the full text is sp
 
 **Config resolution order** (src/config.ts → `loadConfig`): `ROUNDHOUSE_CONFIG` env → `--config <path>` CLI flag → `~/.roundhouse/gateway.config.json` (with legacy fallback to `~/.config/roundhouse/`) → `./gateway.config.json` → `DEFAULT_CONFIG`. Then `applyEnvOverrides` layers `BOT_USERNAME`, `ALLOWED_USERS`, `NOTIFY_CHAT_IDS` on top. Secrets (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) are always env-only, never read from config.
 
-**Install/daemon.** `roundhouse install` writes `~/.roundhouse/gateway.config.json`, an env file at `~/.roundhouse/env` (merged with existing so manually-added keys survive), and a systemd unit that runs either the global bin or tsx against the source. `roundhouse update` does `npm update -g` then `systemctl restart`. All chat input in the daemon goes through the unit's `EnvironmentFile`.
+**Install/daemon.** `roundhouse install` writes `~/.roundhouse/gateway.config.json`, an env file at `~/.roundhouse/.env` (merged with existing so manually-added keys survive), and a systemd unit that runs either the global bin or tsx against the source. `roundhouse update` does `npm update -g` then `systemctl restart`. All chat input in the daemon goes through the unit's `EnvironmentFile`.
 
 **Adding a new agent backend:** implement `AgentAdapter` from `src/types.ts` in `src/agents/<name>.ts`, register in `src/agents/registry.ts`, set `"agent": { "type": "<name>" }` in config. If you want streaming, implement `promptStream` yielding `AgentStreamEvent`s; otherwise `prompt` alone is enough and the gateway will fall back.
 

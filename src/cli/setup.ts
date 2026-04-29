@@ -630,7 +630,7 @@ async function stepConfigure(
   }
 
   await atomicWriteText(ENV_PATH, envLines.join("\n") + "\n");
-  ok(`~/.roundhouse/env${opts.psst ? " (non-secret config only)" : ""}`);
+  ok(`~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
 }
 
 async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResult | null> {
@@ -873,7 +873,7 @@ export async function cmdSetup(argv: string[]): Promise<void> {
     }
     log(`   Bot: @${botInfo.username}`);
     log(`   Memory: ${opts.extensions.some((e) => e.includes("pi-memory")) ? "agent-managed" : "roundhouse-managed"}`);
-    log(`   Secrets: ${opts.psst ? "psst vault (encrypted)" : "~/.roundhouse/env (plaintext)"}`);
+    log(`   Secrets: ${opts.psst ? "psst vault (encrypted)" : "~/.roundhouse/.env (plaintext)"}`);
     log(`   Send /status to @${botInfo.username} on Telegram.\n`);
   } catch (err: any) {
     log("\n━━━━━━━━━━━━━━━━━━━");
@@ -993,7 +993,7 @@ function printDryRun(opts: SetupOptions): void {
   log(`  Set defaultProvider: ${opts.provider}`);
   log(`  Set defaultModel: ${opts.model}`);
   log(`Would write: ~/.roundhouse/gateway.config.json`);
-  log(`Would write: ~/.roundhouse/env${opts.psst ? " (non-secret config only)" : ""}`);
+  log(`Would write: ~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
   log(`Would register ${BOT_COMMANDS.length} bot commands`);
   if (opts.systemd) log(`Would install systemd service`);
   log("\nNo changes made.\n");
