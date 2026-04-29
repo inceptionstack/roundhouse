@@ -33,6 +33,12 @@ import {
   hasSudoAccess,
 } from "./systemd";
 import {
+  getAgentDefinition,
+  listAvailableAgentTypes,
+  type AgentDefinition,
+  type AgentSetupContext,
+} from "../agents/registry";
+import {
   validateBotToken,
   checkWebhook,
   registerBotCommands,
@@ -74,6 +80,8 @@ interface SetupOptions {
   headless: boolean;
   /** QR code display mode */
   qr: "auto" | "always" | "never";
+  /** Agent type (default: pi) */
+  agent: string;
 }
 
 type StepStatus = "ok" | "warn" | "skip" | "fail";
@@ -86,6 +94,62 @@ const DEFAULT_PROVIDER = "amazon-bedrock";
 const DEFAULT_MODEL = "us.anthropic.claude-opus-4-6-v1";
 
 const EXTENSION_NAME_RE = /^@?[a-z0-9][\w.\-/]*$/i;
+
+/**
+ * Resolve agent definition and wire up setup-specific functions.
+ * Pi: configure writes ~/.pi/agent/settings.json, installExtension calls pi install.
+ */
+function resolveAgentForSetup(opts: SetupOptions): AgentDefinition {
+  const agent = { ...getAgentDefinition(opts.agent) };
+
+  if (agent.type === "pi") {
+    agent.configure = async (ctx: AgentSetupContext) => {
+      // Read existing settings if present
+      let existing: Record<string, unknown> = {};
+      try {
+        existing = JSON.parse(await readFile(PI_SETTINGS_PATH, "utf8"));
+      } catch {}
+
+      const settings: Record<string, unknown> = { ...existing };
+
+      if (ctx.force) {
+        settings.defaultProvider = ctx.provider;
+        settings.defaultModel = ctx.model;
+      } else {
+        if (existing.defaultProvider && existing.defaultProvider !== ctx.provider) {
+          warn(`Pi provider already set to '${existing.defaultProvider}' (keeping, use --force to override)`);
+        } else {
+          settings.defaultProvider = ctx.provider;
+        }
+        if (existing.defaultModel && existing.defaultModel !== ctx.model) {
+          warn(`Pi model already set to '${existing.defaultModel}' (keeping, use --force to override)`);
+        } else {
+          settings.defaultModel = ctx.model;
+        }
+      }
+
+      // Ensure packages array exists
+      if (!Array.isArray(settings.packages)) settings.packages = [];
+
+      // Add pi-psst if using psst
+      if (ctx.psst) {
+        const psstPkg = "npm:@miclivs/pi-psst";
+        const pkgs = settings.packages as string[];
+        if (!pkgs.includes(psstPkg)) pkgs.push(psstPkg);
+      }
+
+      await mkdir(dirname(PI_SETTINGS_PATH), { recursive: true });
+      await atomicWriteJson(PI_SETTINGS_PATH, settings);
+      ok(`~/.pi/agent/settings.json (${settings.defaultProvider}, ${settings.defaultModel})`);
+    };
+
+    agent.installExtension = async (ext: string) => {
+      execOrFail("pi", ["install", `npm:${ext}`], `extension ${ext}`);
+    };
+  }
+
+  return agent;
+}
 
 // ── Helpers ──────────────────────────────────────────
 
@@ -159,6 +223,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     telegram: false,
     headless: false,
     qr: "auto",
+    agent: "pi",
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -182,6 +247,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       case "--non-interactive": opts.nonInteractive = true; break;
       case "--telegram": opts.telegram = true; break;
       case "--headless": opts.headless = true; opts.nonInteractive = true; break;
+      case "--agent": opts.agent = next().toLowerCase(); break;
       case "--qr": opts.qr = "always"; break;
       case "--no-qr": opts.qr = "never"; break;
       case "--force": opts.force = true; break;
@@ -203,6 +269,13 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       "--bot-token is not accepted in --headless mode (argv visible in process listings).\n" +
       "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --headless --user USERNAME",
     );
+  }
+
+  // Validate agent type
+  try {
+    getAgentDefinition(opts.agent);
+  } catch (err: any) {
+    throw new Error(err.message);
   }
 
   // Interactive --telegram defers token/user prompting to the wizard
@@ -236,7 +309,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
 
 // ── Steps ────────────────────────────────────────────
 
-async function stepPreflight(opts: SetupOptions): Promise<void> {
+async function stepPreflight(opts: SetupOptions, agent: AgentDefinition): Promise<void> {
   step("①", "Preflight checks...");
 
   // Node version
@@ -256,7 +329,8 @@ async function stepPreflight(opts: SetupOptions): Promise<void> {
   ok("npm available");
 
   // Config dirs writable
-  for (const dir of [ROUNDHOUSE_DIR, dirname(PI_SETTINGS_PATH)]) {
+  const dirs = [ROUNDHOUSE_DIR, ...(agent.configDirs ?? [])];
+  for (const dir of dirs) {
     try {
       await mkdir(dir, { recursive: true });
       ok(`Writable: ${dir.replace(homedir(), "~")}`);
@@ -373,7 +447,7 @@ async function stepStopGateway(): Promise<void> {
   }
 }
 
-async function stepInstallPackages(opts: SetupOptions): Promise<void> {
+async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): Promise<void> {
   step("④", "Installing packages...");
 
   // Roundhouse
@@ -386,14 +460,20 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
     ok("@inceptionstack/roundhouse");
   }
 
-  // Pi agent
-  const piInstalled = whichSync("pi");
-  if (piInstalled && !opts.force) {
-    ok(`@mariozechner/pi-coding-agent (already installed)`);
-  } else {
-    log("   Installing @mariozechner/pi-coding-agent...");
-    execOrFail("npm", ["install", "-g", "@mariozechner/pi-coding-agent"], "pi install");
-    ok("@mariozechner/pi-coding-agent");
+  // Agent packages (driven by agent definition)
+  for (const pkg of agent.packages) {
+    const label = pkg.name ?? pkg.packageName;
+    const installed = pkg.binary ? whichSync(pkg.binary) : false;
+    if (installed && !opts.force) {
+      ok(`${label} (already installed)`);
+    } else {
+      log(`   Installing ${label}...`);
+      const args = pkg.install === "global"
+        ? ["install", "-g", pkg.packageName]
+        : ["install", pkg.packageName];
+      execOrFail("npm", args, `${label} install`);
+      ok(label);
+    }
   }
 
   // psst-cli (requires bun runtime)
@@ -474,21 +554,26 @@ async function stepInstallPackages(opts: SetupOptions): Promise<void> {
       }
     }
 
-    // Install pi-psst extension
-    log("   Installing pi-psst extension...");
-    try {
-      execFileSync("pi", ["install", "npm:@miclivs/pi-psst"], { encoding: "utf8", stdio: "pipe", timeout: 120_000 });
-      ok("@miclivs/pi-psst extension");
-    } catch {
-      // May already be installed
-      ok("@miclivs/pi-psst extension (already installed)");
+    // Install agent-specific psst extension (Pi: pi-psst)
+    if (agent.installExtension) {
+      log("   Installing agent psst extension...");
+      try {
+        await agent.installExtension("@miclivs/pi-psst");
+        ok("@miclivs/pi-psst extension");
+      } catch {
+        ok("@miclivs/pi-psst extension (already installed)");
+      }
     }
   }
 
   // User extensions
   for (const ext of opts.extensions) {
+    if (!agent.installExtension) {
+      fail(`--extension is not supported for agent "${agent.type}"`);
+      throw new Error(`Agent "${agent.type}" does not support extensions`);
+    }
     log(`   Installing extension: ${ext}...`);
-    execOrFail("pi", ["install", `npm:${ext}`], `extension ${ext}`);
+    await agent.installExtension(ext);
     ok(ext);
   }
 }
@@ -540,44 +625,23 @@ async function stepConfigure(
   opts: SetupOptions,
   botInfo: BotInfo,
   pairResult: PairResult | null,
+  agent: AgentDefinition,
 ): Promise<void> {
   step("⑦", "Configuring...");
 
   await mkdir(ROUNDHOUSE_DIR, { recursive: true });
-  await mkdir(dirname(PI_SETTINGS_PATH), { recursive: true });
 
-  // ── Pi settings ──
-  let piSettings: Record<string, any> = {};
-  try {
-    piSettings = JSON.parse(await readFile(PI_SETTINGS_PATH, "utf8"));
-  } catch { /* doesn't exist */ }
-
-  if (opts.force) {
-    piSettings.defaultProvider = opts.provider;
-    piSettings.defaultModel = opts.model;
-  } else {
-    const existingProvider = piSettings.defaultProvider;
-    const existingModel = piSettings.defaultModel;
-    if (existingProvider && existingProvider !== opts.provider) {
-      warn(`Pi provider already set to '${existingProvider}' (keeping, use --force to override)`);
-    } else {
-      piSettings.defaultProvider = opts.provider;
-    }
-    if (existingModel && existingModel !== opts.model) {
-      warn(`Pi model already set to '${existingModel}' (keeping, use --force to override)`);
-    } else {
-      piSettings.defaultModel = opts.model;
-    }
+  // Agent-specific config (Pi: ~/.pi/agent/settings.json)
+  if (agent.configure) {
+    await agent.configure({
+      provider: opts.provider,
+      model: opts.model,
+      cwd: opts.cwd,
+      force: opts.force,
+      psst: opts.psst,
+      extensions: opts.extensions,
+    });
   }
-
-  // Ensure packages array includes pi-psst if using psst
-  if (!piSettings.packages) piSettings.packages = [];
-  if (opts.psst && !piSettings.packages.includes("npm:@miclivs/pi-psst")) {
-    piSettings.packages.push("npm:@miclivs/pi-psst");
-  }
-
-  await atomicWriteJson(PI_SETTINGS_PATH, piSettings);
-  ok(`~/.pi/agent/settings.json (${piSettings.defaultProvider}, ${piSettings.defaultModel})`);
 
   // ── Gateway config ──
   let gatewayConfig: Record<string, any> = {};
@@ -609,7 +673,7 @@ async function stepConfigure(
   gatewayConfig = {
     ...gatewayConfig,
     _version: 1, // Config schema version — for future migration support
-    agent: { ...gatewayConfig.agent, type: "pi", cwd: opts.cwd },
+    agent: { ...gatewayConfig.agent, ...agent.configDefaults, type: agent.type, cwd: opts.cwd },
     chat: {
       ...gatewayConfig.chat,
       botUsername: botInfo.username,
@@ -819,12 +883,13 @@ function printBotFatherGuide(): void {
 // ── Interactive Telegram Setup ───────────────────────
 
 async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
+  const agent = resolveAgentForSetup(opts);
   log("\n🔧 Roundhouse Telegram Setup");
   log("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
   try {
     // Step 1: Preflight
-    await stepPreflight(opts);
+    await stepPreflight(opts, agent);
 
     // Step 2: Get bot token (prompt if not provided)
     if (!opts.botToken) {
@@ -854,7 +919,7 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     await stepStopGateway();
 
     // Step 5: Install packages
-    await stepInstallPackages(opts);
+    await stepInstallPackages(opts, agent);
 
     // Step 6: Pair via Telegram
     step("⑥", "Pairing with Telegram...");
@@ -883,7 +948,7 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     await stepStoreSecrets(opts, botInfo);
 
     // Step 8: Write config
-    await stepConfigure(opts, botInfo, pairResult);
+    await stepConfigure(opts, botInfo, pairResult, agent);
 
     // Step 9: Register commands + install service
     await stepRegisterCommands(opts);
@@ -908,6 +973,7 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
 // ── Headless Telegram Setup ─────────────────────────
 
 async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
+  const agent = resolveAgentForSetup(opts);
   const logger = createJsonLogger();
 
   // Override module-level log helpers to emit JSON instead of text
@@ -931,7 +997,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
 
     // Step 1: Preflight
     logger.step(1, 9, "preflight.start", "Running preflight checks");
-    await stepPreflight(opts);
+    await stepPreflight(opts, agent);
     logger.ok("Preflight passed");
 
     // Step 2: Validate token
@@ -945,7 +1011,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
 
     // Step 4: Install packages
     logger.step(4, 9, "packages.install", "Installing packages");
-    await stepInstallPackages(opts);
+    await stepInstallPackages(opts, agent);
     logger.ok("Packages installed");
 
     // Step 5: Create pending pairing
@@ -976,7 +1042,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
 
     // Step 7: Write config (no pair result yet — gateway will complete pairing)
     logger.step(7, 9, "config.write", "Writing configuration");
-    await stepConfigure(opts, botInfo, null);
+    await stepConfigure(opts, botInfo, null, agent);
     logger.ok("Config written");
 
     // Step 8: Register commands
@@ -1074,17 +1140,18 @@ export async function cmdSetup(argv: string[]): Promise<void> {
   }
 
   // Legacy flow (no --telegram flag)
+  const agent = resolveAgentForSetup(opts);
   log("\n🔧 Roundhouse Setup");
   log("━━━━━━━━━━━━━━━━━━━");
 
   try {
     // Phase 1: Validate (no mutations)
-    await stepPreflight(opts);
+    await stepPreflight(opts, agent);
     const botInfo = await stepValidateToken(opts);
     await stepStopGateway();
 
     // Phase 2: Install packages
-    await stepInstallPackages(opts);
+    await stepInstallPackages(opts, agent);
 
     // Phase 3: Pair (before secrets/config, so paired username is included)
     const pairResult = await stepPair(opts, botInfo);
@@ -1093,7 +1160,7 @@ export async function cmdSetup(argv: string[]): Promise<void> {
     await stepStoreSecrets(opts, botInfo);
 
     // Phase 5: Write config (includes pair data)
-    await stepConfigure(opts, botInfo, pairResult);
+    await stepConfigure(opts, botInfo, pairResult, agent);
 
     // Phase 6: Remote setup
     await stepRegisterCommands(opts);
@@ -1212,12 +1279,17 @@ export async function cmdPair(argv: string[]): Promise<void> {
 // ── Dry run ──────────────────────────────────────────
 
 function printDryRun(opts: SetupOptions): void {
+  const agent = getAgentDefinition(opts.agent);
   log("\n🔧 Roundhouse Setup (DRY RUN)");
   log("━━━━━━━━━━━━━━━━━━━\n");
+  log(`Agent: ${agent.name} (${agent.type})`);
   log("Would validate Telegram token");
   log("Would stop existing gateway (if running)");
   log(`Would install: npm install -g @inceptionstack/roundhouse`);
-  log(`Would install: npm install -g @mariozechner/pi-coding-agent`);
+  for (const pkg of agent.packages) {
+    const scope = pkg.install === "global" ? "-g " : "";
+    log(`Would install: npm install ${scope}${pkg.packageName}`);
+  }
   if (opts.psst) {
     log(`Would install: bun runtime (if not present)`);
     log(`Would install: npm install -g psst-cli`);
@@ -1231,7 +1303,10 @@ function printDryRun(opts: SetupOptions): void {
   if (opts.psst) {
     log(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
   }
-  log(`Would configure: ~/.pi/agent/settings.json`);
+  if (agent.configDirs?.length) {
+    log(`Would configure: agent-specific settings`);
+    log(`  Agent: ${agent.name}`);
+  }
   log(`  Set defaultProvider: ${opts.provider}`);
   log(`  Set defaultModel: ${opts.model}`);
   log(`Would write: ~/.roundhouse/gateway.config.json`);
@@ -1263,9 +1338,10 @@ Token:
   --bot-token <token>        Accepted in interactive mode only
 
 Agent:
+  --agent <type>             Agent type (default: pi; available: ${listAvailableAgentTypes().join(", ")})
   --provider <provider>      AI provider (default: amazon-bedrock)
   --model <model>            AI model (default: us.anthropic.claude-opus-4-6-v1)
-  --extension <pkg>          Pi extension (repeatable)
+  --extension <pkg>          Agent extension (repeatable)
   --cwd <path>               Agent working directory (default: ~)
 
 Channel:

@@ -181,3 +181,82 @@ describe("parseSetupArgs --telegram flags", () => {
     }
   });
 });
+
+describe("parseSetupArgs --agent flag", () => {
+  it("defaults agent to pi", async () => {
+    const { parseSetupArgs } = await import("../src/cli/setup");
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      const opts = parseSetupArgs(["--user", "x"]);
+      expect(opts.agent).toBe("pi");
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
+  });
+
+  it("accepts --agent pi explicitly", async () => {
+    const { parseSetupArgs } = await import("../src/cli/setup");
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      const opts = parseSetupArgs(["--agent", "pi", "--user", "x"]);
+      expect(opts.agent).toBe("pi");
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
+  });
+
+  it("rejects unknown agent type", async () => {
+    const { parseSetupArgs } = await import("../src/cli/setup");
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      expect(() => parseSetupArgs(["--agent", "unknown", "--user", "x"]))
+        .toThrow(/Unknown agent type/);
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
+  });
+
+  it("--agent works with --telegram", async () => {
+    const { parseSetupArgs } = await import("../src/cli/setup");
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      const opts = parseSetupArgs(["--telegram", "--agent", "pi", "--user", "x"]);
+      expect(opts.telegram).toBe(true);
+      expect(opts.agent).toBe("pi");
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
+  });
+});
+
+describe("agent registry", () => {
+  it("getAgentDefinition returns pi definition", async () => {
+    const { getAgentDefinition } = await import("../src/agents/registry");
+    const def = getAgentDefinition("pi");
+    expect(def.type).toBe("pi");
+    expect(def.name).toBe("Pi");
+    expect(def.available).toBe(true);
+    expect(def.packages.length).toBeGreaterThan(0);
+    expect(def.packages[0].packageName).toBe("@mariozechner/pi-coding-agent");
+  });
+
+  it("getAgentDefinition throws for unknown type", async () => {
+    const { getAgentDefinition } = await import("../src/agents/registry");
+    expect(() => getAgentDefinition("nope")).toThrow(/Unknown agent type.*Available.*pi/);
+  });
+
+  it("listAvailableAgentTypes includes pi", async () => {
+    const { listAvailableAgentTypes } = await import("../src/agents/registry");
+    expect(listAvailableAgentTypes()).toContain("pi");
+  });
+
+  it("getAgentFactory returns a function for pi", async () => {
+    const { getAgentFactory } = await import("../src/agents/registry");
+    expect(typeof getAgentFactory("pi")).toBe("function");
+  });
+
+  it("getAgentSdkPackage returns pi package name", async () => {
+    const { getAgentSdkPackage } = await import("../src/agents/registry");
+    expect(getAgentSdkPackage("pi")).toBe("@mariozechner/pi-coding-agent");
+  });
+});

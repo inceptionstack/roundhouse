@@ -164,3 +164,60 @@ if (pendingPairing?.status === "pending" && isStartForNonce(text, nonce)) {
 9. `src/cli/setup.ts` — Feature 2: headless flow
 10. Tests for Feature 2
 11. E2E on fresh EC2
+
+---
+
+## Feature 3: --agent Flag (Agent-Aware Setup)
+
+### Command
+```bash
+roundhouse setup --telegram --agent pi          # explicit (default)
+roundhouse setup --telegram                      # defaults to pi
+roundhouse setup --telegram --agent kiro         # future
+```
+
+### AgentDefinition Interface
+Each agent type defines its install requirements, config defaults, and doctor checks:
+
+```ts
+interface AgentDefinition {
+  type: string;                    // "pi", "kiro", etc.
+  name: string;                    // "Pi", "Kiro"
+  factory?: AgentAdapterFactory;   // runtime adapter
+  available: boolean;              // can users select this today?
+  packages: AgentPackageRequirement[];  // what to npm install
+  sdkPackage?: string;             // for version display
+  configDefaults: Record<string, unknown>;
+  configDirs?: string[];           // dirs to create in preflight
+  configure?: (ctx) => Promise<void>;   // agent-specific config (e.g. Pi settings.json)
+  installExtension?: (ext) => Promise<void>;  // Pi: pi install npm:ext
+  doctorChecks?: DoctorCheck[];
+}
+```
+
+### Pi Definition (default)
+```ts
+{
+  type: "pi", name: "Pi", available: true,
+  packages: [{ packageName: "@mariozechner/pi-coding-agent", install: "global", binary: "pi" }],
+  sdkPackage: "@mariozechner/pi-coding-agent",
+  configDirs: ["~/.pi/agent"],
+  configure: writePiSettings,
+  installExtension: (ext) => execOrFail("pi", ["install", `npm:${ext}`]),
+  doctorChecks: piDoctorChecks,
+}
+```
+
+### Changes
+| File | Change |
+|------|--------|
+| `src/agents/registry.ts` | Add `AgentDefinition`, `getAgentDefinition()`, replace parallel maps |
+| `src/cli/setup.ts` | Add `opts.agent`, thread definition through steps |
+| `src/cli/setup.ts` | `stepInstallPackages(opts, agent)`, `stepConfigure(opts, ..., agent)` |
+| `src/cli/doctor/runner.ts` | Build check list from agent definition |
+| `src/cli/doctor/checks/agent.ts` | Become Pi-specific, loaded from definition |
+
+### Backward Compat
+- No `--agent` → defaults to `pi` (zero breaking change)
+- Existing configs with `agent.type: "pi"` unchanged
+- Switching agent type on existing config requires `--force`
