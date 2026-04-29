@@ -7,7 +7,7 @@ import { formatResult, formatSummary, formatCategoryHeader } from "./doctor/outp
 import { runDoctor, createDoctorContext } from "./doctor/runner";
 
 const CATEGORY_ORDER: DoctorCategory[] = [
-  "system", "config", "credentials", "agent", "stt", "disk", "systemd",
+  "system", "config", "credentials", "network", "agent", "stt", "disk", "systemd",
 ];
 
 export async function cmdDoctor(args: string[]): Promise<void> {

@@ -1,22 +1,19 @@
 /**
- * Telegram connectivity checks
+ * Telegram connectivity checks — tests API access, config, and webhook status.
+ * Token resolution is shared with credentials.ts via resolveToken().
  */
 
 import { readFile } from "node:fs/promises";
-import type { DoctorCheck } from "../types";
-import { parseEnvFile } from "../../env-file";
+import type { DoctorCheck, DoctorContext } from "../types";
+import { resolveToken } from "./credentials";
 
-/** Resolve the bot token from env or .env file */
-async function resolveToken(ctx: { env: NodeJS.ProcessEnv; envFilePath: string }): Promise<string | null> {
-  let token = ctx.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    try {
-      const entries = parseEnvFile(await readFile(ctx.envFilePath, "utf8"));
-      const raw = entries.get("TELEGRAM_BOT_TOKEN");
-      if (raw) token = raw.replace(/^["']|["']$/g, "");
-    } catch {}
+/** Load and parse the gateway config, returning null on any error. */
+async function loadGatewayConfig(ctx: DoctorContext): Promise<any | null> {
+  try {
+    return JSON.parse(await readFile(ctx.configPath, "utf8"));
+  } catch {
+    return null;
   }
-  return token || null;
 }
 
 export const telegramChecks: DoctorCheck[] = [
@@ -24,17 +21,15 @@ export const telegramChecks: DoctorCheck[] = [
     id: "telegram-configured", category: "network", name: "Telegram adapter configured",
     async run(ctx) {
       const base = { id: "telegram-configured", category: "network" as const, name: "Telegram adapter configured" };
-      try {
-        const raw = await readFile(ctx.configPath, "utf8");
-        const cfg = JSON.parse(raw);
-        if (cfg.chat?.adapters?.telegram) {
-          const mode = cfg.chat.adapters.telegram.mode ?? "polling";
-          return { ...base, status: "pass", summary: `mode: ${mode}` };
-        }
-        return { ...base, status: "info", summary: "not configured (no telegram adapter in config)" };
-      } catch {
+      const cfg = await loadGatewayConfig(ctx);
+      if (!cfg) {
         return { ...base, status: "info", summary: "skipped (no config file)" };
       }
+      if (cfg.chat?.adapters?.telegram) {
+        const mode = cfg.chat.adapters.telegram.mode ?? "polling";
+        return { ...base, status: "pass", summary: `mode: ${mode}` };
+      }
+      return { ...base, status: "info", summary: "not configured (no telegram adapter in config)" };
     },
   },
 
@@ -77,13 +72,8 @@ export const telegramChecks: DoctorCheck[] = [
         return { ...base, status: "info", summary: "skipped (no token)" };
       }
 
-      // Check what mode is configured
-      let configuredMode = "polling";
-      try {
-        const raw = await readFile(ctx.configPath, "utf8");
-        const cfg = JSON.parse(raw);
-        configuredMode = cfg.chat?.adapters?.telegram?.mode ?? "polling";
-      } catch {}
+      const cfg = await loadGatewayConfig(ctx);
+      const configuredMode = cfg?.chat?.adapters?.telegram?.mode ?? "polling";
 
       try {
         const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`, {
@@ -99,7 +89,7 @@ export const telegramChecks: DoctorCheck[] = [
         if (configuredMode === "polling") {
           if (webhookUrl) {
             return {
-              ...base, status: "warn", summary: `webhook set but mode is polling`,
+              ...base, status: "warn", summary: "webhook set but mode is polling",
               details: [
                 `Webhook URL: ${webhookUrl}`,
                 "Polling won't receive updates while a webhook is active.",
@@ -109,7 +99,6 @@ export const telegramChecks: DoctorCheck[] = [
           }
           return { ...base, status: "pass", summary: `no webhook (polling mode), ${pendingUpdates} pending updates` };
         } else {
-          // webhook mode
           if (!webhookUrl) {
             return { ...base, status: "warn", summary: "webhook mode configured but no webhook set" };
           }
