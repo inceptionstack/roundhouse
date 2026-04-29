@@ -2,15 +2,15 @@
  * Disk and directory checks
  */
 
-import { access, stat, readdir, constants } from "node:fs/promises";
+import { access, readdir, constants } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
 import type { DoctorCheck } from "../types";
 import { run } from "../shell";
+import { SESSIONS_DIR } from "../../../config";
 
 const INCOMING_DIR = process.env.ROUNDHOUSE_INCOMING_DIR ?? join(homedir(), ".roundhouse", "incoming");
-const SESSIONS_DIR = join(homedir(), ".pi", "agent", "gateway-sessions");
 
 export const diskChecks: DoctorCheck[] = [
   {

@@ -68,6 +68,33 @@ const ROUNDHOUSE_VERSION: string = (() => {
   catch { return "unknown"; }
 })();
 
+function telegramChatIdFromThreadId(threadId: unknown): number | null {
+  if (typeof threadId !== "string") return null;
+  const match = threadId.match(/^telegram:(-?\d+)/);
+  if (!match) return null;
+  const parsed = parseInt(match[1], 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function getChatId(thread: any, message: any): string {
+  const id = message?.chat?.id ?? message?.chatId ?? thread?.chatId;
+  if (id !== undefined && id !== null) return String(id);
+  return String(thread?.id ?? "unknown");
+}
+
+function resolveAgentThreadId(thread: any, message: any): string {
+  const chatType = String(message?.chat?.type ?? thread?.chat?.type ?? thread?.type ?? "").toLowerCase();
+  if (["private", "dm", "direct", "im"].includes(chatType)) return "main";
+  if (["group", "supergroup", "channel"].includes(chatType)) return `group:${getChatId(thread, message)}`;
+
+  const telegramChatId = telegramChatIdFromThreadId(thread?.id);
+  if (telegramChatId !== null) {
+    return telegramChatId < 0 ? `group:${telegramChatId}` : "main";
+  }
+
+  return String(thread?.id ?? "main");
+}
+
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
 
@@ -383,12 +410,13 @@ export class Gateway {
 
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
+      const agentThreadId = resolveAgentThreadId(thread, message);
       const userText = message.text ?? "";
       const authorName = message.author?.userName ?? message.author?.userId ?? "?";
       const rawAttachments = message.attachments ?? [];
 
       console.log(
-        `[roundhouse] ${thread.id} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
+        `[roundhouse] ${thread.id} -> ${agentThreadId} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
       // Check for pending Telegram pairing (headless setup)
@@ -407,14 +435,14 @@ export class Gateway {
 
       // Handle /new command — dispose current session, start fresh
       if (isCommand(userText.trim(), "/new")) {
-        const agent = this.router.resolve(thread.id);
+        const agent = this.router.resolve(agentThreadId);
         if (agent.restart) {
-          await agent.restart(thread.id);
+          await agent.restart(agentThreadId);
           await thread.post("🔄 Session restarted. Send a message to begin a new conversation.");
         } else {
           await thread.post("⚠️ New session not supported for this agent.");
         }
-        console.log(`[roundhouse] /new for thread=${thread.id}`);
+        console.log(`[roundhouse] /new for thread=${thread.id} agentThread=${agentThreadId}`);
         return;
       }
 
@@ -438,12 +466,12 @@ export class Gateway {
 
       // Handle /compact command — flush memory then compact session context
       if (isCommand(userText.trim(), "/compact")) {
-        const agent = this.router.resolve(thread.id);
+        const agent = this.router.resolve(agentThreadId);
         if (!agent.compact) {
           await thread.post("⚠️ Compaction not supported for this agent.");
           return;
         }
-        console.log(`[roundhouse] /compact for thread=${thread.id}`);
+        console.log(`[roundhouse] /compact for thread=${thread.id} agentThread=${agentThreadId}`);
         await thread.post("📝 Saving memory and compacting...");
         const stopTyping = startTypingLoop(thread);
         try {
@@ -451,7 +479,7 @@ export class Gateway {
           const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
           // If memory is disabled, compact directly without flush
           if (this.config.memory?.enabled === false) {
-            const result = await agent.compact(thread.id);
+            const result = await agent.compact(agentThreadId);
             if (!result) {
               await thread.post("⚠️ No active session to compact. Send a message first.");
             } else {
@@ -459,7 +487,7 @@ export class Gateway {
               await thread.post(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
             }
           } else {
-            const result = await flushMemoryThenCompact(thread.id, agent, memoryRoot, "manual", this.config.memory);
+            const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, "manual", this.config.memory);
             if (!result) {
               await thread.post("⚠️ No active session to compact. Send a message first.");
             } else {
@@ -478,7 +506,7 @@ export class Gateway {
 
       // Handle /status command — show gateway details
       if (isCommand(userText.trim(), "/status")) {
-        const agent = this.router.resolve(thread.id);
+        const agent = this.router.resolve(agentThreadId);
         const uptimeSec = process.uptime();
         const uptimeStr = uptimeSec < 3600
           ? `${Math.floor(uptimeSec / 60)}m ${Math.floor(uptimeSec % 60)}s`
@@ -488,7 +516,7 @@ export class Gateway {
         const nodeVer = process.version;
         const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
 
-        const info = agent.getInfo ? agent.getInfo(thread.id) : {};
+        const info = agent.getInfo ? agent.getInfo(agentThreadId) : {};
         const agentVersion = info.version ? `v${info.version}` : "";
         const agentLabel = agentVersion ? `\`${agent.name}\` (${agentVersion})` : `\`${agent.name}\``;
 
@@ -509,7 +537,7 @@ export class Gateway {
           `💾 Memory: ${memMB} MB`,
           `🟢 Node: ${nodeVer}`,
           `🔧 Debug stream: ${debugStream ? "on" : "off"}`,
-          `📢 Verbose: ${verboseThreads.has(thread.id) ? "on" : "off"}`,
+          `📢 Verbose: ${verboseThreads.has(agentThreadId) ? "on" : "off"}`,
         );
 
         const allowedCount = allowedUsers.length;
@@ -551,14 +579,14 @@ export class Gateway {
         }
 
         await thread.post({ markdown: lines.join("\n") });
-        console.log(`[roundhouse] /status for thread=${thread.id}`);
+        console.log(`[roundhouse] /status for thread=${thread.id} agentThread=${agentThreadId}`);
         return;
       }
 
       // Save any attachments (voice messages, images, files, etc.)
       let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
       try {
-        attachmentResult = await saveAttachments(thread.id, rawAttachments);
+        attachmentResult = await saveAttachments(agentThreadId, rawAttachments);
       } catch (err) {
         console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
         if (!userText.trim()) {
@@ -588,16 +616,16 @@ export class Gateway {
         return;
       }
 
-      const agent = this.router.resolve(thread.id);
+      const agent = this.router.resolve(agentThreadId);
 
       // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
-      const prevLock = threadLocks.get(thread.id);
+      const prevLock = threadLocks.get(agentThreadId);
       let releaseLock: () => void;
       const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
-      threadLocks.set(thread.id, lockPromise);
+      threadLocks.set(agentThreadId, lockPromise);
       if (prevLock) await prevLock;
 
-      console.log(`[roundhouse] → ${agent.name} | thread=${thread.id}`);
+      console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
       // Enrich audio attachments with transcripts (STT) — inside thread lock to prevent stampede
       if (this.sttService && agentMessage.attachments?.length) {
@@ -624,7 +652,7 @@ export class Gateway {
       const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
       let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
       try {
-        memoryPrepared = await prepareMemoryForTurn(thread.id, agentMessage, agent, memoryRoot, this.config.memory);
+        memoryPrepared = await prepareMemoryForTurn(agentThreadId, agentMessage, agent, memoryRoot, this.config.memory);
         agentMessage = memoryPrepared.message;
       } catch (err) {
         console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
@@ -635,15 +663,15 @@ export class Gateway {
       try {
         if (agent.promptStream) {
           const ac = new AbortController();
-          abortControllers.set(thread.id, ac);
+          abortControllers.set(agentThreadId, ac);
           try {
-            await this.handleStreaming(thread, agent.promptStream(thread.id, agentMessage), verboseThreads.has(thread.id), ac.signal);
+            await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
           } finally {
-            abortControllers.delete(thread.id);
+            abortControllers.delete(agentThreadId);
           }
         } else {
           // Fallback: non-streaming prompt
-          const reply = await agent.prompt(thread.id, agentMessage);
+          const reply = await agent.prompt(agentThreadId, agentMessage);
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }
@@ -652,7 +680,7 @@ export class Gateway {
         // ── Memory: post-turn finalize + pressure check ───
         try {
           const pressure = await finalizeMemoryForTurn(
-            thread.id,
+            agentThreadId,
             memoryPrepared?.beforeDigest ?? null,
             agent, memoryRoot, this.config.memory,
           );
@@ -661,7 +689,7 @@ export class Gateway {
           if (effectivePressure !== "none") {
             // Run flush/compact INSIDE the thread lock to prevent race with next user message
             try {
-              await this.handleContextPressure(thread, agent, memoryRoot, effectivePressure);
+              await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
             } catch (err) {
               console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
             }
@@ -679,34 +707,35 @@ export class Gateway {
       } finally {
         stopTyping();
         releaseLock!();
-        if (threadLocks.get(thread.id) === lockPromise) {
-          threadLocks.delete(thread.id);
+        if (threadLocks.get(agentThreadId) === lockPromise) {
+          threadLocks.delete(agentThreadId);
         }
       }
     };
 
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
+      const agentThreadId = resolveAgentThreadId(thread, message);
       const text = (message.text ?? "").trim();
       // /stop is handled immediately — abort the in-flight agent run
       // without waiting for the current handler to finish
       if (isCommand(text, "/stop")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const agent = this.router.resolve(thread.id);
+        const agent = this.router.resolve(agentThreadId);
         if (agent.abort) {
-          await agent.abort(thread.id);
-          abortControllers.get(thread.id)?.abort();
+          await agent.abort(agentThreadId);
+          abortControllers.get(agentThreadId)?.abort();
           try { await thread.post("⏹️ Stopped."); } catch {}
         } else {
           try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
         }
-        console.log(`[roundhouse] /stop for thread=${thread.id}`);
+        console.log(`[roundhouse] /stop for thread=${thread.id} agentThread=${agentThreadId}`);
         return;
       }
       // /verbose is a gateway toggle — runs immediately, no queuing
       if (isCommand(text, "/verbose")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const threadId = thread.id;
+        const threadId = agentThreadId;
         if (verboseThreads.has(threadId)) {
           verboseThreads.delete(threadId);
           try { await thread.post("🔇 Verbose mode OFF — tool status messages hidden."); } catch {}
@@ -714,7 +743,7 @@ export class Gateway {
           verboseThreads.add(threadId);
           try { await thread.post("📢 Verbose mode ON — showing tool calls."); } catch {}
         }
-        console.log(`[roundhouse] /verbose for thread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
+        console.log(`[roundhouse] /verbose for thread=${thread.id} agentThread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
         return;
       }
       // /doctor runs health checks immediately — no agent access needed
@@ -834,16 +863,16 @@ export class Gateway {
    * Handle context pressure — flush memory and/or compact.
    * Runs inside the thread lock after a turn completes.
    */
-  private async handleContextPressure(thread: any, agent: AgentAdapter, memoryRoot: string, pressure: PressureLevel) {
+  private async handleContextPressure(thread: any, agentThreadId: string, agent: AgentAdapter, memoryRoot: string, pressure: PressureLevel) {
     if (pressure === "none") return;
 
-    console.log(`[roundhouse] context pressure: ${pressure} for thread=${thread.id}`);
+    console.log(`[roundhouse] context pressure: ${pressure} for thread=${thread.id} agentThread=${agentThreadId}`);
 
     if (pressure === "soft") {
       // Soft: prompt agent to save facts, no compact
       // Cooldown is checked inside flushMemoryThenCompact (returns null if skipped)
       try {
-        await flushMemoryThenCompact(thread.id, agent, memoryRoot, "soft", this.config.memory);
+        await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, "soft", this.config.memory);
       } catch (err) {
         console.error(`[roundhouse] soft flush error:`, (err as Error).message);
       }
@@ -853,7 +882,7 @@ export class Gateway {
     // Hard or emergency: flush + compact
     try {
       await thread.post(`📝 ${pressure === "emergency" ? "⚠️ Context nearly full! " : ""}Saving memory and compacting...`);
-      const result = await flushMemoryThenCompact(thread.id, agent, memoryRoot, pressure, this.config.memory);
+      const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, pressure, this.config.memory);
       if (result) {
         const beforeK = (result.tokensBefore / 1000).toFixed(1);
         await thread.post(`✅ Auto-compacted: ${beforeK}K tokens → summary.`);

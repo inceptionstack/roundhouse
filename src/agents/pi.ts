@@ -3,10 +3,10 @@
  *
  * Wraps pi's SDK (createAgentSession) as an AgentAdapter.
  * One persistent session per thread, stored at:
- *   ~/.pi/agent/gateway-sessions/<thread_id>/<session>.jsonl
+ *   ~/.roundhouse/sessions/<thread_id>/<session>.jsonl
  */
 
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -24,19 +24,15 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types";
-import { DEBUG_STREAM, threadIdToDir, threadIdToDirLegacy } from "../util";
+import { SESSIONS_DIR } from "../config";
+import { DEBUG_STREAM, threadIdToDir } from "../util";
 
 interface SessionEntry {
   session: AgentSession;
   lastUsed: number;
 }
 
-const DEFAULT_SESSIONS_DIR = join(
-  homedir(),
-  ".pi",
-  "agent",
-  "gateway-sessions"
-);
+const DEFAULT_SESSIONS_DIR = SESSIONS_DIR;
 const DEFAULT_MAX_IDLE_MS = 30 * 60 * 1000;
 
 export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
@@ -159,20 +155,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function createSession(threadId: string): Promise<SessionEntry> {
-    let dirName = threadIdToDir(threadId);
-    const newPath = join(sessionsDir, dirName);
-    const legacyPath = join(sessionsDir, threadIdToDirLegacy(threadId));
-    // Migrate: if legacy dir exists but new doesn't, use legacy
-    if (dirName !== threadIdToDirLegacy(threadId)) {
-      try {
-        await stat(legacyPath);
-        // Legacy exists — check if new exists
-        try { await stat(newPath); } catch {
-          // New doesn't exist, use legacy to preserve session history
-          dirName = threadIdToDirLegacy(threadId);
-        }
-      } catch { /* legacy doesn't exist either, use new */ }
-    }
+    const dirName = threadIdToDir(threadId);
     const threadDir = join(sessionsDir, dirName);
     await mkdir(threadDir, { recursive: true });
 

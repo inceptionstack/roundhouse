@@ -22,6 +22,7 @@ export const LEGACY_CONFIG_DIR = resolve(homedir(), ".config", "roundhouse");
 export const CONFIG_DIR = ROUNDHOUSE_DIR;
 export const CONFIG_PATH = resolve(ROUNDHOUSE_DIR, "gateway.config.json");
 export const ENV_FILE_PATH = resolve(ROUNDHOUSE_DIR, ".env");
+export const SESSIONS_DIR = resolve(ROUNDHOUSE_DIR, "sessions");
 
 /** Legacy env file name (deprecated) */
 export const LEGACY_ENV_FILE_PATH = resolve(ROUNDHOUSE_DIR, "env");

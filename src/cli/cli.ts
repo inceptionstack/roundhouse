@@ -5,7 +5,6 @@
  */
 
 import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
@@ -16,12 +15,14 @@ import {
   CONFIG_PATH,
   ENV_FILE_PATH,
   DEFAULT_CONFIG,
+  SESSIONS_DIR,
   SERVICE_NAME,
   fileExists,
   loadConfig,
   resolveEnvFilePath,
 } from "../config";
 import { getAgentSdkPackage } from "../agents/registry";
+import { threadIdToDir } from "../util";
 import { parseEnvFile, serializeEnvFile, envQuote } from "./env-file";
 import {
   SERVICE_PATH,
@@ -279,87 +280,30 @@ async function cmdTui() {
     process.exit(1);
   }
 
-  const sessionsBase = (config.agent as any)?.sessionDir
-    ?? resolve(homedir(), ".pi", "agent", "gateway-sessions");
-
-  let threadDirs: string[] = [];
-  try {
-    threadDirs = readdirSync(sessionsBase)
-      .filter((d) => { try { return statSync(resolve(sessionsBase, d)).isDirectory(); } catch { return false; } })
-      .sort();
-  } catch {
-    console.error(`No gateway sessions found at ${sessionsBase}`);
-    process.exit(1);
-  }
-
-  if (threadDirs.length === 0) {
-    console.error("No gateway sessions found. Send a message via Telegram/Slack first.");
-    process.exit(1);
-  }
-
   const threadArg = process.argv[3];
-
-  interface SessionCandidate { threadDir: string; sessionFile: string; mtime: number; }
-
-  const candidates: SessionCandidate[] = [];
-  for (const dir of threadDirs) {
-    if (threadArg && !dir.includes(threadArg)) continue;
-    const threadPath = resolve(sessionsBase, dir);
-    try {
-      for (const f of readdirSync(threadPath).filter((f) => f.endsWith(".jsonl"))) {
-        const fullPath = resolve(threadPath, f);
-        candidates.push({ threadDir: dir, sessionFile: fullPath, mtime: statSync(fullPath).mtimeMs });
-      }
-    } catch {}
+  const threadId = threadArg || "main";
+  const threadDir = threadIdToDir(threadId);
+  const threadPath = resolve(SESSIONS_DIR, threadDir);
+  let candidates: Array<{ sessionFile: string; mtime: number }> = [];
+  try {
+    candidates = readdirSync(threadPath)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => {
+        const sessionFile = resolve(threadPath, f);
+        return { sessionFile, mtime: statSync(sessionFile).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch {
+    console.error(`No session directory found at ${threadPath}.`);
+    process.exit(1);
   }
 
   if (candidates.length === 0) {
-    if (threadArg) {
-      console.error(`No sessions found matching "${threadArg}".`);
-      console.log("Available threads:");
-      for (const d of threadDirs) console.log(`  ${d}`);
-    } else {
-      console.error("No session files found.");
-    }
+    console.error(`No session files found at ${threadPath}.`);
     process.exit(1);
   }
 
-  candidates.sort((a, b) => b.mtime - a.mtime);
-
-  let selected: SessionCandidate;
-  const uniqueThreads = [...new Set(candidates.map((c) => c.threadDir))];
-
-  if (uniqueThreads.length === 1 || threadArg) {
-    selected = candidates[0];
-  } else {
-    console.log("Available sessions (most recent first):\n");
-    const shown: SessionCandidate[] = [];
-    const seen = new Set<string>();
-    for (const c of candidates) {
-      if (seen.has(c.threadDir)) continue;
-      seen.add(c.threadDir);
-      shown.push(c);
-    }
-    for (let i = 0; i < shown.length; i++) {
-      const age = Math.round((Date.now() - shown[i].mtime) / 60000);
-      const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
-      console.log(`  [${i + 1}] ${shown[i].threadDir}  (${ageStr})`);
-    }
-    console.log();
-
-    const readline = await import("node:readline");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise<string>((r) => {
-      rl.question("Pick a session [1]: ", (ans) => { rl.close(); r(ans.trim() || "1"); });
-    });
-
-    const idx = parseInt(answer, 10) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= shown.length) {
-      console.error("Invalid selection.");
-      process.exit(1);
-    }
-    selected = candidates.find((c) => c.threadDir === shown[idx].threadDir)!;
-  }
+  const selected = candidates[0];
 
   console.log(`\nOpening: ${selected.sessionFile}\n`);
 
@@ -394,7 +338,7 @@ Commands:
   config              Show config path and contents
   agent <message>     Send a message to the agent and print response
                        Options: --thread <id>, --stdin, --timeout <sec>,
-                                --no-timeout, --verbose
+                                --no-timeout, --verbose, --ephemeral
   doctor [--fix]       Check system health and configuration
                        Options: --fix, --json, --verbose
   cron <command>       Manage scheduled jobs (add, list, trigger, etc.)
@@ -414,6 +358,7 @@ Environment:
 async function cmdAgent() {
   // Usage: roundhouse agent <message>
   //        roundhouse agent --thread <id> <message>
+  //        roundhouse agent --ephemeral <message>
   //        echo "message" | roundhouse agent --stdin
   const args = process.argv.slice(3);
   let threadId = "";
@@ -421,6 +366,7 @@ async function cmdAgent() {
   let useStdin = false;
   let timeoutMs = 120_000;
   let verbose = false;
+  let ephemeral = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--thread" && args[i + 1]) {
@@ -435,6 +381,8 @@ async function cmdAgent() {
       timeoutMs = 0;
     } else if (args[i] === "--verbose") {
       verbose = true;
+    } else if (args[i] === "--ephemeral") {
+      ephemeral = true;
     } else if (args[i].startsWith("-")) {
       console.error(`Unknown flag: ${args[i]}`);
       process.exit(1);
@@ -468,13 +416,20 @@ async function cmdAgent() {
     console.error("       echo \"message\" | roundhouse agent --stdin");
     console.error("       roundhouse agent --timeout 60 <message>");
     console.error("       roundhouse agent --verbose <message>");
+    console.error("       roundhouse agent --ephemeral <message>");
     process.exit(1);
   }
 
-  // Default: ephemeral thread ID (no session persistence across invocations)
-  // --thread <id> opts into persistent/shared sessions
+  if (threadId && ephemeral) {
+    console.error("--thread and --ephemeral cannot be used together");
+    process.exit(1);
+  }
+
+  // Default: shared main session. --ephemeral restores one-off CLI behavior.
   if (!threadId) {
-    threadId = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    threadId = ephemeral
+      ? `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      : "main";
   }
 
   // Suppress debug/info logs unless --verbose
