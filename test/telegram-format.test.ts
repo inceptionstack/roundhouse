@@ -216,14 +216,11 @@ describe("markdownToTelegramHtml", () => {
     const preContent = preMatch![1];
     const decode = (s: string) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
     const lines = preContent.split("\n").filter(l => l.trim()).map(decode);
-    // ✅ row should have 2 fewer spaces than "ok" row to compensate for the wider emoji
-    // Telegram renders emoji at ~3 monospace character widths
-    // Bold row: "│ Bold │ ✅    │" — ✅(3 cols) + 3 spaces = 6 display cols  
-    // Code row: "│ Code │ ok     │" — ok(2 cols) + 4 spaces = 6 display cols
-    // The ✅ row string is 2 chars shorter but visually the same width
+    // ✅ row should have 1 fewer space than "ok" row to compensate for the wider emoji
+    // Telegram renders emoji at ~2 monospace columns (fractional, can't be exact)
     const emojiRow = lines[3];
     const plainRow = lines[4];
-    expect(emojiRow.length).toBe(plainRow.length - 2); // 2 fewer chars for 3-col emoji
+    expect(emojiRow.length).toBe(plainRow.length - 1); // 1 fewer char for 2-col emoji
     // Both should end with " │"
     expect(emojiRow.endsWith(" │")).toBe(true);
     expect(plainRow.endsWith(" │")).toBe(true);
@@ -239,16 +236,12 @@ describe("markdownToTelegramHtml", () => {
     const preContent = preMatch![1];
     const decode = (s: string) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
     const lines = preContent.split("\n").filter(l => l.trim()).map(decode);
-    // Column width should be 3 (driven by ZWJ emoji), not 2 ("Ic")
-    // Plain row and header should have same string length (all ASCII)
+    // Column width should be max("Ic"=2, ZWJ=2, "x"=1) = 2
     const headerRow = lines[1];
     const plainRow = lines[4];
     expect(plainRow.length).toBe(headerRow.length);
-    // Both data rows should end with the same border pattern
     expect(lines[3].endsWith(" │")).toBe(true);
     expect(lines[4].endsWith(" │")).toBe(true);
-    // "x" row should be padded to 3 cols (matching ZWJ width), so "x" + 2 spaces
-    expect(plainRow).toContain("x  ");
   });
 
   it("preserves newline between table and following text when no blank line", () => {
