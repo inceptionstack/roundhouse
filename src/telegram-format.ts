@@ -118,28 +118,81 @@ function formatTable(tableMd: string): string {
   const rawDataRows = dataRows.map(normalize);
   const allRows = [rawHeader, ...rawDataRows];
 
-  // Visual length of a string (grapheme count via Intl.Segmenter)
-  const segmenter = new Intl.Segmenter();
-  const visualLen = (s: string): number => [...segmenter.segment(s)].length;
+  // Display width of a single Unicode code point in a monospace font.
+  // Emoji and CJK characters typically occupy 2 columns.
+  const codePointWidth = (cp: number): number => {
+    // Zero-width characters
+    if (cp === 0x200B || cp === 0x200C || cp === 0x200D || cp === 0xFEFF) return 0;
+    // Combining marks (zero-width modifiers)
+    if (cp >= 0x0300 && cp <= 0x036F) return 0;  // Combining Diacritical Marks
+    if (cp >= 0x1AB0 && cp <= 0x1AFF) return 0;  // Combining Diacritical Marks Extended
+    if (cp >= 0x1DC0 && cp <= 0x1DFF) return 0;  // Combining Diacritical Marks Supplement
+    if (cp >= 0x20D0 && cp <= 0x20FF) return 0;  // Combining Diacritical Marks for Symbols (includes U+20E3 keycap)
+    if (cp >= 0xFE20 && cp <= 0xFE2F) return 0;  // Combining Half Marks
+    // Variation selectors
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return 0;
+    // Tags block (used in flag sequences etc)
+    if (cp >= 0xE0001 && cp <= 0xE007F) return 0;
+    // Emoji (common ranges)
+    if (cp >= 0x1F100 && cp <= 0x1FAFF) return 2;
+    if (cp >= 0x231A && cp <= 0x23FF) return 2;
+    if (cp >= 0x2600 && cp <= 0x27BF) return 2;
+    if (cp >= 0x2B50 && cp <= 0x2B55) return 2;
+    // CJK Unified Ideographs
+    if (cp >= 0x3400 && cp <= 0x4DBF) return 2;
+    if (cp >= 0x4E00 && cp <= 0x9FFF) return 2;
+    if (cp >= 0xF900 && cp <= 0xFAFF) return 2;
+    if (cp >= 0x20000 && cp <= 0x2FA1F) return 2;
+    // Fullwidth forms
+    if (cp >= 0xFF01 && cp <= 0xFF60) return 2;
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) return 2;
+    // Hangul
+    if (cp >= 0xAC00 && cp <= 0xD7AF) return 2;
+    return 1;
+  };
 
-  // Calculate max *visual* width for each column (on unescaped text,
+  // Display width of a grapheme cluster (accounts for ZWJ sequences, emoji, CJK)
+  const segmenter = new Intl.Segmenter();
+  const graphemeDisplayWidth = (grapheme: string): number => {
+    // ZWJ emoji sequences: multiple code points but render as a single wide emoji
+    if (grapheme.includes('\u200D')) return 2;
+    // Single code point: use lookup
+    const cps = Array.from(grapheme);
+    if (cps.length === 1) return codePointWidth(cps[0].codePointAt(0)!);
+    // Multi-codepoint grapheme (e.g. emoji + variation selector): width of the base
+    let width = 0;
+    for (const cp of cps) {
+      width = Math.max(width, codePointWidth(cp.codePointAt(0)!));
+    }
+    return width || 1;
+  };
+
+  // Display width of a full string (sum of grapheme display widths)
+  const displayWidth = (s: string): number => {
+    let w = 0;
+    for (const { segment } of segmenter.segment(s)) {
+      w += graphemeDisplayWidth(segment);
+    }
+    return w;
+  };
+
+  // Calculate max *display* width for each column (on unescaped text,
   // since Telegram renders entities back to their visual form in <pre>)
   const colWidths: number[] = [];
   for (let c = 0; c < colCount; c++) {
     let max = 0;
     for (const row of allRows) {
-      max = Math.max(max, visualLen(row[c]));
+      max = Math.max(max, displayWidth(row[c]));
     }
     colWidths.push(max);
   }
 
-  // Pad an escaped cell so it visually aligns to `width` rendered characters.
-  // We add (targetVisualWidth - actualVisualWidth) spaces, since spaces are
-  // 1 char both in HTML source and visually.
+  // Pad an escaped cell so it visually aligns to `width` display columns.
+  // Spaces are 1 display column each, so we add (target - actual) spaces.
   const padCell = (rawText: string, width: number): string => {
     const escaped = escapeHtml(rawText);
-    const vLen = visualLen(rawText);
-    return escaped + " ".repeat(Math.max(0, width - vLen));
+    const dw = displayWidth(rawText);
+    return escaped + " ".repeat(Math.max(0, width - dw));
   };
 
   // Build formatted rows
