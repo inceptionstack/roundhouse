@@ -126,6 +126,147 @@ describe("markdownToTelegramHtml", () => {
     expect(html).toContain("2. two");
   });
 
+  it("converts simple markdown table to aligned monospace", () => {
+    const md = "| Feature | Status |\n|---------|--------|\n| Bold | ✅ |\n| Code | ✅ |";
+    const html = markdownToTelegramHtml(md);
+    // Should be wrapped in <pre> for monospace alignment
+    expect(html).toContain("<pre>");
+    expect(html).toContain("</pre>");
+    // Should contain the data rows
+    expect(html).toContain("Feature");
+    expect(html).toContain("Bold");
+    expect(html).toContain("✅");
+    // Should NOT contain the raw separator row (---|---)
+    expect(html).not.toMatch(/\|-+\|/);
+  });
+
+  it("converts table with header and alignment row into formatted output", () => {
+    const md = "| Name | Value | Notes |\n|------|-------|-------|\n| a | 1 | good |\n| bb | 22 | ok |";
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("<pre>");
+    // Columns should be padded/aligned
+    expect(html).toContain("Name");
+    expect(html).toContain("Value");
+    expect(html).toContain("Notes");
+  });
+
+  it("pads table columns to uniform width", () => {
+    const md = "| A | BB |\n|---|---|\n| x | yy |";
+    const html = markdownToTelegramHtml(md);
+    // Extract the text inside <pre>...</pre>
+    const preMatch = html.match(/<pre>([\s\S]*?)<\/pre>/);
+    expect(preMatch).not.toBeNull();
+    const preContent = preMatch![1];
+    // Lines: top border, header, separator, data row, bottom border
+    const lines = preContent.split("\n").filter(l => l.trim());
+    expect(lines.length).toBe(5);
+    // The header (line 1) and data row (line 3) should have the same length (padded)
+    expect(lines[1].length).toBe(lines[3].length);
+  });
+
+  it("aligns columns correctly when cells contain HTML special characters", () => {
+    const md = "| Name | Value |\n|------|-------|\n| a&b | ok |\n| x | <y> |";
+    const html = markdownToTelegramHtml(md);
+    const preMatch = html.match(/<pre>([\s\S]*?)<\/pre>/);
+    expect(preMatch).not.toBeNull();
+    const preContent = preMatch![1];
+    // Entities should be present in raw HTML
+    expect(preContent).toContain("&amp;");
+    expect(preContent).toContain("&lt;");
+    // Decode entities to get visual text, then check visual alignment
+    const decode = (s: string) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+    const lines = preContent.split("\n").filter(l => l.trim());
+    const visualLines = lines.map(decode);
+    // All data/header rows (lines 1, 3, 4) should have the same *visual* length
+    expect(visualLines[1].length).toBe(visualLines[3].length);
+    expect(visualLines[1].length).toBe(visualLines[4].length);
+    // Borders should also match
+    expect(visualLines[0].length).toBe(visualLines[1].length);
+  });
+
+  it("handles data rows with fewer columns than header", () => {
+    const md = "| A | B | C |\n|---|---|---|\n| 1 |\n| x | y | z |";
+    const html = markdownToTelegramHtml(md);
+    const preMatch = html.match(/<pre>([\s\S]*?)<\/pre>/);
+    expect(preMatch).not.toBeNull();
+    const preContent = preMatch![1];
+    const lines = preContent.split("\n").filter(l => l.trim());
+    // All rows (header + 2 data + borders) should have the same length
+    expect(lines[1].length).toBe(lines[3].length); // header vs short row
+    expect(lines[1].length).toBe(lines[4].length); // header vs full row
+  });
+
+  it("handles data rows with more columns than header", () => {
+    const md = "| A | B |\n|---|---|\n| 1 | 2 | 3 | extra |";
+    const html = markdownToTelegramHtml(md);
+    const preMatch = html.match(/<pre>([\s\S]*?)<\/pre>/);
+    expect(preMatch).not.toBeNull();
+    const preContent = preMatch![1];
+    const lines = preContent.split("\n").filter(l => l.trim());
+    // All rows should have the same length (extra columns dropped)
+    expect(lines[1].length).toBe(lines[3].length);
+  });
+
+  it("aligns columns correctly with ZWJ emoji sequences", () => {
+    const md = "| Name | Icon |\n|------|------|\n| fam | \u{1F468}\u200D\u{1F469}\u200D\u{1F467} |\n| hi | x |";
+    const html = markdownToTelegramHtml(md);
+    const preMatch = html.match(/<pre>([\s\S]*?)<\/pre>/);
+    expect(preMatch).not.toBeNull();
+    const preContent = preMatch![1];
+    // Decode entities for visual check
+    const decode = (s: string) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    const lines = preContent.split("\n").filter(l => l.trim());
+    const visualLines = lines.map(decode);
+    // Use Intl.Segmenter to count what we expect
+    const seg = new Intl.Segmenter();
+    const graphemeLen = (s: string) => [...seg.segment(s)].length;
+    // Header and both data rows should have the same visual (grapheme) length
+    expect(graphemeLen(visualLines[1])).toBe(graphemeLen(visualLines[3]));
+    expect(graphemeLen(visualLines[1])).toBe(graphemeLen(visualLines[4]));
+  });
+
+  it("preserves newline between table and following text when no blank line", () => {
+    const md = "before\n| A | B |\n|---|---|\n| 1 | 2 |\nafter";
+    const html = markdownToTelegramHtml(md);
+    // The table and "after" should be separated by a newline, not jammed together
+    expect(html).toContain("</pre>\nafter");
+    expect(html).not.toContain("</pre>after");
+  });
+
+  it("preserves table surrounded by other content", () => {
+    const md = "Some text\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nMore text";
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("Some text");
+    expect(html).toContain("More text");
+    expect(html).toContain("<pre>");
+  });
+
+  it("does not convert tables inside fenced code blocks", () => {
+    const md = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```";
+    const html = markdownToTelegramHtml(md);
+    // Should be a single <pre> block with raw pipe characters, not nested <pre><pre>
+    expect(html).not.toContain("<pre><pre>");
+    expect(html).not.toContain("</pre></pre>");
+    // The table should remain as raw text inside the code block
+    expect(html).toContain("| A | B |");
+    const preCount = (html.match(/<pre>/g) || []).length;
+    expect(preCount).toBe(1);
+  });
+
+  it("converts table outside code block but not table inside", () => {
+    const md = "| X | Y |\n|---|---|\n| 1 | 2 |\n\n```\n| A | B |\n|---|---|\n| 3 | 4 |\n```";
+    const html = markdownToTelegramHtml(md);
+    // Two <pre> blocks: one for the rendered table, one for the code block
+    const preCount = (html.match(/<pre>/g) || []).length;
+    expect(preCount).toBe(2);
+    // The code block should have raw pipes
+    expect(html).toContain("| A | B |");
+    // The real table should have box-drawing chars
+    expect(html).toContain("\u2502 X");
+    // No nesting
+    expect(html).not.toContain("<pre><pre>");
+  });
+
   it("does not confuse sentinel-like input with real placeholders", () => {
     // Input that looks like our internal placeholder format should not be replaced
     const md = "text with \\x00 bytes";

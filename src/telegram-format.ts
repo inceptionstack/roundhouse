@@ -94,6 +94,75 @@ export function truncateHtmlSafe(html: string, limit: number): string {
 }
 
 /**
+ * Convert a markdown table into a <pre>-wrapped, column-aligned monospace table.
+ * Parses the header row, skips the separator row, and pads all columns to uniform width.
+ */
+function formatTable(tableMd: string): string {
+  const lines = tableMd.trim().split("\n");
+  if (lines.length < 2) return `<pre>${escapeHtml(tableMd)}</pre>`;
+
+  // Parse rows: split by | and trim each cell
+  const parseRow = (line: string): string[] =>
+    line.replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+
+  const headerCells = parseRow(lines[0]);
+  // lines[1] is the separator row (|---|---|) — skip it
+  const dataRows = lines.slice(2).map(parseRow);
+  const colCount = headerCells.length;
+
+  // Normalize rows to exactly colCount columns
+  const normalize = (cells: string[]): string[] =>
+    Array.from({ length: colCount }, (_, i) => cells[i] ?? "");
+
+  const rawHeader = normalize(headerCells);
+  const rawDataRows = dataRows.map(normalize);
+  const allRows = [rawHeader, ...rawDataRows];
+
+  // Visual length of a string (grapheme count via Intl.Segmenter)
+  const segmenter = new Intl.Segmenter();
+  const visualLen = (s: string): number => [...segmenter.segment(s)].length;
+
+  // Calculate max *visual* width for each column (on unescaped text,
+  // since Telegram renders entities back to their visual form in <pre>)
+  const colWidths: number[] = [];
+  for (let c = 0; c < colCount; c++) {
+    let max = 0;
+    for (const row of allRows) {
+      max = Math.max(max, visualLen(row[c]));
+    }
+    colWidths.push(max);
+  }
+
+  // Pad an escaped cell so it visually aligns to `width` rendered characters.
+  // We add (targetVisualWidth - actualVisualWidth) spaces, since spaces are
+  // 1 char both in HTML source and visually.
+  const padCell = (rawText: string, width: number): string => {
+    const escaped = escapeHtml(rawText);
+    const vLen = visualLen(rawText);
+    return escaped + " ".repeat(Math.max(0, width - vLen));
+  };
+
+  // Build formatted rows
+  const formatRow = (cells: string[]): string =>
+    "│ " + cells.map((cell, i) => padCell(cell, colWidths[i])).join(" │ ") + " │";
+
+  const separator = "├─" + colWidths.map(w => "─".repeat(w)).join("─┼─") + "─┤";
+  const topBorder = "┌─" + colWidths.map(w => "─".repeat(w)).join("─┬─") + "─┐";
+  const bottomBorder = "└─" + colWidths.map(w => "─".repeat(w)).join("─┴─") + "─┘";
+
+  // Cells are escaped inside padCell; box-drawing chars are HTML-safe.
+  const result = [
+    topBorder,
+    formatRow(rawHeader),
+    separator,
+    ...rawDataRows.map(formatRow),
+    bottomBorder,
+  ].join("\n");
+
+  return `<pre>${result}</pre>`;
+}
+
+/**
  * Convert markdown text to Telegram-compatible HTML.
  * Handles code blocks first (to avoid processing markdown inside them),
  * then processes inline formatting.
@@ -105,12 +174,27 @@ export function markdownToTelegramHtml(md: string): string {
   const RE = (kind: string) => new RegExp(`\\x00${sentinel}_${kind}_(\\d+)\\x00`, "g");
 
   // Extract fenced code blocks first to protect their contents
+  // (must happen before table extraction to avoid nested <pre> tags)
   const codeBlocks: string[] = [];
   let processed = md.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, _lang, code) => {
     const idx = codeBlocks.length;
     codeBlocks.push(`<pre>${escapeHtml(code.replace(/\n$/, ""))}</pre>`);
     return S("CB", idx);
   });
+
+  // Extract markdown tables (now safe — code blocks are already sentinelled out)
+  const tables: string[] = [];
+  processed = processed.replace(
+    /(?:^|\n)(\|.+\|\n\|[-| :]+\|\n(?:\|.+\|(?:\n|$))+)/g,
+    (match) => {
+      const idx = tables.length;
+      const leadingNewline = match.startsWith("\n") ? "\n" : "";
+      const trailingNewline = match.endsWith("\n") ? "\n" : "";
+      const tableContent = match.replace(/^\n/, "").replace(/\n$/, "");
+      tables.push(formatTable(tableContent));
+      return leadingNewline + S("TB", idx) + trailingNewline;
+    },
+  );
 
   // Extract inline code to protect contents
   const inlineCodes: string[] = [];
@@ -166,6 +250,7 @@ export function markdownToTelegramHtml(md: string): string {
   processed = processed.replace(RE("LK"), (_match, idx) => links[parseInt(idx, 10)]);
   processed = processed.replace(RE("IC"), (_match, idx) => inlineCodes[parseInt(idx, 10)]);
   processed = processed.replace(RE("CB"), (_match, idx) => codeBlocks[parseInt(idx, 10)]);
+  processed = processed.replace(RE("TB"), (_match, idx) => tables[parseInt(idx, 10)]);
 
   return processed;
 }
