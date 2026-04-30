@@ -80,10 +80,11 @@ function extractLinks(str: string, cb: (text: string, url: string) => string): s
  */
 export function truncateHtmlSafe(html: string, limit: number): string {
   if (html.length <= limit) return html;
+  if (limit <= 3) return "...";
   const cutoff = limit - 3; // room for "..."
   // Find the last '>' at or before cutoff to avoid splitting a tag
   let safeEnd = cutoff;
-  for (let i = cutoff; i >= Math.max(0, cutoff - 200); i--) {
+  for (let i = cutoff - 1; i >= Math.max(0, cutoff - 200); i--) {
     if (html[i] === ">") {
       safeEnd = i + 1;
       break;
@@ -158,7 +159,7 @@ export function markdownToTelegramHtml(md: string): string {
   // Merge adjacent blockquotes
   processed = processed.replace(/<\/blockquote>\n<blockquote>/g, "\n");
 
-  // Horizontal rules: --- or *** or ___
+  // Horizontal rules: --- or ***
   processed = processed.replace(/^[-*]{3,}$/gm, "───────────────");
 
   // Restore placeholders

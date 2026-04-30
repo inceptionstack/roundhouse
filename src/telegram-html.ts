@@ -154,11 +154,10 @@ export async function handleTelegramHtmlStream(
     if (messageId) {
       const truncated = truncateHtmlSafe(html, TELEGRAM_LIMIT);
       await editMessage(truncated);
-      // Mark the content that fits as committed
-      // Approximate: use the source text ratio to estimate how much markdown was consumed
-      // Conservative: commit up to 3800 chars of source (our split threshold)
+      // Estimate how many source chars were consumed using the expansion ratio
       const sourceLen = currentText().length;
-      const consumed = Math.min(sourceLen, 3800);
+      const ratio = sourceLen > 0 ? html.length / sourceLen : 1;
+      const consumed = Math.min(sourceLen, Math.floor((TELEGRAM_LIMIT - 10) / Math.max(ratio, 1)));
       committedLength += consumed;
       messageId = null;
       lastEditContent = "";
@@ -231,8 +230,10 @@ export async function handleTelegramHtmlStream(
       // Content exceeds limit — finalize current message and post remainder
       const truncated = truncateHtmlSafe(finalHtml, TELEGRAM_LIMIT);
       await editMessage(truncated);
-      // Post the overflow as new messages
-      const overflowStart = 3800; // approximate source chars that fit
+      // Estimate consumed source chars using expansion ratio
+      const remLen = remaining.length;
+      const ratio = remLen > 0 ? finalHtml.length / remLen : 1;
+      const overflowStart = Math.min(remLen, Math.floor((TELEGRAM_LIMIT - 10) / Math.max(ratio, 1)));
       const overflow = remaining.slice(overflowStart);
       if (overflow.trim()) {
         await postTelegramHtml(thread, overflow);
