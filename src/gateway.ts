@@ -183,7 +183,7 @@ async function saveAttachments(threadId: string, attachments: any[]): Promise<At
   // Per-message directory: <thread>/<timestamp_nonce>/
   const msgDir = join(INCOMING_DIR, threadIdToDir(threadId), `${Date.now()}_${generateAttachmentId()}`);
   try {
-    mkdirSync(msgDir, { recursive: true });
+    mkdirSync(msgDir, { recursive: true, mode: 0o700 });
   } catch (err) {
     console.error(`[roundhouse] failed to create incoming dir ${msgDir}:`, (err as Error).message);
     return { saved: [], skipped: ["Failed to create storage directory"] };
@@ -242,7 +242,7 @@ async function saveAttachments(threadId: string, attachments: any[]): Promise<At
       const fileName = `${i}-${rawName}`;
       const filePath = join(msgDir, fileName);
 
-      await writeFile(filePath, buf);
+      await writeFile(filePath, buf, { mode: 0o600 });
 
       const VALID_MEDIA_TYPES = new Set(["audio", "image", "file", "video"]);
       const mediaType = VALID_MEDIA_TYPES.has(att.type) ? att.type : "file";
@@ -306,9 +306,13 @@ export class Gateway {
         : typeof thread.id === "string" && thread.id.startsWith("telegram:")
           ? parseInt(thread.id.split(":")[1], 10)
           : undefined;
-      const userId = typeof message.author?.id === "string"
-        ? parseInt(message.author.id, 10)
-        : undefined;
+      // Chat SDK Telegram adapter provides userId (not id)
+      const rawUserId = message.author?.userId ?? message.author?.id ?? message.raw?.from?.id;
+      const userId = typeof rawUserId === "number"
+        ? rawUserId
+        : typeof rawUserId === "string"
+          ? parseInt(rawUserId, 10)
+          : undefined;
 
       if (chatId == null || Number.isNaN(chatId) || userId == null || Number.isNaN(userId)) {
         console.error(`[roundhouse] Pairing nonce matched but could not extract IDs: chatId=${chatId} userId=${userId}. Pairing left pending.`);
@@ -399,6 +403,13 @@ export class Gateway {
     if (!this.config.chat.notifyChatIds) this.config.chat.notifyChatIds = [];
     const allowedUserIds = this.config.chat.allowedUserIds;
 
+    // SECURITY: Warn (loudly) when no auth allowlist is configured
+    if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
+      console.warn("\n⚠️  WARNING: No allowedUsers or allowedUserIds configured!");
+      console.warn("   Any Telegram user who finds this bot can interact with the agent.");
+      console.warn("   Run: roundhouse setup --telegram --user <your-username>\n");
+    }
+
     // Per-thread verbose toggle (shows tool_start messages)
     const verboseThreads = new Set<string>();
 
@@ -465,6 +476,7 @@ export class Gateway {
       }
 
       // Handle /compact command — flush memory then compact session context
+      // Routed through the per-thread lock to prevent concurrent agent access
       if (isCommand(userText.trim(), "/compact")) {
         const agent = this.router.resolve(agentThreadId);
         if (!agent.compact) {
@@ -472,6 +484,14 @@ export class Gateway {
           return;
         }
         console.log(`[roundhouse] /compact for thread=${thread.id} agentThread=${agentThreadId}`);
+
+        // Acquire per-thread lock (same as normal prompts)
+        const prevLock = threadLocks.get(agentThreadId);
+        let releaseLock: () => void;
+        const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
+        threadLocks.set(agentThreadId, lockPromise);
+        if (prevLock) await prevLock;
+
         await thread.post("📝 Saving memory and compacting...");
         const stopTyping = startTypingLoop(thread);
         try {
@@ -500,6 +520,10 @@ export class Gateway {
           await thread.post(`⚠️ Compaction failed: ${msg.slice(0, 200)}`);
         } finally {
           stopTyping();
+          releaseLock!();
+          if (threadLocks.get(agentThreadId) === lockPromise) {
+            threadLocks.delete(agentThreadId);
+          }
         }
         return;
       }

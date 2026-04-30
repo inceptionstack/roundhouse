@@ -7,7 +7,7 @@
 import { resolve, dirname } from "node:path";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
-import { execSync, spawn } from "node:child_process";
+import { execSync, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -80,10 +80,10 @@ async function cmdRun() {
     await import(jsPath);
   } else {
     const tsxPath = resolve(__dirname, "..", "..", "node_modules", "tsx", "dist", "cli.mjs");
-    execSync(
-      `node ${tsxPath} ${indexPath}`,
-      { stdio: "inherit", env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH } },
-    );
+    execFileSync(process.execPath, [tsxPath, indexPath], {
+      stdio: "inherit",
+      env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH },
+    });
   }
 }
 

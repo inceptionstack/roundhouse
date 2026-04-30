@@ -182,11 +182,11 @@ export async function loadConfig(): Promise<GatewayConfig> {
         console.error(`[roundhouse] failed to parse config at ${resolved.path}: ${err.message}`);
         process.exit(1);
       }
-      // Try cwd
+      // Try cwd (with security warning)
       try {
         const cwdPath = resolve(process.cwd(), "gateway.config.json");
         const raw = await readFile(cwdPath, "utf8");
-        console.log("[roundhouse] loaded gateway.config.json from cwd");
+        console.warn(`[roundhouse] ⚠️  loaded gateway.config.json from cwd (${cwdPath}) — consider using ~/.roundhouse/gateway.config.json instead`);
         config = JSON.parse(raw) as GatewayConfig;
       } catch (cwdErr: any) {
         if (cwdErr.code !== "ENOENT") {

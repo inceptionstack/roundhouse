@@ -30,6 +30,7 @@ import { DEBUG_STREAM, threadIdToDir } from "../util";
 interface SessionEntry {
   session: AgentSession;
   lastUsed: number;
+  inFlight: number;
 }
 
 const DEFAULT_SESSIONS_DIR = SESSIONS_DIR;
@@ -103,6 +104,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void, onDrainComplete?: () => void): Promise<void> {
+    entry.inFlight++;
+    try {
     await entry.session.prompt(text);
     await drainSessionEvents(entry.session);
 
@@ -152,6 +155,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     if (notifiedDraining && onDrainComplete) {
       onDrainComplete();
     }
+    } finally {
+      entry.inFlight--;
+      entry.lastUsed = Date.now();
+    }
   }
 
   async function createSession(threadId: string): Promise<SessionEntry> {
@@ -197,7 +204,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       console.log(`[pi-agent] model fallback: ${result.modelFallbackMessage}`);
     }
 
-    const entry: SessionEntry = { session: result.session, lastUsed: Date.now() };
+    const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0 };
     sessions.set(threadId, entry);
 
     // Detect memory capabilities from loaded extensions (first session only)
@@ -243,6 +250,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   function reap() {
     const now = Date.now();
     for (const [id, entry] of sessions) {
+      if (entry.inFlight > 0) continue; // skip busy sessions
       if (now - entry.lastUsed > maxIdleMs) {
         entry.session.dispose();
         sessions.delete(id);

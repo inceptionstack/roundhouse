@@ -31,10 +31,10 @@ export async function loadThreadMemoryState(threadId: string): Promise<ThreadMem
 /** Save per-thread memory state (atomic write to prevent corruption) */
 export async function saveThreadMemoryState(threadId: string, state: ThreadMemoryState): Promise<void> {
   const path = stateFilePath(threadId);
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
   try {
-    await writeFile(tmp, JSON.stringify(state, null, 2) + "\n");
+    await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
     await rename(tmp, path);
   } catch (err) {
     try { await unlink(tmp); } catch {}

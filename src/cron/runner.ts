@@ -33,7 +33,8 @@ export class CronRunner {
 
     // Render prompt
     const tz = job.schedule.type === "cron" ? job.schedule.tz : job.schedule.type === "once" ? job.schedule.tz : undefined;
-    const ctx = buildTemplateContext(job.id, job.description, runId, scheduledAt, startedAt, tz, process.cwd(), job.vars ?? {});
+    const agentCwd = (agentCfg.cwd as string) ?? process.cwd();
+    const ctx = buildTemplateContext(job.id, job.description, runId, scheduledAt, startedAt, tz, agentCwd, job.vars ?? {});
     const prompt = renderTemplate(job.prompt, ctx) + CRON_PROMPT_SUFFIX;
 
     console.log(`[cron] starting ${job.id} [${runId}] kind=${kind}`);
