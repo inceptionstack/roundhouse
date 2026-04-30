@@ -9,6 +9,7 @@ import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
 import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
+import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "./telegram-html";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
@@ -985,14 +986,20 @@ export class Gateway {
       currentPromise = null;
     };
 
+    const useTelegramHtml = isTelegramThread(thread);
+
     const ensureStream = () => {
       if (!currentPromise) {
         const ts = createTextStream();
         currentPush = ts.push;
         currentFinish = ts.finish;
-        currentPromise = thread.handleStream(ts.iterable).catch((err: Error) => {
-          console.warn(`[roundhouse] handleStream error:`, err.message);
-        });
+        currentPromise = useTelegramHtml
+          ? handleTelegramHtmlStream(thread, ts.iterable).catch((err: Error) => {
+              console.warn(`[roundhouse] telegram html stream error:`, err.message);
+            })
+          : thread.handleStream(ts.iterable).catch((err: Error) => {
+              console.warn(`[roundhouse] handleStream error:`, err.message);
+            });
       }
     };
 
@@ -1098,6 +1105,11 @@ export class Gateway {
 
   /** Post text with markdown, falling back to plain text */
   private async postWithFallback(thread: any, text: string) {
+    // Telegram: send as HTML for proper markdown rendering
+    if (isTelegramThread(thread)) {
+      await postTelegramHtml(thread, text);
+      return;
+    }
     for (const chunk of splitMessage(text, 4000)) {
       try {
         await thread.post({ markdown: chunk });
