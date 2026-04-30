@@ -603,7 +603,7 @@ export class Gateway {
           lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
         }
 
-        await thread.post({ markdown: lines.join("\n") });
+        await this.postWithFallback(thread, lines.join("\n"));
         console.log(`[roundhouse] /status for thread=${thread.id} agentThread=${agentThreadId}`);
         return;
       }
