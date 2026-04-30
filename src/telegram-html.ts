@@ -8,7 +8,7 @@
  * typing indicators, command handling, authorization, message history.
  */
 
-import { markdownToTelegramHtml } from "./telegram-format";
+import { markdownToTelegramHtml, truncateHtmlSafe } from "./telegram-format";
 import { splitMessage } from "./util";
 
 /** Max Telegram message length */
@@ -39,48 +39,61 @@ function parseTelegramThreadId(threadId: string): { chatId: string; messageThrea
   return result;
 }
 
+/** Common payload fields for Telegram API calls */
+function basePayload(chatId: string, messageThreadId?: number) {
+  return {
+    chat_id: chatId,
+    ...(messageThreadId !== undefined && { message_thread_id: messageThreadId }),
+    disable_web_page_preview: true,
+  };
+}
+
+/** Send one HTML message, falling back to plain text on parse error */
+async function sendHtmlOrPlain(
+  adapter: any,
+  chatId: string,
+  messageThreadId: number | undefined,
+  html: string,
+  plainFallback: string,
+): Promise<void> {
+  try {
+    await adapter.telegramFetch("sendMessage", {
+      ...basePayload(chatId, messageThreadId),
+      text: html,
+      parse_mode: "HTML",
+    });
+  } catch {
+    try {
+      await adapter.telegramFetch("sendMessage", {
+        ...basePayload(chatId, messageThreadId),
+        text: plainFallback,
+      });
+    } catch (err) {
+      console.error(`[roundhouse] Telegram sendMessage failed:`, (err as Error).message);
+    }
+  }
+}
+
 /**
  * Post markdown as Telegram HTML, with chunking and fallback.
- * Falls back to plain text if HTML parse fails.
+ * Splits markdown into chunks before conversion so each chunk's HTML stays within limits.
  */
 export async function postTelegramHtml(thread: any, markdown: string): Promise<void> {
   const { chatId, messageThreadId } = parseTelegramThreadId(thread.id);
 
-  // Split before conversion — HTML may be slightly larger than source markdown
+  // Split before conversion — HTML expansion is usually modest
   for (const chunk of splitMessage(markdown, 3800)) {
     const html = markdownToTelegramHtml(chunk);
-
-    // Ensure we don't exceed Telegram's limit after HTML conversion
-    const safeHtml = html.length <= TELEGRAM_LIMIT ? html : html.slice(0, TELEGRAM_LIMIT - 3) + "...";
-
-    try {
-      await thread.adapter.telegramFetch("sendMessage", {
-        chat_id: chatId,
-        ...(messageThreadId !== undefined && { message_thread_id: messageThreadId }),
-        text: safeHtml,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      });
-    } catch {
-      // Fallback: try plain text if HTML parsing failed
-      try {
-        await thread.adapter.telegramFetch("sendMessage", {
-          chat_id: chatId,
-          ...(messageThreadId !== undefined && { message_thread_id: messageThreadId }),
-          text: chunk,
-        });
-      } catch (err) {
-        console.error(`[roundhouse] Telegram sendMessage failed:`, (err as Error).message);
-      }
-    }
+    const safeHtml = truncateHtmlSafe(html, TELEGRAM_LIMIT);
+    await sendHtmlOrPlain(thread.adapter, chatId, messageThreadId, safeHtml, chunk);
   }
 }
 
 /**
  * Stream agent text as Telegram HTML using sendMessage + editMessageText.
  *
- * Pattern: send placeholder on first chunk, accumulate text, convert to HTML,
- * edit at intervals, final edit on completion.
+ * For responses under 4096 chars: single message with progressive edits.
+ * For longer responses: finalize current message and start new ones via postTelegramHtml.
  */
 export async function handleTelegramHtmlStream(
   thread: any,
@@ -92,62 +105,86 @@ export async function handleTelegramHtmlStream(
   let messageId: number | null = null;
   let lastEditContent = "";
   let lastEditTime = 0;
+  /** Content already committed to sent messages (for overflow handling) */
+  let committedLength = 0;
 
   const sendInitial = async (html: string): Promise<number> => {
     const result = await thread.adapter.telegramFetch("sendMessage", {
-      chat_id: chatId,
-      ...(messageThreadId !== undefined && { message_thread_id: messageThreadId }),
+      ...basePayload(chatId, messageThreadId),
       text: html,
       parse_mode: "HTML",
-      disable_web_page_preview: true,
     });
     return result.message_id;
   };
 
-  const editMessage = async (html: string): Promise<void> => {
-    if (!messageId || html === lastEditContent) return;
+  const editMessage = async (html: string): Promise<boolean> => {
+    if (!messageId || html === lastEditContent) return true;
     try {
       await thread.adapter.telegramFetch("editMessageText", {
-        chat_id: chatId,
+        ...basePayload(chatId, messageThreadId),
         message_id: messageId,
         text: html,
         parse_mode: "HTML",
-        disable_web_page_preview: true,
       });
       lastEditContent = html;
       lastEditTime = Date.now();
+      return true;
     } catch {
       // Telegram may reject if content hasn't changed or HTML is temporarily invalid
-      // during streaming — silently skip, final edit will fix it
+      return false;
     }
   };
 
+  /** Get the current uncommitted portion of accumulated text */
+  const currentText = () => accumulated.slice(committedLength);
+
   const renderCurrent = (): string => {
-    const html = markdownToTelegramHtml(accumulated);
-    return html.length <= TELEGRAM_LIMIT ? html : html.slice(0, TELEGRAM_LIMIT - 3) + "...";
+    return markdownToTelegramHtml(currentText());
+  };
+
+  /**
+   * Check if current content exceeds the Telegram limit.
+   * If so, finalize the current message and start overflow handling.
+   */
+  const handleOverflow = async (): Promise<void> => {
+    const html = renderCurrent();
+    if (html.length <= TELEGRAM_LIMIT) return;
+
+    // Finalize current streaming message with tag-safe truncation
+    if (messageId) {
+      const truncated = truncateHtmlSafe(html, TELEGRAM_LIMIT);
+      await editMessage(truncated);
+      // Mark the content that fits as committed
+      // Approximate: use the source text ratio to estimate how much markdown was consumed
+      // Conservative: commit up to 3800 chars of source (our split threshold)
+      const sourceLen = currentText().length;
+      const consumed = Math.min(sourceLen, 3800);
+      committedLength += consumed;
+      messageId = null;
+      lastEditContent = "";
+    }
   };
 
   for await (const chunk of stream) {
     accumulated += chunk;
 
     if (!messageId) {
-      // First chunk — send initial message
+      // First chunk (or after overflow) — send initial message
       const html = renderCurrent();
       if (html.trim()) {
+        const safeHtml = truncateHtmlSafe(html, TELEGRAM_LIMIT);
         try {
-          messageId = await sendInitial(html);
-          lastEditContent = html;
+          messageId = await sendInitial(safeHtml);
+          lastEditContent = safeHtml;
           lastEditTime = Date.now();
         } catch {
-          // If HTML send fails, try plain text
           try {
             const result = await thread.adapter.telegramFetch("sendMessage", {
-              chat_id: chatId,
-              ...(messageThreadId !== undefined && { message_thread_id: messageThreadId }),
-              text: accumulated,
+              ...basePayload(chatId, messageThreadId),
+              text: currentText(),
             });
             messageId = result.message_id;
-            lastEditContent = accumulated;
+            lastEditContent = currentText();
             lastEditTime = Date.now();
           } catch (err) {
             console.error(`[roundhouse] Telegram stream initial send failed:`, (err as Error).message);
@@ -157,33 +194,52 @@ export async function handleTelegramHtmlStream(
       continue;
     }
 
-    // Throttled edit
-    const now = Date.now();
-    if (now - lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
-      await editMessage(renderCurrent());
+    // Check for overflow before editing
+    await handleOverflow();
+
+    // Throttled edit (only if we still have an active message)
+    if (messageId) {
+      const now = Date.now();
+      if (now - lastEditTime >= STREAM_EDIT_INTERVAL_MS) {
+        const html = renderCurrent();
+        const safeHtml = truncateHtmlSafe(html, TELEGRAM_LIMIT);
+        await editMessage(safeHtml);
+      }
     }
   }
 
-  // Final edit with complete content
+  // Final: handle any remaining content
+  const remaining = currentText();
+  if (!remaining.trim()) return;
+
   if (messageId) {
+    // Try final edit
     const finalHtml = renderCurrent();
-    if (finalHtml !== lastEditContent) {
-      await editMessage(finalHtml);
-    }
-    // If HTML edit failed silently, try plain text fallback for final
-    if (lastEditContent !== renderCurrent()) {
-      try {
-        await thread.adapter.telegramFetch("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
-          text: accumulated,
-        });
-      } catch {
-        // Give up — at least some content was sent
+    if (finalHtml.length <= TELEGRAM_LIMIT) {
+      const ok = await editMessage(finalHtml);
+      if (!ok) {
+        // Fallback to plain text edit
+        try {
+          await thread.adapter.telegramFetch("editMessageText", {
+            ...basePayload(chatId, messageThreadId),
+            message_id: messageId,
+            text: remaining,
+          });
+        } catch { /* at least some content was sent */ }
+      }
+    } else {
+      // Content exceeds limit — finalize current message and post remainder
+      const truncated = truncateHtmlSafe(finalHtml, TELEGRAM_LIMIT);
+      await editMessage(truncated);
+      // Post the overflow as new messages
+      const overflowStart = 3800; // approximate source chars that fit
+      const overflow = remaining.slice(overflowStart);
+      if (overflow.trim()) {
+        await postTelegramHtml(thread, overflow);
       }
     }
-  } else if (accumulated.trim()) {
-    // Never sent anything — post the whole thing
-    await postTelegramHtml(thread, accumulated);
+  } else {
+    // No active message — post everything remaining
+    await postTelegramHtml(thread, remaining);
   }
 }

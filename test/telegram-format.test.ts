@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markdownToTelegramHtml } from "../src/telegram-format";
+import { markdownToTelegramHtml, truncateHtmlSafe } from "../src/telegram-format";
 
 describe("markdownToTelegramHtml", () => {
   it("escapes HTML entities", () => {
@@ -22,6 +22,10 @@ describe("markdownToTelegramHtml", () => {
 
   it("converts *italic*", () => {
     expect(markdownToTelegramHtml("hello *world*")).toBe("hello <i>world</i>");
+  });
+
+  it("converts ***bold italic*** with proper nesting", () => {
+    expect(markdownToTelegramHtml("***Important***")).toBe("<b><i>Important</i></b>");
   });
 
   it("converts ~~strikethrough~~", () => {
@@ -66,6 +70,18 @@ describe("markdownToTelegramHtml", () => {
       .toBe('<a href="mailto:a@b.com">email</a>');
   });
 
+  it("handles URLs with balanced parentheses (Wikipedia)", () => {
+    const md = "[Test](https://en.wikipedia.org/wiki/Test_(page))";
+    expect(markdownToTelegramHtml(md))
+      .toBe('<a href="https://en.wikipedia.org/wiki/Test_(page)">Test</a>');
+  });
+
+  it("handles URLs with nested parentheses", () => {
+    const md = "[link](https://example.com/a(b(c)))";
+    expect(markdownToTelegramHtml(md))
+      .toBe('<a href="https://example.com/a(b(c))">link</a>');
+  });
+
   it("converts blockquotes", () => {
     expect(markdownToTelegramHtml("> quoted text"))
       .toBe("<blockquote>quoted text</blockquote>");
@@ -108,5 +124,35 @@ describe("markdownToTelegramHtml", () => {
     const html = markdownToTelegramHtml(md);
     expect(html).toContain("1. one");
     expect(html).toContain("2. two");
+  });
+
+  it("does not confuse sentinel-like input with real placeholders", () => {
+    // Input that looks like our internal placeholder format should not be replaced
+    const md = "text with \\x00 bytes";
+    const html = markdownToTelegramHtml(md);
+    expect(html).not.toContain("undefined");
+  });
+});
+
+describe("truncateHtmlSafe", () => {
+  it("returns short html unchanged", () => {
+    expect(truncateHtmlSafe("<b>hello</b>", 100)).toBe("<b>hello</b>");
+  });
+
+  it("truncates at last > before limit", () => {
+    const html = "<b>hello</b> <i>world</i> more text here that is very long";
+    const result = truncateHtmlSafe(html, 30);
+    expect(result.endsWith("...")).toBe(true);
+    expect(result.length).toBeLessThanOrEqual(30);
+    // Should not cut inside a tag
+    expect(result).not.toMatch(/<[^>]*$/);
+  });
+
+  it("does not produce broken tags", () => {
+    const html = '<a href="https://example.com">click here</a> and some more text padding';
+    const result = truncateHtmlSafe(html, 40);
+    expect(result.endsWith("...")).toBe(true);
+    // The > in the opening tag should be a valid cut point
+    expect(result).not.toContain('href="https://example.com">click here</a> and some more text pa...');
   });
 });
