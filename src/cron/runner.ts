@@ -31,6 +31,13 @@ export class CronRunner {
     const threadId = buildCronThreadId(job.id, runId);
     const timeoutMs = job.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+    // Load agent config before rendering prompt (template needs agentCfg.cwd)
+    let agentCfg = this.agentConfig;
+    if (!agentCfg) {
+      const { loadConfig } = await import("../config");
+      agentCfg = (await loadConfig()).agent;
+    }
+
     // Render prompt
     const tz = job.schedule.type === "cron" ? job.schedule.tz : job.schedule.type === "once" ? job.schedule.tz : undefined;
     const agentCwd = (agentCfg.cwd as string) ?? process.cwd();
@@ -38,13 +45,6 @@ export class CronRunner {
     const prompt = renderTemplate(job.prompt, ctx) + CRON_PROMPT_SUFFIX;
 
     console.log(`[cron] starting ${job.id} [${runId}] kind=${kind}`);
-
-    // Create fresh agent — use provided config or load dynamically for CLI trigger
-    let agentCfg = this.agentConfig;
-    if (!agentCfg) {
-      const { loadConfig } = await import("../config");
-      agentCfg = (await loadConfig()).agent;
-    }
     const { type, ...rest } = agentCfg;
     const factory = getAgentFactory(type);
     const agent = factory({ ...rest, sessionDir: undefined });

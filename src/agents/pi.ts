@@ -106,55 +106,55 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void, onDrainComplete?: () => void): Promise<void> {
     entry.inFlight++;
     try {
-    await entry.session.prompt(text);
-    await drainSessionEvents(entry.session);
+      await entry.session.prompt(text);
+      await drainSessionEvents(entry.session);
 
-    // Check for pending follow-up work AFTER drainSessionEvents — that's
-    // where agent_end extension handlers run and queue follow-up messages
-    // (e.g. pi-lgtm calls sendMessage with deliverAs: "followUp").
-    // The actual long wait is in the while loop's waitForIdle() below.
-    let notifiedDraining = false;
-    if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
-      onDraining();
-      notifiedDraining = true;
-    }
-
-    // Loop until the session is fully idle. Two separate conditions can keep
-    // work in flight after the initial prompt resolves:
-    //
-    //  (a) `hasQueuedMessages()` — an extension called `pi.sendMessage(...,
-    //      { triggerTurn: true, deliverAs: "followUp" })` *while isStreaming
-    //      was true* — pi queued onto `agent.followUp()`, so we manually
-    //      drain it with `continue()`.
-    //
-    //  (b) `isStreaming === true` — an extension called the same sendMessage
-    //      *after isStreaming became false*. In that path pi's
-    //      `sendCustomMessage` skips the queue entirely and calls
-    //      `agent.prompt(appMessage)` directly as fire-and-forget, kicking
-    //      off a brand-new agent run. `hasQueuedMessages()` returns false
-    //      for this run, but `isStreaming` is true — we have to
-    //      `waitForIdle()` so subscribers see the new run's events (e.g. the
-    //      agent's reply to a pi-lgtm code review) before we unsubscribe.
-    //
-    // Without (b), pi CLI works (its subscriber stays attached across runs)
-    // but roundhouse delivers the review bubble then goes silent.
-    while (true) {
-      if (entry.session.isStreaming) {
-        await entry.session.agent.waitForIdle();
-        await drainSessionEvents(entry.session);
-        continue;
+      // Check for pending follow-up work AFTER drainSessionEvents — that's
+      // where agent_end extension handlers run and queue follow-up messages
+      // (e.g. pi-lgtm calls sendMessage with deliverAs: "followUp").
+      // The actual long wait is in the while loop's waitForIdle() below.
+      let notifiedDraining = false;
+      if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
+        onDraining();
+        notifiedDraining = true;
       }
-      if (entry.session.agent.hasQueuedMessages()) {
-        await entry.session.agent.continue();
-        await drainSessionEvents(entry.session);
-        continue;
-      }
-      break;
-    }
 
-    if (notifiedDraining && onDrainComplete) {
-      onDrainComplete();
-    }
+      // Loop until the session is fully idle. Two separate conditions can keep
+      // work in flight after the initial prompt resolves:
+      //
+      //  (a) `hasQueuedMessages()` — an extension called `pi.sendMessage(...,
+      //      { triggerTurn: true, deliverAs: "followUp" })` *while isStreaming
+      //      was true* — pi queued onto `agent.followUp()`, so we manually
+      //      drain it with `continue()`.
+      //
+      //  (b) `isStreaming === true` — an extension called the same sendMessage
+      //      *after isStreaming became false*. In that path pi's
+      //      `sendCustomMessage` skips the queue entirely and calls
+      //      `agent.prompt(appMessage)` directly as fire-and-forget, kicking
+      //      off a brand-new agent run. `hasQueuedMessages()` returns false
+      //      for this run, but `isStreaming` is true — we have to
+      //      `waitForIdle()` so subscribers see the new run's events (e.g. the
+      //      agent's reply to a pi-lgtm code review) before we unsubscribe.
+      //
+      // Without (b), pi CLI works (its subscriber stays attached across runs)
+      // but roundhouse delivers the review bubble then goes silent.
+      while (true) {
+        if (entry.session.isStreaming) {
+          await entry.session.agent.waitForIdle();
+          await drainSessionEvents(entry.session);
+          continue;
+        }
+        if (entry.session.agent.hasQueuedMessages()) {
+          await entry.session.agent.continue();
+          await drainSessionEvents(entry.session);
+          continue;
+        }
+        break;
+      }
+
+      if (notifiedDraining && onDrainComplete) {
+        onDrainComplete();
+      }
     } finally {
       entry.inFlight--;
       entry.lastUsed = Date.now();

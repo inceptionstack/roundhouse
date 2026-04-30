@@ -41,6 +41,11 @@ const __dirname = dirname(__filename);
 
 // ── Shell helpers ───────────────────────────────────
 
+/**
+ * Shell helper — WARNING: passes `cmd` through the system shell.
+ * Only call with trusted/hardcoded strings. Any dynamic segments must be
+ * validated (e.g. `/^\d+$/.test(pid)`) before interpolation.
+ */
 function run(cmd: string, opts?: { silent?: boolean }): string {
   try {
     return execSync(cmd, { encoding: "utf8", stdio: opts?.silent ? "pipe" : "inherit" }).trim();
