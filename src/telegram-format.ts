@@ -133,11 +133,11 @@ function formatTable(tableMd: string): string {
     if (cp >= 0xFE00 && cp <= 0xFE0F) return 0;
     // Tags block (used in flag sequences etc)
     if (cp >= 0xE0001 && cp <= 0xE007F) return 0;
-    // Emoji (common ranges)
-    if (cp >= 0x1F100 && cp <= 0x1FAFF) return 2;
-    if (cp >= 0x231A && cp <= 0x23FF) return 2;
-    if (cp >= 0x2600 && cp <= 0x27BF) return 2;
-    if (cp >= 0x2B50 && cp <= 0x2B55) return 2;
+    // Emoji — Telegram renders these ~3 monospace columns wide in <pre> blocks
+    if (cp >= 0x1F100 && cp <= 0x1FAFF) return 3;
+    if (cp >= 0x231A && cp <= 0x23FF) return 3;
+    if (cp >= 0x2600 && cp <= 0x27BF) return 3;
+    if (cp >= 0x2B50 && cp <= 0x2B55) return 3;
     // CJK Unified Ideographs
     if (cp >= 0x3400 && cp <= 0x4DBF) return 2;
     if (cp >= 0x4E00 && cp <= 0x9FFF) return 2;
@@ -155,7 +155,7 @@ function formatTable(tableMd: string): string {
   const segmenter = new Intl.Segmenter();
   const graphemeDisplayWidth = (grapheme: string): number => {
     // ZWJ emoji sequences: multiple code points but render as a single wide emoji
-    if (grapheme.includes('\u200D')) return 2;
+    if (grapheme.includes('\u200D')) return 3;
     // Single code point: use lookup
     const cps = Array.from(grapheme);
     if (cps.length === 1) return codePointWidth(cps[0].codePointAt(0)!);
