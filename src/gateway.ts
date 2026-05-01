@@ -450,7 +450,7 @@ export class Gateway {
         const agent = this.router.resolve(agentThreadId);
         if (agent.restart) {
           await agent.restart(agentThreadId);
-          await thread.post("🔄 Session restarted. Send a message to begin a new conversation.");
+          await thread.post(`🔄 Session restarted (\`${agentThreadId}\`). Send a message to begin a new conversation.`);
         } else {
           await thread.post("⚠️ New session not supported for this agent.");
         }
@@ -548,6 +548,7 @@ export class Gateway {
         const lines = [
           `📊 *Roundhouse Status*`,
           ``,
+          `🎫 Session: \`${agentThreadId}\``,
           `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`,
           `🤖 Agent: ${agentLabel}`,
         ];
@@ -1187,25 +1188,29 @@ export class Gateway {
       cronInfo = `Cron jobs: ${cs.enabledCount}/${cs.jobCount} enabled`;
     }
 
-    const text = [
-      `\u2705 Roundhouse is online`,
-      ``,
-      `Host: ${host}`,
-      `Platforms: ${platforms}`,
-      `Agent: ${agentName}${agentInfo}`,
-      `Roundhouse: v${ROUNDHOUSE_VERSION}`,
-      `Node: ${nodeVer}`,
-      `Started: ${now}`,
-      `Boot time: ${bootTime.toFixed(1)}s`,
-      cronInfo,
-      ``,
-      `System:`,
-      `  CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`,
-      `  RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`,
-      `  Process: ${memMB} MB RSS`,
-    ].filter(line => line != null).join("\n");
+    for (const chatId of chatIds) {
+      const sessionId = Number(chatId) < 0 ? `group:${chatId}` : "main";
+      const perChatText = [
+        `\u2705 Roundhouse is online`,
+        ``,
+        `Session: ${sessionId}`,
+        `Host: ${host}`,
+        `Platforms: ${platforms}`,
+        `Agent: ${agentName}${agentInfo}`,
+        `Roundhouse: v${ROUNDHOUSE_VERSION}`,
+        `Node: ${nodeVer}`,
+        `Started: ${now}`,
+        `Boot time: ${bootTime.toFixed(1)}s`,
+        cronInfo,
+        ``,
+        `System:`,
+        `  CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`,
+        `  RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`,
+        `  Process: ${memMB} MB RSS`,
+      ].filter(line => line != null).join("\n");
 
-    await sendTelegramToMany(chatIds, text);
+      await sendTelegramToMany([chatId], perChatText);
+    }
   }
 
   async stop() {
