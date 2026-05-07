@@ -69,6 +69,8 @@ export interface AgentAdapter {
 
   /** Compact the session context for a thread */
   compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
+  /** Compact with a specific model (avoids restoring to default between flush and compact) */
+  compactWithModel?(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
 
   /** Abort the current agent run for a thread */
   abort?(threadId: string): Promise<void>;

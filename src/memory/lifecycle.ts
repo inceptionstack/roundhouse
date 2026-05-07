@@ -233,10 +233,12 @@ export async function flushMemoryThenCompact(
     await sendFlush(flushText);
     const flushMs = Date.now() - t0;
 
-    // Step 2: compact
+    // Step 2: compact (use flush model if compactWithModel is available)
     console.log(`[memory] compacting ${threadId} (flush took ${flushMs}ms)`);
     const t1 = Date.now();
-    const result = await agent.compact(threadId);
+    const result = flushModel && agent.compactWithModel
+      ? await agent.compactWithModel(threadId, flushModel)
+      : await agent.compact!(threadId);
     const compactMs = Date.now() - t1;
     if (!result) return null;
 

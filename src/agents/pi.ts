@@ -509,6 +509,49 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
+    async compactWithModel(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+      return enqueue(threadId, async () => {
+        const entry = sessions.get(threadId);
+        if (!entry) return null;
+
+        const agentState = (entry.session as any).agent?.state;
+        let currentModel: any;
+        let modelSwapped = false;
+
+        // Resolve and swap model for compact
+        if (!agentState) {
+          console.warn(`[pi-agent] cannot access agent state for compact model swap, using default`);
+        } else {
+          const [provider, ...rest] = modelId.split("/");
+          const id = rest.join("/");
+          const targetModel = (provider && id) ? modelRegistry.find(provider, id) : null;
+          if (!targetModel) {
+            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
+          } else if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
+          } else {
+            currentModel = agentState.model;
+            agentState.model = targetModel;
+            modelSwapped = true;
+            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
+          }
+        }
+
+        try {
+          const result = await entry.session.compact();
+          const usage = entry.session.getContextUsage();
+          return {
+            tokensBefore: result.tokensBefore,
+            tokensAfter: usage?.tokens ?? null,
+          };
+        } finally {
+          if (modelSwapped) {
+            agentState.model = currentModel;
+          }
+        }
+      });
+    },
+
     async abort(threadId: string): Promise<void> {
       const entry = sessions.get(threadId);
       if (entry) {
