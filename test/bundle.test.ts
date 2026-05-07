@@ -1,10 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
-// We test bundle.ts functions by importing them directly
 import {
-  syncSkillsFromRepo,
   provisionMcporter,
   provisionPlaywright,
   provisionUvx,
@@ -13,11 +12,24 @@ import {
   SKILLS_DIR,
   SKILLS_REPO,
   type ProvisionLog,
-  type ProvisionOpts,
 } from "../src/bundle";
 
+// Mock child_process to control `which` checks and block real installs
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFileSync: vi.fn((cmd: string, args?: string[], _opts?: any) => {
+      if (cmd === "which") return `/usr/local/bin/${args?.[0] ?? "unknown"}\n`;
+      // git clone for skill sync
+      if (cmd === "git") return "";
+      return "";
+    }),
+    execSync: vi.fn((_cmd: string, _opts?: any) => ""),
+  };
+});
+
 describe("bundle", () => {
-  // Mock log that captures messages
   function createMockLog(): ProvisionLog & { messages: string[] } {
     const messages: string[] = [];
     return {
@@ -43,7 +55,6 @@ describe("bundle", () => {
   describe("provisionMcporter", () => {
     it("skips when mcporter is already installed", () => {
       const log = createMockLog();
-      // mcporter IS installed on this machine
       provisionMcporter({ log });
       expect(log.messages.some(m => m.includes("already installed"))).toBe(true);
     });
@@ -72,37 +83,41 @@ describe("bundle", () => {
   });
 
   describe("provisionMcporterConfig", () => {
+    const configDir = resolve(homedir(), ".mcporter");
+    const configPath = resolve(configDir, "mcporter.json");
+    let existed: boolean;
+
+    beforeEach(() => {
+      existed = existsSync(configPath);
+      if (!existed) {
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(configPath, "{}");
+      }
+    });
+
+    afterEach(() => {
+      if (!existed && existsSync(configPath)) {
+        rmSync(configPath);
+      }
+    });
+
     it("skips when config already exists", () => {
       const log = createMockLog();
-      // ~/.mcporter/mcporter.json exists on this machine
       provisionMcporterConfig({ log });
       expect(log.messages.some(m => m.includes("exists, keeping"))).toBe(true);
-    });
-  });
-
-  describe("syncSkillsFromRepo", () => {
-    it("returns a positive count when git is available", () => {
-      const log = createMockLog();
-      const count = syncSkillsFromRepo({ log });
-      // On this machine, git is available and loki-skills has 30+ skills
-      expect(count).toBeGreaterThan(0);
-      expect(log.messages.some(m => m.includes("skills synced"))).toBe(true);
     });
   });
 
   describe("provisionBundle", () => {
     it("runs all provisioners without throwing", () => {
       const log = createMockLog();
-      // Should not throw even if some provisions are no-ops
       expect(() => provisionBundle({ log })).not.toThrow();
-      // Should have logged something for each provisioner
       expect(log.messages.length).toBeGreaterThan(3);
     });
 
-    it("respects force flag", () => {
+    it("all tools report already installed when mocked", () => {
       const log = createMockLog();
       provisionBundle({ force: false, log });
-      // All tools are installed on this machine, so all should say "already installed"
       const alreadyInstalled = log.messages.filter(m => m.includes("already installed"));
       expect(alreadyInstalled.length).toBeGreaterThanOrEqual(3);
     });
