@@ -255,13 +255,13 @@ Located at `~/.pi/agent/skills/mcporter/SKILL.md`.
 5. ✅ mcporter skill included in loki-skills (syncs with all other skills)
 6. ✅ playwright-cli tested and validated (direct CLI, no MCP needed)
 7. ✅ Create `playwright-cli` skill in loki-skills (SKILL.md with command reference)
-8. [ ] Add `syncSkills()` function to `setup.ts` (git clone + copy)
-9. [ ] Call `syncSkills()` in setup flow (after package install, before pi install)
-10. [ ] Add skill sync to `roundhouse update` flow
-11. [ ] Install CLI tools during setup (`npm install -g mcporter @playwright/cli`)
-12. [ ] Run `playwright-cli install` during setup (downloads Chromium)
-13. [ ] Copy static `mcporter.json` to `~/.mcporter/mcporter.json`
-14. [ ] Install uv/uvx during setup (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+8. ✅ Add `syncSkills()` function to `setup.ts` (git clone + copy)
+9. ✅ Call `syncSkills()` in setup flow (after package install, before pi install)
+10. ✅ Add skill sync to `roundhouse update` flow
+11. ✅ Install CLI tools during setup (`npm install -g mcporter @playwright/cli`)
+12. ✅ Run `playwright-cli install` during setup (downloads Chromium)
+13. ✅ Copy static `mcporter.json` to `~/.mcporter/mcporter.json`
+14. ✅ Install uv/uvx during setup (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 15. [ ] Handle pi-hard-no chat conflict (disable push-guard in chat mode)
 16. [ ] Publish as next minor version
 

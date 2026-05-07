@@ -48,7 +48,6 @@ function isCommandWithArgs(text: string, cmd: string): boolean {
   return suffix.toLowerCase() === _botUsername.toLowerCase();
 }
 import { hostname, loadavg, totalmem, freemem, cpus } from "node:os";
-import { homedir } from "node:os";
 
 /** Get system resource info */
 function getSystemResources() {
@@ -487,31 +486,18 @@ export class Gateway {
         console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
         const progress = await createProgressMessage(thread, "📦 Checking for updates...");
         try {
-          const { execSync } = await import("child_process");
-          // Get current version
-          const pkg = await import("../package.json", { with: { type: "json" } });
-          const currentVersion = pkg.default?.version ?? "unknown";
-          // Check latest version on npm
-          const latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
-            timeout: 30_000,
-            encoding: "utf8",
-          }).trim();
-          if (latestVersion === currentVersion) {
-            await progress.update(`✅ Already on latest (v${currentVersion})`);
-            return;
+          const { performUpdate } = await import("./commands/update");
+          const result = await performUpdate(progress);
+          if (result.action === "already-latest") {
+            await progress.update(`✅ Already on latest (v${result.currentVersion})`);
+          } else if (result.action === "updated") {
+            await progress.update(`✅ Updated v${result.currentVersion} → v${result.latestVersion}. Restarting...`);
+            console.log(`[roundhouse] updated ${result.currentVersion} -> ${result.latestVersion}, restarting`);
+            setTimeout(async () => {
+              try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
+              process.exit(75);
+            }, 1500);
           }
-          await progress.update(`📦 Updating v${currentVersion} → v${latestVersion}...`);
-          execSync("npm install -g @inceptionstack/roundhouse@latest 2>&1", {
-            timeout: 120_000,
-            encoding: "utf8",
-          });
-          await progress.update(`✅ Updated v${currentVersion} → v${latestVersion}. Restarting...`);
-          console.log(`[roundhouse] updated ${currentVersion} -> ${latestVersion}, restarting`);
-          // Exit so systemd restarts with new code
-          setTimeout(async () => {
-            try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
-            process.exit(75);
-          }, 1500);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           await progress.update(`⚠️ Update failed: ${msg.slice(0, 200)}`);

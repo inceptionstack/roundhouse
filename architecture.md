@@ -272,9 +272,10 @@ cli/cli.ts
   ├── cli/systemd.ts (resolveExecStart, generateUnit, writeServiceUnit, systemctl, etc.)
   ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
   ├── cli/cron.ts → cron/store.ts, cron/runner.ts, cron/helpers.ts
-  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/setup-telegram.ts
+  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/setup-telegram.ts, bundle.ts
 
 gateway.ts also imports:
+  → commands/update.ts → bundle.ts (bundle provisioning)
   → cli/doctor/runner.ts for /doctor command
   → cron/scheduler.ts → cron/runner.ts → cron/store.ts
   → cron/helpers.ts, cron/format.ts
@@ -283,3 +284,4 @@ gateway.ts also imports:
 
 No circular dependencies. `types.ts` and `config.ts` are pure leaf modules.
 `util.ts` is a leaf module with runtime helpers (`node:crypto` for attachment IDs).
+`bundle.ts` is a pure leaf module (only `node:*` imports) consumed by `cli/setup.ts` and `commands/update.ts`.
