@@ -478,6 +478,48 @@ export class Gateway {
         return;
       }
 
+      // Handle /update command — update roundhouse then restart
+      if (isCommand(userText.trim(), "/update")) {
+        if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
+          await thread.post("⚠️ /update requires an allowlist to be configured.");
+          return;
+        }
+        console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
+        const progress = await createProgressMessage(thread, "📦 Checking for updates...");
+        try {
+          const { execSync } = await import("child_process");
+          // Get current version
+          const pkg = await import("../package.json", { with: { type: "json" } });
+          const currentVersion = pkg.default?.version ?? "unknown";
+          // Check latest version on npm
+          const latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
+            timeout: 30_000,
+            encoding: "utf8",
+          }).trim();
+          if (latestVersion === currentVersion) {
+            await progress.update(`✅ Already on latest (v${currentVersion})`);
+            return;
+          }
+          await progress.update(`📦 Updating v${currentVersion} → v${latestVersion}...`);
+          execSync("npm install -g @inceptionstack/roundhouse@latest 2>&1", {
+            timeout: 120_000,
+            encoding: "utf8",
+          });
+          await progress.update(`✅ Updated v${currentVersion} → v${latestVersion}. Restarting...`);
+          console.log(`[roundhouse] updated ${currentVersion} -> ${latestVersion}, restarting`);
+          // Exit so systemd restarts with new code
+          setTimeout(async () => {
+            try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
+            process.exit(75);
+          }, 1500);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await progress.update(`⚠️ Update failed: ${msg.slice(0, 200)}`);
+          console.error(`[roundhouse] /update failed:`, msg);
+        }
+        return;
+      }
+
       // Handle /compact command — flush memory then compact session context
       // Routed through the per-thread lock to prevent concurrent agent access
       if (isCommand(userText.trim(), "/compact")) {
