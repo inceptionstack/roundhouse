@@ -191,7 +191,9 @@ export async function flushMemoryThenCompact(
   config?: MemoryConfig,
 ): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
   const mode = getMode(agent);
-  const flushModel = config?.compact?.flushModel;
+  // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
+  const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+  const flushModel = config?.compact?.flushModel === null ? undefined : (config?.compact?.flushModel ?? DEFAULT_FLUSH_MODEL);
 
   /** Send flush prompt, preferring flushModel if available */
   async function sendFlush(text: string): Promise<void> {

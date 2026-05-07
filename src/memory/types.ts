@@ -40,8 +40,8 @@ export interface MemoryConfig {
     emergencyThresholdTokens?: number;
     /** Min time between soft flushes in ms (default: 600000 = 10min) */
     cooldownMs?: number;
-    /** Model ID for flush turns (default: uses conversation model) */
-    flushModel?: string;
+    /** Model ID for flush turns (default: "amazon-bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0" — faster than conversation model) */
+    flushModel?: string | null;
   };
 }
 
