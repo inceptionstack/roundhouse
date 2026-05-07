@@ -933,7 +933,8 @@ export class Gateway {
    */
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
-    let usedTools = false;
+    let usedFileModifyingTools = false;
+    const FILE_MODIFYING_TOOLS = new Set(["write", "edit", "bash", "multi_edit"]);
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
     let currentPush: ((text: string) => void) | null = null;
@@ -1037,7 +1038,7 @@ export class Gateway {
 
         case "tool_start": {
           activeTools.set(event.toolCallId, event.toolName);
-          usedTools = true;
+          if (FILE_MODIFYING_TOOLS.has(event.toolName)) usedFileModifyingTools = true;
           if (verbose) {
             try {
               await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
@@ -1109,7 +1110,7 @@ export class Gateway {
       await flushCurrentStream();
     }
 
-    return { usedTools };
+    return { usedTools: usedFileModifyingTools };
   }
 
   /** Post text with markdown, falling back to plain text */

@@ -369,10 +369,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         try {
           return await doPrompt(threadId, formatMessage(message));
         } finally {
-          // Restore original model (in-memory only)
-          if (currentModel) {
-            agentState.model = currentModel;
-          }
+          // Restore original model (in-memory only) — even if undefined
+          agentState.model = currentModel;
         }
       });
     },
