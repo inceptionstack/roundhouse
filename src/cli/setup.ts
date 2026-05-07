@@ -137,6 +137,15 @@ function resolveAgentForSetup(opts: SetupOptions): AgentDefinition {
       const pkgs = settings.packages as string[];
       if (!pkgs.includes(selfPkg)) pkgs.push(selfPkg);
 
+      // Add code review + branch protection extensions
+      const coreExtensions = [
+        "npm:@inceptionstack/pi-hard-no",
+        "npm:@inceptionstack/pi-branch-enforcer",
+      ];
+      for (const ext of coreExtensions) {
+        if (!pkgs.includes(ext)) pkgs.push(ext);
+      }
+
       // Add pi-psst if using psst
       if (ctx.psst) {
         const psstPkg = "npm:@miclivs/pi-psst";
