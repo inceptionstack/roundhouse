@@ -513,7 +513,9 @@ export class Gateway {
               await thread.post("⚠️ No active session to compact. Send a message first.");
             } else {
               const beforeK = (result.tokensBefore / 1000).toFixed(1);
-              await thread.post(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
+              const timing = result.timing;
+              const timingLine = timing ? `\nTiming: flush ${(timing.flushMs / 1000).toFixed(1)}s, compact ${(timing.compactMs / 1000).toFixed(1)}s, total ${(timing.totalMs / 1000).toFixed(1)}s\nModel: ${timing.model}` : "";
+              await thread.post(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.${timingLine}`);
             }
           }
         } catch (err) {
@@ -915,7 +917,9 @@ export class Gateway {
       const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, pressure, this.config.memory);
       if (result) {
         const beforeK = (result.tokensBefore / 1000).toFixed(1);
-        await thread.post(`✅ Auto-compacted: ${beforeK}K tokens → summary.`);
+        const timing = result.timing;
+        const timingLine = timing ? ` (${(timing.totalMs / 1000).toFixed(1)}s: flush ${(timing.flushMs / 1000).toFixed(1)}s + compact ${(timing.compactMs / 1000).toFixed(1)}s)` : "";
+        await thread.post(`✅ Auto-compacted: ${beforeK}K tokens → summary.${timingLine}`);
       }
     } catch (err) {
       console.error(`[roundhouse] ${pressure} compact error:`, (err as Error).message);

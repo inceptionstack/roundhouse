@@ -16,6 +16,9 @@ import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } fr
 import { buildMemoryInjection, injectMemoryIntoMessage } from "./inject";
 import { buildFlushPrompt } from "./prompts";
 import { bootstrapMemoryFiles } from "./bootstrap";
+import { appendFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 // ── Memory mode detection ────────────────────────────
 
@@ -176,16 +179,23 @@ export async function finalizeMemoryForTurn(
  *
  * Returns compaction result or null if nothing to compact.
  */
+export interface CompactTiming {
+  flushMs: number;
+  compactMs: number;
+  totalMs: number;
+  model: string;
+}
+
 export async function flushMemoryThenCompact(
   threadId: string,
   agent: AgentAdapter,
   rootDir: string,
   level: "soft" | "hard" | "emergency" | "manual",
   config?: MemoryConfig,
-): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+): Promise<{ tokensBefore: number; tokensAfter: number | null; timing?: CompactTiming } | null> {
   const mode = getMode(agent);
   // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
-  const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+  const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";
   const flushModel = config?.compact?.flushModel === null ? undefined : (config?.compact?.flushModel ?? DEFAULT_FLUSH_MODEL);
 
   /** Send flush prompt, preferring flushModel if available */
@@ -221,16 +231,20 @@ export async function flushMemoryThenCompact(
   if (!agent.compact) return null;
 
   const effectiveLevel = level === "manual" ? "hard" : level;
+  const t0 = Date.now();
 
   try {
     // Step 1: flush
     const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
     console.log(`[memory] flushing memory for ${threadId} (level: ${level}${flushModel ? `, model: ${flushModel}` : ""})`);
     await sendFlush(flushText);
+    const flushMs = Date.now() - t0;
 
     // Step 2: compact
-    console.log(`[memory] compacting ${threadId}`);
+    console.log(`[memory] compacting ${threadId} (flush took ${flushMs}ms)`);
+    const t1 = Date.now();
     const result = await agent.compact(threadId);
+    const compactMs = Date.now() - t1;
     if (!result) return null;
 
     // Step 3: mark force re-inject (Full mode only)
@@ -242,8 +256,27 @@ export async function flushMemoryThenCompact(
       await saveThreadMemoryState(threadId, state);
     }
 
-    console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens`);
-    return result;
+    const totalMs = Date.now() - t0;
+    const timing = { flushMs, compactMs, totalMs, model: flushModel ?? "default" };
+    console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens | flush=${flushMs}ms compact=${compactMs}ms total=${totalMs}ms model=${timing.model}`);
+
+    // Persist timing log for debugging (async, fire-and-forget)
+    const logDir = join(homedir(), ".roundhouse", "logs");
+    mkdir(logDir, { recursive: true })
+      .then(() => {
+        const entry = JSON.stringify({
+          ts: new Date().toISOString(),
+          threadId,
+          level,
+          tokensBefore: result.tokensBefore,
+          tokensAfter: result.tokensAfter,
+          ...timing,
+        });
+        return appendFile(join(logDir, "compact-timing.jsonl"), entry + "\n");
+      })
+      .catch((err) => console.warn(`[memory] timing log write failed:`, (err as Error).message));
+
+    return { ...result, timing };
   } catch (err) {
     console.error(`[memory] flush+compact failed for ${threadId}:`, (err as Error).message);
     // Mark pending so we retry on next turn
