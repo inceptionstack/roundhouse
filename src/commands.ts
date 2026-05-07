@@ -16,6 +16,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "verbose", description: "Toggle verbose tool output" },
   { command: "stop", description: "Stop the current agent run" },
   { command: "restart", description: "Restart agent process" },
+  { command: "update", description: "Update roundhouse and restart" },
   { command: "status", description: "Show system status" },
   { command: "doctor", description: "Run diagnostics" },
   { command: "crons", description: "List scheduled cron jobs" },
