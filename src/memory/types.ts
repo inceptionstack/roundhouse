@@ -40,6 +40,8 @@ export interface MemoryConfig {
     emergencyThresholdTokens?: number;
     /** Min time between soft flushes in ms (default: 600000 = 10min) */
     cooldownMs?: number;
+    /** Model ID for flush turns (default: uses conversation model) */
+    flushModel?: string;
   };
 }
 
@@ -87,4 +89,10 @@ export interface PreparedTurn {
   injected: boolean;
   /** Pending compact level from a previously interrupted flush */
   pendingCompact?: "soft" | "hard" | "emergency";
+  /** Cached snapshot from pre-turn read (avoids re-reading in finalize) */
+  snapshot?: MemorySnapshot;
+  /** Resolved file set (avoids re-resolving in finalize) */
+  fileSet?: MemoryFileSet;
+  /** Set by caller after turn: whether agent used file-modifying tools (write/edit/bash) */
+  turnUsedTools?: boolean;
 }

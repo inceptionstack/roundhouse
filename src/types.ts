@@ -53,6 +53,12 @@ export interface AgentAdapter {
   prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
 
   /**
+   * Send a prompt using a specific model (for maintenance turns like memory flush).
+   * Falls back to prompt() if not implemented or model unavailable.
+   */
+  promptWithModel?(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse>;
+
+  /**
    * Send a user message and stream back events in real time.
    * Falls back to prompt() if not implemented.
    */

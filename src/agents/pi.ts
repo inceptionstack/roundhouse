@@ -331,6 +331,48 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       return enqueue(threadId, () => doPrompt(threadId, formatMessage(message)));
     },
 
+    async promptWithModel(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse> {
+      return enqueue(threadId, async () => {
+        const entry = await getOrCreate(threadId);
+        const currentModel = entry.session.model;
+
+        // Resolve the target model (format: "provider/model-id")
+        let targetModel;
+        const [provider, ...rest] = modelId.split("/");
+        const id = rest.join("/");
+        if (provider && id) {
+          targetModel = modelRegistry.find(provider, id);
+        }
+
+        if (!targetModel) {
+          console.warn(`[pi-agent] flush model "${modelId}" not found, using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        // Switch to flush model
+        try {
+          await entry.session.setModel(targetModel);
+          console.log(`[pi-agent] switched to flush model: ${modelId}`);
+        } catch (err) {
+          console.warn(`[pi-agent] failed to set flush model "${modelId}":`, (err as Error).message);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        try {
+          return await doPrompt(threadId, formatMessage(message));
+        } finally {
+          // Restore original model
+          if (currentModel) {
+            try {
+              await entry.session.setModel(currentModel);
+            } catch (err) {
+              console.error(`[pi-agent] failed to restore model:`, (err as Error).message);
+            }
+          }
+        }
+      });
+    },
+
     promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
       const text = formatMessage(message);
       // Return an async iterable that is single-use by design.

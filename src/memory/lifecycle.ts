@@ -9,7 +9,7 @@
  */
 
 import type { AgentAdapter, AgentMessage } from "../types";
-import type { MemoryConfig, MemoryMode, PreparedTurn, PressureLevel, ThreadMemoryState } from "./types";
+import type { MemoryConfig, MemoryFileSet, MemoryMode, MemorySnapshot, PreparedTurn, PressureLevel, ThreadMemoryState } from "./types";
 import { resolveMemoryFiles, readMemorySnapshot, formatDate } from "./files";
 import { loadThreadMemoryState, saveThreadMemoryState } from "./state";
 import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } from "./policy";
@@ -52,11 +52,16 @@ export async function prepareMemoryForTurn(
 
   const mode = getMode(agent);
 
-  // Complement mode: no injection, just track digest for finalize
-  // Unknown mode: also skip — we can't inject correctly before knowing if agent has memory extension
-  // (mode is detected during session creation, which happens inside promptStream)
+  // Complement mode: no injection, but still read snapshot for finalize comparison
   if (mode === "complement" || mode === "unknown") {
-    return { message, beforeDigest: null, injected: false };
+    // Read snapshot so finalize can detect agent-written changes without re-reading
+    try {
+      const fileSet = resolveMemoryFiles(rootDir, config);
+      const snapshot = await readMemorySnapshot(fileSet, config?.inject?.maxBytes);
+      return { message, beforeDigest: snapshot.digest, injected: false, fileSet, snapshot };
+    } catch {
+      return { message, beforeDigest: null, injected: false };
+    }
   }
 
   // Full mode: inject if needed
@@ -91,10 +96,10 @@ export async function prepareMemoryForTurn(
       await saveThreadMemoryState(threadId, state);
 
       console.log(`[memory] injected into ${threadId} (reason: ${decision.reason}, ${snapshot.entries.length} files, digest: ${snapshot.digest})`);
-      return { message: injectedMessage, beforeDigest: snapshot.digest, injected: true, pendingCompact: pendingCompactLevel };
+      return { message: injectedMessage, beforeDigest: snapshot.digest, injected: true, pendingCompact: pendingCompactLevel, fileSet, snapshot };
     }
 
-    return { message, beforeDigest: snapshot.digest, injected: false, pendingCompact: pendingCompactLevel };
+    return { message, beforeDigest: snapshot.digest, injected: false, pendingCompact: pendingCompactLevel, fileSet, snapshot };
   } catch (err) {
     console.error(`[memory] prepareMemoryForTurn error:`, (err as Error).message);
     return { message, beforeDigest: null, injected: false };
@@ -109,11 +114,14 @@ export async function prepareMemoryForTurn(
  * In Full mode: check if agent wrote memory files (update digest).
  * Both modes: check context pressure for proactive compaction.
  *
+ * Uses cached fileSet from PreparedTurn to avoid re-resolving files.
+ * Only re-reads files if the turn included tool calls that could have modified them.
+ *
  * Returns the pressure level for the gateway to act on.
  */
 export async function finalizeMemoryForTurn(
   threadId: string,
-  beforeDigest: string | null,
+  prepared: PreparedTurn,
   agent: AgentAdapter,
   rootDir: string,
   config?: MemoryConfig,
@@ -121,21 +129,25 @@ export async function finalizeMemoryForTurn(
   if (config?.enabled === false) return "none";
 
   const mode = getMode(agent);
+  const beforeDigest = prepared.beforeDigest;
 
   // In Full mode: check if agent modified memory files
   if (mode !== "complement" && beforeDigest) {
-    try {
-      const fileSet = resolveMemoryFiles(rootDir, config);
-      const snapshot = await readMemorySnapshot(fileSet, config?.inject?.maxBytes);
-      if (snapshot.digest !== beforeDigest) {
-        const state = await loadThreadMemoryState(threadId);
-        state.lastInjectedDigest = snapshot.digest;
-        state.lastKnownDigest = snapshot.digest;
-        await saveThreadMemoryState(threadId, state);
-        console.log(`[memory] agent updated memory files (new digest: ${snapshot.digest})`);
+    // Skip expensive re-read if no file-modifying tools ran during this turn
+    if (prepared.turnUsedTools !== false) {
+      try {
+        const fileSet = prepared.fileSet ?? resolveMemoryFiles(rootDir, config);
+        const snapshot = await readMemorySnapshot(fileSet, config?.inject?.maxBytes);
+        if (snapshot.digest !== beforeDigest) {
+          const state = await loadThreadMemoryState(threadId);
+          state.lastInjectedDigest = snapshot.digest;
+          state.lastKnownDigest = snapshot.digest;
+          await saveThreadMemoryState(threadId, state);
+          console.log(`[memory] agent updated memory files (new digest: ${snapshot.digest})`);
+        }
+      } catch (err) {
+        console.error(`[memory] finalizeMemoryForTurn digest check error:`, (err as Error).message);
       }
-    } catch (err) {
-      console.error(`[memory] finalizeMemoryForTurn digest check error:`, (err as Error).message);
     }
   }
 
@@ -167,6 +179,8 @@ export async function finalizeMemoryForTurn(
  * 2. Compact the session
  * 3. Mark force re-inject for Full mode
  *
+ * Uses a cheaper model for flush turns if config.compact.flushModel is set.
+ *
  * Returns compaction result or null if nothing to compact.
  */
 export async function flushMemoryThenCompact(
@@ -177,6 +191,16 @@ export async function flushMemoryThenCompact(
   config?: MemoryConfig,
 ): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
   const mode = getMode(agent);
+  const flushModel = config?.compact?.flushModel;
+
+  /** Send flush prompt, preferring flushModel if available */
+  async function sendFlush(text: string): Promise<void> {
+    if (flushModel && agent.promptWithModel) {
+      await agent.promptWithModel(threadId, { text }, flushModel);
+    } else {
+      await agent.prompt(threadId, { text });
+    }
+  }
 
   // Soft flush: just prompt to save, don't compact
   if (level === "soft") {
@@ -188,10 +212,10 @@ export async function flushMemoryThenCompact(
 
     try {
       const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, "soft");
-      await agent.prompt(threadId, { text: flushText });
+      await sendFlush(flushText);
       state.lastSoftFlushAt = new Date().toISOString();
       await saveThreadMemoryState(threadId, state);
-      console.log(`[memory] soft flush completed for ${threadId}`);
+      console.log(`[memory] soft flush completed for ${threadId}${flushModel ? ` (model: ${flushModel})` : ""}`);
     } catch (err) {
       console.error(`[memory] soft flush failed for ${threadId}:`, (err as Error).message);
     }
@@ -206,8 +230,8 @@ export async function flushMemoryThenCompact(
   try {
     // Step 1: flush
     const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
-    console.log(`[memory] flushing memory for ${threadId} (level: ${level})`);
-    await agent.prompt(threadId, { text: flushText });
+    console.log(`[memory] flushing memory for ${threadId} (level: ${level}${flushModel ? `, model: ${flushModel}` : ""})`);
+    await sendFlush(flushText);
 
     // Step 2: compact
     console.log(`[memory] compacting ${threadId}`);

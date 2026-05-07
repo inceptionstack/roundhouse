@@ -687,17 +687,20 @@ export class Gateway {
       const stopTyping = startTypingLoop(thread);
 
       try {
+        let turnUsedTools = false;
         if (agent.promptStream) {
           const ac = new AbortController();
           abortControllers.set(agentThreadId, ac);
           try {
-            await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+            const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+            turnUsedTools = streamResult.usedTools;
           } finally {
             abortControllers.delete(agentThreadId);
           }
         } else {
-          // Fallback: non-streaming prompt
+          // Fallback: non-streaming prompt (assume tools may have been used)
           const reply = await agent.prompt(agentThreadId, agentMessage);
+          turnUsedTools = true;
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }
@@ -705,9 +708,10 @@ export class Gateway {
 
         // ── Memory: post-turn finalize + pressure check ───
         try {
+          if (memoryPrepared) memoryPrepared.turnUsedTools = turnUsedTools;
           const pressure = await finalizeMemoryForTurn(
             agentThreadId,
-            memoryPrepared?.beforeDigest ?? null,
+            memoryPrepared ?? { message: agentMessage, beforeDigest: null, injected: false },
             agent, memoryRoot, this.config.memory,
           );
           // Use higher severity between pending compact and current pressure
@@ -927,8 +931,9 @@ export class Gateway {
    * - Tool starts/ends are sent as compact status messages.
    * - Turn boundaries trigger a new message for the next turn's text.
    */
-  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal) {
+  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
+    let usedTools = false;
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
     let currentPush: ((text: string) => void) | null = null;
@@ -1032,6 +1037,7 @@ export class Gateway {
 
         case "tool_start": {
           activeTools.set(event.toolCallId, event.toolName);
+          usedTools = true;
           if (verbose) {
             try {
               await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
@@ -1102,6 +1108,8 @@ export class Gateway {
     if (currentPromise) {
       await flushCurrentStream();
     }
+
+    return { usedTools };
   }
 
   /** Post text with markdown, falling back to plain text */
