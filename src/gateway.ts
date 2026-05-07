@@ -639,6 +639,18 @@ export class Gateway {
           lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
         }
 
+        // Extensions
+        const extensions = Array.isArray(info.extensions) ? info.extensions as string[] : [];
+        if (extensions.length > 0) {
+          lines.push(``);
+          lines.push(`🧩 Extensions (${extensions.length}):`);
+          for (const ext of extensions) {
+            // Show short name: strip npm: prefix and path noise
+            const short = ext.replace(/^.*node_modules\//, "").replace(/\/index\.[tj]s$/, "");
+            lines.push(`   • ${short}`);
+          }
+        }
+
         await this.postWithFallback(thread, lines.join("\n"));
         console.log(`[roundhouse] /status for thread=${thread.id} agentThread=${agentThreadId}`);
         return;

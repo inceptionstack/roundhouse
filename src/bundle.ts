@@ -183,7 +183,7 @@ export function provisionMcporterConfig(opts: ProvisionOpts = {}): void {
 }
 
 /**
- * Provision all bundle dependencies (skills + CLI tools + config).
+ * Provision all bundle dependencies (skills + CLI tools + config + extensions).
  * Non-fatal — logs warnings on failure but never throws.
  */
 export function provisionBundle(opts: ProvisionOpts = {}): void {
@@ -192,4 +192,45 @@ export function provisionBundle(opts: ProvisionOpts = {}): void {
   provisionPlaywright(opts);
   provisionUvx(opts);
   provisionMcporterConfig(opts);
+  provisionExtensions(opts);
+}
+
+/**
+ * Ensure core extensions are listed in ~/.pi/agent/settings.json packages array.
+ */
+export function provisionExtensions(opts: ProvisionOpts = {}): void {
+  const { log = defaultLog } = opts;
+  const settingsPath = resolve(homedir(), ".pi", "agent", "settings.json");
+
+  const coreExtensions = [
+    "npm:@inceptionstack/pi-hard-no",
+    "npm:@inceptionstack/pi-branch-enforcer",
+  ];
+
+  try {
+    let settings: Record<string, unknown> = {};
+    if (existsSync(settingsPath)) {
+      settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    }
+    if (!Array.isArray(settings.packages)) settings.packages = [];
+    const pkgs = settings.packages as string[];
+
+    let added = 0;
+    for (const ext of coreExtensions) {
+      if (!pkgs.includes(ext)) {
+        pkgs.push(ext);
+        added++;
+      }
+    }
+
+    if (added > 0) {
+      mkdirSync(dirname(settingsPath), { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+      log.ok(`${added} extension(s) added to settings.json`);
+    } else {
+      log.ok("extensions (already configured)");
+    }
+  } catch (err: any) {
+    log.warn(`extensions provisioning failed: ${err.message}`);
+  }
 }
