@@ -934,7 +934,8 @@ export class Gateway {
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
     let usedFileModifyingTools = false;
-    const FILE_MODIFYING_TOOLS = new Set(["write", "edit", "bash", "multi_edit"]);
+    // Read-only tools that cannot modify memory files — everything else triggers re-read
+    const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "glob"]);
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
     let currentPush: ((text: string) => void) | null = null;
@@ -1038,7 +1039,7 @@ export class Gateway {
 
         case "tool_start": {
           activeTools.set(event.toolCallId, event.toolName);
-          if (FILE_MODIFYING_TOOLS.has(event.toolName)) usedFileModifyingTools = true;
+          if (!READ_ONLY_TOOLS.has(event.toolName)) usedFileModifyingTools = true;
           if (verbose) {
             try {
               await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
