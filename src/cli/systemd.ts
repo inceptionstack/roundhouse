@@ -132,7 +132,7 @@ export function generateUnit(opts: UnitOptions): string {
   const user = opts.user || process.env.USER || "root";
   const envFilePath = opts.envFilePath || ENV_FILE_PATH;
   const home = homedir();
-  const pathValue = `${opts.nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
+  const pathValue = `${opts.nodeBinDir}:${home}/.local/bin:/usr/local/bin:/usr/bin:/bin`;
 
   // Validate all interpolated values before generating the unit
   for (const [label, value] of Object.entries({

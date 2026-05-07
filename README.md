@@ -52,6 +52,30 @@ npm install -g @inceptionstack/roundhouse
 
 See [architecture.md](architecture.md) for full system diagrams, data flow, config model, and module dependency graph.
 
+## Bundle
+
+When you run `roundhouse setup`, the following are installed automatically:
+
+- **30+ Skills** (agent knowledge): Synced from [loki-skills](https://github.com/inceptionstack/loki-skills) (AWS, infrastructure, DevOps patterns)
+- **CLI Tools**: `mcporter` (MCP server bridge), `@playwright/cli` (browser automation), `uv`/`uvx` (Python package runner)
+- **Extensions** (shipped in npm, auto-discovered by pi): `web-search` (Tavily API integration)
+- **Config**: MCP server definitions copied to `~/.mcporter/mcporter.json`
+
+This gives the agent access to:
+- 15K+ AWS APIs via `mcporter call aws-mcp.*`
+- AWS documentation, CDK patterns, pricing data
+- Browser automation: navigate pages, fill forms, take screenshots
+- Real-time web search
+- All skills auto-discovered at session start
+
+### Setup time
+
+Full setup takes ~5-10 minutes on first run (includes Chromium download ~186MB). Subsequent runs are faster (skills re-sync only).
+
+### Skills location
+
+All skills are synced to `~/.pi/agent/skills/`. Your agent can reference them directly by name (e.g., "use the aws-mcp skill to...").
+
 ### Design decisions
 
 - **One gateway = one agent target.** The `agent` block in config picks the type and its settings. All chat inputs route to this single agent instance.

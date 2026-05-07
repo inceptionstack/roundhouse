@@ -15,6 +15,7 @@ import { readFile, writeFile, mkdir, rename, unlink, realpath, stat } from "node
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { BOT_COMMANDS } from "../commands";
+import { provisionBundle, type ProvisionLog } from "../bundle";
 import {
   ROUNDHOUSE_DIR,
   CONFIG_PATH,
@@ -131,10 +132,14 @@ function resolveAgentForSetup(opts: SetupOptions): AgentDefinition {
       // Ensure packages array exists
       if (!Array.isArray(settings.packages)) settings.packages = [];
 
+      // Add roundhouse itself (ships extensions via pi.extensions in package.json)
+      const selfPkg = "npm:@inceptionstack/roundhouse";
+      const pkgs = settings.packages as string[];
+      if (!pkgs.includes(selfPkg)) pkgs.push(selfPkg);
+
       // Add pi-psst if using psst
       if (ctx.psst) {
         const psstPkg = "npm:@miclivs/pi-psst";
-        const pkgs = settings.packages as string[];
         if (!pkgs.includes(psstPkg)) pkgs.push(psstPkg);
       }
 
@@ -621,6 +626,20 @@ async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<v
   }
 }
 
+// ── Bundle install ──────────────────────────────────────────────────
+
+async function stepInstallBundle(opts: SetupOptions): Promise<void> {
+  step("⑥b", "Installing bundle (skills + CLI tools)...");
+
+  const bundleLog: ProvisionLog = {
+    info: (msg) => log(`   ${msg}`),
+    warn: (msg) => warn(msg),
+    ok: (msg) => ok(msg),
+  };
+
+  provisionBundle({ force: opts.force, log: bundleLog });
+}
+
 async function stepConfigure(
   opts: SetupOptions,
   botInfo: BotInfo,
@@ -921,6 +940,9 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     // Step 5: Install packages
     await stepInstallPackages(opts, agent);
 
+    // Step 5b: Install bundle (skills + CLI tools)
+    await stepInstallBundle(opts);
+
     // Step 6: Pair via Telegram
     step("⑥", "Pairing with Telegram...");
     const nonce = createPairingNonce();
@@ -1013,6 +1035,9 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
     logger.step(4, 9, "packages.install", "Installing packages");
     await stepInstallPackages(opts, agent);
     logger.ok("Packages installed");
+
+    // Step 4b: Install bundle
+    await stepInstallBundle(opts);
 
     // Step 5: Create pending pairing
     logger.step(5, 9, "pairing.pending", "Creating pending pairing");
@@ -1152,6 +1177,9 @@ export async function cmdSetup(argv: string[]): Promise<void> {
 
     // Phase 2: Install packages
     await stepInstallPackages(opts, agent);
+
+    // Phase 2b: Install bundle (skills + CLI tools)
+    await stepInstallBundle(opts);
 
     // Phase 3: Pair (before secrets/config, so paired username is included)
     const pairResult = await stepPair(opts, botInfo);

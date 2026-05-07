@@ -9,6 +9,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { performUpdate } from "../commands/update";
 
 import {
   CONFIG_DIR,
@@ -48,7 +49,8 @@ const __dirname = dirname(__filename);
  */
 function run(cmd: string, opts?: { silent?: boolean }): string {
   try {
-    return execSync(cmd, { encoding: "utf8", stdio: opts?.silent ? "pipe" : "inherit" }).trim();
+    const out = execSync(cmd, { encoding: "utf8", stdio: opts?.silent ? "pipe" : "inherit" });
+    return (out ?? "").trim();
   } catch (e: any) {
     if (opts?.silent) return "";
     throw e;
@@ -157,8 +159,15 @@ async function cmdUninstall() {
 }
 
 async function cmdUpdate() {
-  console.log("[roundhouse] Updating to latest version...\n");
-  run("npm update -g roundhouse");
+  const progress = { update: async (msg: string) => console.log(msg) };
+  const result = await performUpdate(progress);
+
+  if (result.action === "already-latest") {
+    console.log(`[roundhouse] Already on latest (v${result.currentVersion})`);
+    return;
+  }
+
+  console.log(`[roundhouse] Updated to v${result.latestVersion}`);
   console.log("\n[roundhouse] Restarting daemon...");
   try {
     systemctl("restart", "Updated and restarted.");

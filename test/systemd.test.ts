@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { homedir } from "node:os";
 import { generateUnit } from "../src/cli/systemd";
 
 describe("generateUnit", () => {
@@ -21,7 +22,7 @@ describe("generateUnit", () => {
 
   it("includes PATH with nodeBinDir", () => {
     const unit = generateUnit(baseOpts);
-    expect(unit).toContain("Environment=PATH=/usr/bin:/usr/local/bin:/usr/bin:/bin");
+    expect(unit).toContain(`Environment=PATH=/usr/bin:${homedir()}/.local/bin:/usr/local/bin:/usr/bin:/bin`);
   });
 
   it("includes HOME", () => {
