@@ -331,6 +331,50 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       return enqueue(threadId, () => doPrompt(threadId, formatMessage(message)));
     },
 
+    async promptWithModel(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse> {
+      return enqueue(threadId, async () => {
+        const entry = await getOrCreate(threadId);
+        const currentModel = entry.session.model;
+
+        // Resolve the target model (format: "provider/model-id")
+        let targetModel;
+        const [provider, ...rest] = modelId.split("/");
+        const id = rest.join("/");
+        if (provider && id) {
+          targetModel = modelRegistry.find(provider, id);
+        }
+
+        if (!targetModel) {
+          console.warn(`[pi-agent] flush model "${modelId}" not found, using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        // Verify auth is available for the target model
+        if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+          console.warn(`[pi-agent] no auth for flush model "${modelId}", using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        // Swap model in-memory only (no persistence to settings.json or session log).
+        // This avoids a crash-window where settings could be left on the flush model.
+        const agentState = (entry.session as any).agent?.state;
+        if (!agentState) {
+          console.warn(`[pi-agent] cannot access agent state for model swap, using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        agentState.model = targetModel;
+        console.log(`[pi-agent] switched to flush model (in-memory): ${modelId}`);
+
+        try {
+          return await doPrompt(threadId, formatMessage(message));
+        } finally {
+          // Restore original model (in-memory only) — even if undefined
+          agentState.model = currentModel;
+        }
+      });
+    },
+
     promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
       const text = formatMessage(message);
       // Return an async iterable that is single-use by design.
@@ -462,6 +506,49 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           tokensBefore: result.tokensBefore,
           tokensAfter: usage?.tokens ?? null,
         };
+      });
+    },
+
+    async compactWithModel(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+      return enqueue(threadId, async () => {
+        const entry = sessions.get(threadId);
+        if (!entry) return null;
+
+        const agentState = (entry.session as any).agent?.state;
+        let currentModel: any;
+        let modelSwapped = false;
+
+        // Resolve and swap model for compact
+        if (!agentState) {
+          console.warn(`[pi-agent] cannot access agent state for compact model swap, using default`);
+        } else {
+          const [provider, ...rest] = modelId.split("/");
+          const id = rest.join("/");
+          const targetModel = (provider && id) ? modelRegistry.find(provider, id) : null;
+          if (!targetModel) {
+            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
+          } else if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
+          } else {
+            currentModel = agentState.model;
+            agentState.model = targetModel;
+            modelSwapped = true;
+            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
+          }
+        }
+
+        try {
+          const result = await entry.session.compact();
+          const usage = entry.session.getContextUsage();
+          return {
+            tokensBefore: result.tokensBefore,
+            tokensAfter: usage?.tokens ?? null,
+          };
+        } finally {
+          if (modelSwapped) {
+            agentState.model = currentModel;
+          }
+        }
       });
     },
 

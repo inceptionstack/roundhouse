@@ -53,6 +53,12 @@ export interface AgentAdapter {
   prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
 
   /**
+   * Send a prompt using a specific model (for maintenance turns like memory flush).
+   * Falls back to prompt() if not implemented or model unavailable.
+   */
+  promptWithModel?(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse>;
+
+  /**
    * Send a user message and stream back events in real time.
    * Falls back to prompt() if not implemented.
    */
@@ -63,6 +69,8 @@ export interface AgentAdapter {
 
   /** Compact the session context for a thread */
   compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
+  /** Compact with a specific model (avoids restoring to default between flush and compact) */
+  compactWithModel?(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
 
   /** Abort the current agent run for a thread */
   abort?(threadId: string): Promise<void>;

@@ -213,3 +213,46 @@ describe("buildFlushPrompt", () => {
     expect(result).not.toContain("Context is filling");
   });
 });
+
+// ── READ_ONLY_TOOLS ─────────────────────────────────
+
+import { READ_ONLY_TOOLS } from "../src/memory/types";
+import type { CompactResult, CompactTiming } from "../src/memory/types";
+
+describe("READ_ONLY_TOOLS", () => {
+  it("contains expected read-only tools", () => {
+    expect(READ_ONLY_TOOLS.has("read")).toBe(true);
+    expect(READ_ONLY_TOOLS.has("grep")).toBe(true);
+    expect(READ_ONLY_TOOLS.has("find")).toBe(true);
+    expect(READ_ONLY_TOOLS.has("ls")).toBe(true);
+    expect(READ_ONLY_TOOLS.has("glob")).toBe(true);
+  });
+
+  it("does NOT contain file-modifying tools", () => {
+    expect(READ_ONLY_TOOLS.has("write")).toBe(false);
+    expect(READ_ONLY_TOOLS.has("edit")).toBe(false);
+    expect(READ_ONLY_TOOLS.has("bash")).toBe(false);
+    expect(READ_ONLY_TOOLS.has("multi_edit")).toBe(false);
+  });
+
+  it("does NOT contain unknown/extension tools (safe default: assume writing)", () => {
+    expect(READ_ONLY_TOOLS.has("my_custom_tool")).toBe(false);
+    expect(READ_ONLY_TOOLS.has("")).toBe(false);
+  });
+});
+
+// ── CompactResult type ───────────────────────────────
+
+describe("CompactResult", () => {
+  it("allows result without timing (backwards compat)", () => {
+    const result: CompactResult = { tokensBefore: 80000, tokensAfter: 5000 };
+    expect(result.timing).toBeUndefined();
+  });
+
+  it("allows result with timing", () => {
+    const timing: CompactTiming = { flushMs: 3000, compactMs: 5000, totalMs: 8000, model: "haiku" };
+    const result: CompactResult = { tokensBefore: 80000, tokensAfter: 5000, timing };
+    expect(result.timing!.flushMs).toBe(3000);
+    expect(result.timing!.model).toBe("haiku");
+  });
+});

@@ -40,6 +40,8 @@ export interface MemoryConfig {
     emergencyThresholdTokens?: number;
     /** Min time between soft flushes in ms (default: 600000 = 10min) */
     cooldownMs?: number;
+    /** Model ID for flush turns (default: "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0" — fast, matches Sonnet quality for structured writes) */
+    flushModel?: string | null;
   };
 }
 
@@ -87,4 +89,40 @@ export interface PreparedTurn {
   injected: boolean;
   /** Pending compact level from a previously interrupted flush */
   pendingCompact?: "soft" | "hard" | "emergency";
+  /** Cached snapshot from pre-turn read (avoids re-reading in finalize) */
+  snapshot?: MemorySnapshot;
+  /** Resolved file set (avoids re-resolving in finalize) */
+  fileSet?: MemoryFileSet;
+  /** Set by caller after turn: whether agent used file-modifying tools (write/edit/bash) */
+  turnUsedTools?: boolean;
+}
+
+// ── Tool classification ──────────────────────────────
+
+/**
+ * Tools known to be read-only (cannot modify files on disk).
+ * Any tool NOT in this set is assumed to potentially modify files,
+ * triggering a memory digest re-read after the turn.
+ */
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "glob",
+]);
+
+// ── Compact timing ───────────────────────────────
+
+export interface CompactTiming {
+  flushMs: number;
+  compactMs: number;
+  totalMs: number;
+  model: string;
+}
+
+export interface CompactResult {
+  tokensBefore: number;
+  tokensAfter: number | null;
+  timing?: CompactTiming;
 }
