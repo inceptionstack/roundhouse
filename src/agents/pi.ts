@@ -349,25 +349,29 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           return doPrompt(threadId, formatMessage(message));
         }
 
-        // Switch to flush model
-        try {
-          await entry.session.setModel(targetModel);
-          console.log(`[pi-agent] switched to flush model: ${modelId}`);
-        } catch (err) {
-          console.warn(`[pi-agent] failed to set flush model "${modelId}":`, (err as Error).message);
+        // Verify auth is available for the target model
+        if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+          console.warn(`[pi-agent] no auth for flush model "${modelId}", using default`);
           return doPrompt(threadId, formatMessage(message));
         }
+
+        // Swap model in-memory only (no persistence to settings.json or session log).
+        // This avoids a crash-window where settings could be left on the flush model.
+        const agentState = (entry.session as any).agent?.state;
+        if (!agentState) {
+          console.warn(`[pi-agent] cannot access agent state for model swap, using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        agentState.model = targetModel;
+        console.log(`[pi-agent] switched to flush model (in-memory): ${modelId}`);
 
         try {
           return await doPrompt(threadId, formatMessage(message));
         } finally {
-          // Restore original model
+          // Restore original model (in-memory only)
           if (currentModel) {
-            try {
-              await entry.session.setModel(currentModel);
-            } catch (err) {
-              console.error(`[pi-agent] failed to restore model:`, (err as Error).message);
-            }
+            agentState.model = currentModel;
           }
         }
       });

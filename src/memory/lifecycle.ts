@@ -52,16 +52,9 @@ export async function prepareMemoryForTurn(
 
   const mode = getMode(agent);
 
-  // Complement mode: no injection, but still read snapshot for finalize comparison
+  // Complement mode: no injection, no digest tracking needed (finalize skips complement)
   if (mode === "complement" || mode === "unknown") {
-    // Read snapshot so finalize can detect agent-written changes without re-reading
-    try {
-      const fileSet = resolveMemoryFiles(rootDir, config);
-      const snapshot = await readMemorySnapshot(fileSet, config?.inject?.maxBytes);
-      return { message, beforeDigest: snapshot.digest, injected: false, fileSet, snapshot };
-    } catch {
-      return { message, beforeDigest: null, injected: false };
-    }
+    return { message, beforeDigest: null, injected: false };
   }
 
   // Full mode: inject if needed
