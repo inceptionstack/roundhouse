@@ -23,6 +23,7 @@ import { maxPressure } from "./memory/policy";
 import type { PressureLevel, CompactResult } from "./memory/types";
 import { READ_ONLY_TOOLS } from "./memory/types";
 import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
+import { createProgressMessage } from "./telegram-progress";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
@@ -494,7 +495,7 @@ export class Gateway {
         threadLocks.set(agentThreadId, lockPromise);
         if (prevLock) await prevLock;
 
-        await thread.post("📝 Saving memory and compacting...");
+        const progress = await createProgressMessage(thread, "📝 Saving memory and compacting...");
         const stopTyping = startTypingLoop(thread);
         try {
           const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
@@ -503,25 +504,28 @@ export class Gateway {
           if (this.config.memory?.enabled === false) {
             const result = await agent.compact(agentThreadId);
             if (!result) {
-              await thread.post("⚠️ No active session to compact. Send a message first.");
+              await progress.update("⚠️ No active session to compact. Send a message first.");
             } else {
               const beforeK = (result.tokensBefore / 1000).toFixed(1);
-              await thread.post(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
+              await progress.update(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
             }
           } else {
-            const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, "manual", this.config.memory);
+            const result = await flushMemoryThenCompact(
+              agentThreadId, agent, memoryRoot, "manual", this.config.memory,
+              (step) => progress.update(step),
+            );
             if (!result) {
-              await thread.post("⚠️ No active session to compact. Send a message first.");
+              await progress.update("⚠️ No active session to compact. Send a message first.");
             } else {
               const beforeK = (result.tokensBefore / 1000).toFixed(1);
               const timing = result.timing;
               const timingLine = timing ? `\nTiming: flush ${(timing.flushMs / 1000).toFixed(1)}s, compact ${(timing.compactMs / 1000).toFixed(1)}s, total ${(timing.totalMs / 1000).toFixed(1)}s\nModel: ${timing.model}` : "";
-              await thread.post(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.${timingLine}`);
+              await progress.update(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.${timingLine}`);
             }
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          await thread.post(`⚠️ Compaction failed: ${msg.slice(0, 200)}`);
+          await progress.update(`⚠️ Compaction failed: ${msg.slice(0, 200)}`);
         } finally {
           stopTyping();
           releaseLock!();
@@ -914,13 +918,17 @@ export class Gateway {
 
     // Hard or emergency: flush + compact
     try {
-      await thread.post(`📝 ${pressure === "emergency" ? "⚠️ Context nearly full! " : ""}Saving memory and compacting...`);
-      const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, pressure, this.config.memory);
+      const prefix = pressure === "emergency" ? "⚠️ Context nearly full! " : "";
+      const progress = await createProgressMessage(thread, `📝 ${prefix}Saving memory and compacting...`);
+      const result = await flushMemoryThenCompact(
+        agentThreadId, agent, memoryRoot, pressure, this.config.memory,
+        (step) => progress.update(step),
+      );
       if (result) {
         const beforeK = (result.tokensBefore / 1000).toFixed(1);
         const timing = result.timing;
         const timingLine = timing ? ` (${(timing.totalMs / 1000).toFixed(1)}s: flush ${(timing.flushMs / 1000).toFixed(1)}s + compact ${(timing.compactMs / 1000).toFixed(1)}s)` : "";
-        await thread.post(`✅ Auto-compacted: ${beforeK}K tokens → summary.${timingLine}`);
+        await progress.update(`✅ Auto-compacted: ${beforeK}K tokens → summary.${timingLine}`);
       }
     } catch (err) {
       console.error(`[roundhouse] ${pressure} compact error:`, (err as Error).message);

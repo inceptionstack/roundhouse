@@ -185,6 +185,7 @@ export async function flushMemoryThenCompact(
   rootDir: string,
   level: "soft" | "hard" | "emergency" | "manual",
   config?: MemoryConfig,
+  onProgress?: (step: string) => void | Promise<void>,
 ): Promise<CompactResult | null> {
   const mode = getMode(agent);
   // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
@@ -230,11 +231,13 @@ export async function flushMemoryThenCompact(
     // Step 1: flush
     const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
     console.log(`[memory] flushing memory for ${threadId} (level: ${level}${flushModel ? `, model: ${flushModel}` : ""})`);
+    await onProgress?.("💭 Flushing memory...");
     await sendFlush(flushText);
     const flushMs = Date.now() - t0;
 
     // Step 2: compact (use flush model if compactWithModel is available)
     console.log(`[memory] compacting ${threadId} (flush took ${flushMs}ms)`);
+    await onProgress?.(`✂️ Compacting context... (flush took ${(flushMs / 1000).toFixed(1)}s)`);
     const t1 = Date.now();
     const result = flushModel && agent.compactWithModel
       ? await agent.compactWithModel(threadId, flushModel)
