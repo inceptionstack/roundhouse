@@ -20,7 +20,8 @@ import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
 import { BOT_COMMANDS } from "./commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
-import type { PressureLevel } from "./memory/types";
+import type { PressureLevel, CompactResult } from "./memory/types";
+import { READ_ONLY_TOOLS } from "./memory/types";
 import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
 
 /** Match a Telegram command, handling optional @botname suffix */
@@ -938,8 +939,6 @@ export class Gateway {
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
     let activeTools = new Map<string, string>(); // toolCallId -> toolName
     let usedFileModifyingTools = false;
-    // Read-only tools that cannot modify memory files — everything else triggers re-read
-    const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "glob"]);
 
     // Per-turn streaming state — each turn gets a fresh iterable + promise
     let currentPush: ((text: string) => void) | null = null;

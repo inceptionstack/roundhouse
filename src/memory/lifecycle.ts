@@ -9,7 +9,7 @@
  */
 
 import type { AgentAdapter, AgentMessage } from "../types";
-import type { MemoryConfig, MemoryFileSet, MemoryMode, MemorySnapshot, PreparedTurn, PressureLevel, ThreadMemoryState } from "./types";
+import type { MemoryConfig, MemoryFileSet, MemoryMode, MemorySnapshot, PreparedTurn, PressureLevel, ThreadMemoryState, CompactResult } from "./types";
 import { resolveMemoryFiles, readMemorySnapshot, formatDate } from "./files";
 import { loadThreadMemoryState, saveThreadMemoryState } from "./state";
 import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } from "./policy";
@@ -179,20 +179,13 @@ export async function finalizeMemoryForTurn(
  *
  * Returns compaction result or null if nothing to compact.
  */
-export interface CompactTiming {
-  flushMs: number;
-  compactMs: number;
-  totalMs: number;
-  model: string;
-}
-
 export async function flushMemoryThenCompact(
   threadId: string,
   agent: AgentAdapter,
   rootDir: string,
   level: "soft" | "hard" | "emergency" | "manual",
   config?: MemoryConfig,
-): Promise<{ tokensBefore: number; tokensAfter: number | null; timing?: CompactTiming } | null> {
+): Promise<CompactResult | null> {
   const mode = getMode(agent);
   // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
   const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";

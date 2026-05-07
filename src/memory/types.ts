@@ -96,3 +96,33 @@ export interface PreparedTurn {
   /** Set by caller after turn: whether agent used file-modifying tools (write/edit/bash) */
   turnUsedTools?: boolean;
 }
+
+// ── Tool classification ──────────────────────────────
+
+/**
+ * Tools known to be read-only (cannot modify files on disk).
+ * Any tool NOT in this set is assumed to potentially modify files,
+ * triggering a memory digest re-read after the turn.
+ */
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "glob",
+]);
+
+// ── Compact timing ───────────────────────────────
+
+export interface CompactTiming {
+  flushMs: number;
+  compactMs: number;
+  totalMs: number;
+  model: string;
+}
+
+export interface CompactResult {
+  tokensBefore: number;
+  tokensAfter: number | null;
+  timing?: CompactTiming;
+}
