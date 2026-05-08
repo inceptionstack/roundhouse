@@ -51,7 +51,7 @@ export function unquoteEnvValue(raw: string): string {
     value = value.slice(1, -1);
   }
   // Single-pass unescape to handle \\ correctly (avoids double-replacement)
-  value = value.replace(/\\([\\"\/\$`n])/g, (_match, ch) => {
+  value = value.replace(/\\([\\"$`n])/g, (_match, ch) => {
     switch (ch) {
       case "n": return "\n";
       case "\\": return "\\";

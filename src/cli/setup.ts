@@ -22,7 +22,7 @@ import {
   ENV_FILE_PATH as ENV_PATH,
   fileExists,
 } from "../config";
-import { envQuote, parseEnvFile } from "./env-file";
+import { envQuote, parseEnvFile, unquoteEnvValue } from "./env-file";
 import {
   whichSync,
   systemctl,
@@ -1257,7 +1257,7 @@ export async function cmdPair(argv: string[]): Promise<void> {
     try {
       const entries = parseEnvFile(await readFile(ENV_PATH, "utf8"));
       const raw = entries.get("TELEGRAM_BOT_TOKEN");
-      if (raw) token = raw.replace(/^["']|["']$/g, "");
+      if (raw) token = unquoteEnvValue(raw);
     } catch {}
   }
 

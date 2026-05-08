@@ -4,7 +4,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { parseEnvFile } from "../../env-file";
+import { parseEnvFile, unquoteEnvValue } from "../../env-file";
 import type { DoctorCheck, DoctorContext } from "../types";
 
 /**
@@ -17,7 +17,7 @@ export async function resolveToken(ctx: DoctorContext): Promise<string | null> {
     try {
       const entries = parseEnvFile(await readFile(ctx.envFilePath, "utf8"));
       const raw = entries.get("TELEGRAM_BOT_TOKEN");
-      if (raw) token = raw.replace(/^["']|["']$/g, "");
+      if (raw) token = unquoteEnvValue(raw);
     } catch {}
   }
   return token || null;
