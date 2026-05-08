@@ -39,15 +39,7 @@ export function generatePlist(opts: LaunchdOptions = {}): string {
   }
 
   const logDir = resolve(ROUNDHOUSE_DIR, "logs");
-  const envFile = opts.envFilePath || resolve(ROUNDHOUSE_DIR, ".env");
 
-  // Build environment variables to include
-  const envKeys = [
-    "PATH",
-    "HOME",
-    "ROUNDHOUSE_CONFIG",
-    "NODE_NO_WARNINGS",
-  ];
 
   let envSection = "";
   const envVars: Record<string, string> = {

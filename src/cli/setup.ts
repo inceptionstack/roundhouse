@@ -837,12 +837,6 @@ async function stepRegisterCommands(opts: SetupOptions): Promise<void> {
 async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
   step("⑩b", "Installing service...");
 
-  if (!opts.systemd) {
-    ok("Skipped (--no-systemd)");
-    log("   Run manually: roundhouse start");
-    return;
-  }
-
   // macOS: install launchd agent
   if (platform() === "darwin") {
     try {
@@ -857,6 +851,12 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
     return;
   }
 
+
+  if (!opts.systemd) {
+    ok("Skipped (--no-systemd)");
+    log("   Run manually: roundhouse start");
+    return;
+  }
   if (platform() !== "linux") {
     warn(`Service install not supported on ${platform()}`);
     log("   Run manually: roundhouse start");

@@ -56,7 +56,7 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
 async function cmdStart() {
   // macOS: check launchd agent
   if (process.platform === "darwin") {
-    const { isLaunchAgentInstalled, isLaunchAgentRunning } = await import("./launchd.ts");
+    const { isLaunchAgentInstalled, isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
     if (isLaunchAgentInstalled()) {
       if (isLaunchAgentRunning()) {
         console.log("Roundhouse is already running (LaunchAgent).");
@@ -65,9 +65,7 @@ async function cmdStart() {
         return;
       }
       // Load it
-      const { execFileSync } = await import("node:child_process");
       try {
-        const { PLIST_PATH } = await import("./launchd.ts");
         execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
         console.log("LaunchAgent started.");
         console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
