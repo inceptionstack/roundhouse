@@ -201,7 +201,7 @@ export function provisionBundle(opts: ProvisionOpts = {}): void {
  * Does NOT overwrite existing files — user's version always wins.
  */
 export function provisionExtensionFiles(opts: ProvisionOpts = {}): void {
-  const { log = defaultLog } = opts;
+  const { log = consoleLog } = opts;
   const shippedDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "pi", "extensions");
   const targetDir = resolve(homedir(), ".pi", "agent", "extensions");
 
@@ -239,7 +239,7 @@ export function provisionExtensionFiles(opts: ProvisionOpts = {}): void {
  * Ensure core extensions are listed in ~/.pi/agent/settings.json packages array.
  */
 export function provisionExtensions(opts: ProvisionOpts = {}): void {
-  const { log = defaultLog } = opts;
+  const { log = consoleLog } = opts;
   const settingsPath = resolve(homedir(), ".pi", "agent", "settings.json");
 
   const coreExtensions = [

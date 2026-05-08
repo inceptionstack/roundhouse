@@ -17,9 +17,13 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-      const apiKey =
-        process.env.TAVILY_API_KEY ||
-        "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";
+      const apiKey = process.env.TAVILY_API_KEY || "";
+      if (!apiKey) {
+        return {
+          content: [{ type: "text", text: "TAVILY_API_KEY environment variable not set. Set it to use web search." }],
+          details: { error: "missing_api_key" },
+        };
+      }
 
       const maxResults = Math.min(Math.max(params.num_results ?? 5, 1), 20);
       const includeAnswer = params.include_answer ?? false;
