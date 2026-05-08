@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
-import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, copyFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -192,14 +192,54 @@ export function provisionBundle(opts: ProvisionOpts = {}): void {
   provisionPlaywright(opts);
   provisionUvx(opts);
   provisionMcporterConfig(opts);
+  provisionExtensionFiles(opts);
   provisionExtensions(opts);
+}
+
+/**
+ * Copy shipped extension files to ~/.pi/agent/extensions/ if not already present.
+ * Does NOT overwrite existing files — user's version always wins.
+ */
+export function provisionExtensionFiles(opts: ProvisionOpts = {}): void {
+  const { log = consoleLog } = opts;
+  const shippedDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "pi", "extensions");
+  const targetDir = resolve(homedir(), ".pi", "agent", "extensions");
+
+  try {
+    if (!existsSync(shippedDir)) return;
+    const files = readdirSync(shippedDir).filter(f => f.endsWith(".ts"));
+    if (files.length === 0) return;
+
+    mkdirSync(targetDir, { recursive: true });
+
+    let installed = 0;
+    let skipped = 0;
+    for (const file of files) {
+      const target = resolve(targetDir, file);
+      if (existsSync(target)) {
+        skipped++;
+      } else {
+        copyFileSync(resolve(shippedDir, file), target);
+        installed++;
+      }
+    }
+
+    if (installed > 0) {
+      log.ok(`${installed} extension(s) installed to ~/.pi/agent/extensions/`);
+    }
+    if (skipped > 0 && installed === 0) {
+      log.ok(`extensions (${skipped} already present, not overwritten)`);
+    }
+  } catch (err: any) {
+    log.warn(`extension file provisioning failed: ${err.message}`);
+  }
 }
 
 /**
  * Ensure core extensions are listed in ~/.pi/agent/settings.json packages array.
  */
 export function provisionExtensions(opts: ProvisionOpts = {}): void {
-  const { log = defaultLog } = opts;
+  const { log = consoleLog } = opts;
   const settingsPath = resolve(homedir(), ".pi", "agent", "settings.json");
 
   const coreExtensions = [
