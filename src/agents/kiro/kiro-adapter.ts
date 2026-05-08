@@ -1,8 +1,8 @@
 /**
- * kiro.ts — Kiro CLI AgentAdapter for Roundhouse
+ * kiro-adapter.ts — Kiro CLI AgentAdapter for Roundhouse
  *
  * Drives kiro-cli over ACP (Agent Control Protocol) via JSON-RPC stdio.
- * Implements the AgentAdapter interface with streaming support.
+ * Extends BaseAdapter to fulfill the fixed interface contract.
  *
  * Architecture:
  * - One kiro-cli process hosts all sessions (spawned lazily on first prompt)
@@ -12,7 +12,8 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
+import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
+import { BaseAdapter } from "../base-adapter.js";
 import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
@@ -20,76 +21,190 @@ import { normalizeToolName } from "./tool-names.js";
 // ── Types ────────────────────────────────────────────
 
 interface KiroAdapterConfig {
-  cwd?: string;
-  agentName?: string;
-  flushAgentName?: string;
-  maxIdleMs?: number;
-  autoApproveTools?: string[];
-}
-
-interface ThreadQueue {
-  queue: Array<() => Promise<void>>;
-  running: boolean;
+  cwd: string;
+  agentName: string;
+  flushAgentName: string;
+  maxIdleMs: number;
+  autoApproveTools: string[];
 }
 
 // ── Factory ──────────────────────────────────────────
 
 export const createKiroAgentAdapter: AgentAdapterFactory = (config) => {
-  const opts: KiroAdapterConfig = {
+  return new KiroAdapter({
     cwd: (config.cwd as string) ?? homedir(),
     agentName: (config.agentName as string) ?? "roundhouse",
     flushAgentName: (config.flushAgentName as string) ?? "roundhouse-flush",
     maxIdleMs: (config.maxIdleMs as number) ?? 30 * 60 * 1000,
     autoApproveTools: (config.autoApproveTools as string[]) ?? ["read", "grep", "glob", "web_fetch", "web_search"],
-  };
-
-  return createAdapter(opts);
+  });
 };
 
-// ── Adapter implementation ───────────────────────────
+// ── KiroAdapter ──────────────────────────────────────
 
-function createAdapter(config: KiroAdapterConfig): AgentAdapter {
-  const sessionsDir = resolve(homedir(), ".roundhouse", "sessions");
-  const store = new SessionStore({ sessionsDir, maxIdleMs: config.maxIdleMs });
-  const threadQueues = new Map<string, ThreadQueue>();
+class KiroAdapter extends BaseAdapter {
+  readonly name = "kiro";
 
-  let mainProcess: AcpProcess | null = null;
-  let initialized = false;
-  let reaperInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly config: KiroAdapterConfig;
+  private readonly store: SessionStore;
+  private readonly threadQueues = new Map<string, { queue: Array<() => Promise<void>>; running: boolean }>();
+  private readonly kiroVersion: string;
 
-  // Cached version (read once)
-  const kiroVersion = getKiroCliVersion() ?? "unknown";
+  private mainProcess: AcpProcess | null = null;
+  private reaperInterval: ReturnType<typeof setInterval> | null = null;
 
-  // ── Process lifecycle ────────────────────────────────
+  constructor(config: KiroAdapterConfig) {
+    super();
+    this.config = config;
+    const sessionsDir = resolve(homedir(), ".roundhouse", "sessions");
+    this.store = new SessionStore({ sessionsDir, maxIdleMs: config.maxIdleMs });
+    this.kiroVersion = getKiroCliVersion() ?? "unknown";
+  }
 
-  async function ensureProcess(): Promise<AcpProcess> {
-    if (mainProcess && !mainProcess.client.isClosed) return mainProcess;
+  // ── Required: prompt ─────────────────────────────────
 
-    mainProcess = spawnKiroCli({ agentName: config.agentName!, cwd: config.cwd! });
+  async prompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
+    return this.enqueue(threadId, () => this.doPrompt(threadId, message));
+  }
 
-    // Initialize handshake
-    await mainProcess.client.call<InitializeResult>("initialize", {
+  // ── Required: promptStream ───────────────────────────
+
+  promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
+    const events: AgentStreamEvent[] = [];
+    let done = false;
+    let error: Error | null = null;
+    let resolveWait: (() => void) | null = null;
+    let innerIterator: AsyncIterator<AgentStreamEvent> | null = null;
+
+    this.enqueue(threadId, async () => {
+      try {
+        const gen = this.doPromptStream(threadId, message);
+        innerIterator = gen[Symbol.asyncIterator]();
+        let result = await innerIterator.next();
+        while (!result.done && !done) {
+          events.push(result.value);
+          resolveWait?.();
+          result = await innerIterator.next();
+        }
+      } catch (e: any) {
+        error = e;
+      } finally {
+        done = true;
+        resolveWait?.();
+      }
+    });
+
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<AgentStreamEvent>> {
+            while (events.length === 0 && !done) {
+              await new Promise<void>((r) => { resolveWait = r; });
+              resolveWait = null;
+            }
+            if (events.length > 0) return { done: false, value: events.shift()! };
+            if (error) throw error;
+            return { done: true, value: undefined };
+          },
+          async return() {
+            done = true;
+            innerIterator?.return?.();
+            return { done: true, value: undefined } as IteratorResult<AgentStreamEvent>;
+          },
+          async throw(e: any) {
+            done = true;
+            error = e;
+            return { done: true, value: undefined } as IteratorResult<AgentStreamEvent>;
+          },
+        };
+      },
+    };
+  }
+
+  // ── Required: dispose ────────────────────────────────
+
+  async dispose(): Promise<void> {
+    if (this.reaperInterval) {
+      clearInterval(this.reaperInterval);
+      this.reaperInterval = null;
+    }
+    if (this.mainProcess) {
+      await shutdownProcess(this.mainProcess);
+      this.mainProcess = null;
+    }
+    this.threadQueues.clear();
+  }
+
+  // ── Optional overrides ───────────────────────────────
+
+  async abort(threadId: string): Promise<void> {
+    const session = this.store.get(threadId);
+    if (!session || !this.mainProcess) return;
+    await this.mainProcess.client.call("session/cancel", { sessionId: session.sessionId }).catch(() => {});
+  }
+
+  async restart(threadId: string): Promise<void> {
+    this.store.delete(threadId);
+    this.threadQueues.delete(threadId);
+  }
+
+  async compact(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+    const session = this.store.get(threadId);
+    if (!session || !this.mainProcess) return null;
+
+    const before = session.contextTokens ?? 0;
+    await this.mainProcess.client.call("_kiro.dev/commands/execute", {
+      sessionId: session.sessionId,
+      command: "/compact",
+    });
+    const after = this.store.get(threadId)?.contextTokens ?? null;
+    return { tokensBefore: before, tokensAfter: after };
+  }
+
+  getInfo(threadId?: string): Record<string, unknown> {
+    const session = threadId ? this.store.get(threadId) : undefined;
+    return {
+      version: this.kiroVersion,
+      model: session?.model ?? this.config.agentName ?? "unknown",
+      activeSessions: this.store.size,
+      cwd: this.config.cwd,
+      contextTokens: session?.contextTokens ?? null,
+      contextWindow: session?.contextWindow ?? null,
+      contextPercent: session?.contextTokens && session?.contextWindow
+        ? Math.round((session.contextTokens / session.contextWindow) * 100)
+        : null,
+      hasMemoryExtension: false,
+      memoryTools: [],
+      extensions: [],
+    };
+  }
+
+  // ── Private: process lifecycle ───────────────────────
+
+  private async ensureProcess(): Promise<AcpProcess> {
+    if (this.mainProcess && !this.mainProcess.client.isClosed) return this.mainProcess;
+
+    this.mainProcess = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+
+    await this.mainProcess.client.call<InitializeResult>("initialize", {
       protocolVersion: "1.0",
       clientInfo: { name: "roundhouse", version: "0.4.3" },
     });
-    initialized = true;
 
-    // Start idle reaper
-    if (!reaperInterval) {
-      reaperInterval = setInterval(reapIdleSessions, 60_000);
+    if (!this.reaperInterval) {
+      this.reaperInterval = setInterval(() => this.reapIdleSessions(), 60_000);
     }
 
-    return mainProcess;
+    return this.mainProcess;
   }
 
-  async function ensureSession(threadId: string): Promise<SessionEntry> {
-    const existing = store.get(threadId);
+  private async ensureSession(threadId: string): Promise<SessionEntry> {
+    const existing = this.store.get(threadId);
     if (existing) return existing;
 
-    const proc = await ensureProcess();
+    const proc = await this.ensureProcess();
 
-    // Try to resume a persisted session
-    const persistedId = store.loadPersistedSessionId(threadId);
+    const persistedId = this.store.loadPersistedSessionId(threadId);
     if (persistedId) {
       try {
         await proc.client.call("session/load", { sessionId: persistedId });
@@ -103,14 +218,13 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
           contextWindow: null,
           model: null,
         };
-        store.set(threadId, entry);
+        this.store.set(threadId, entry);
         return entry;
       } catch {
         // Session no longer valid — create new
       }
     }
 
-    // Create new session
     const result = await proc.client.call<SessionNewResult>("session/new", {});
     const entry: SessionEntry = {
       sessionId: result.sessionId,
@@ -122,58 +236,26 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
       contextWindow: null,
       model: null,
     };
-    store.set(threadId, entry);
+    this.store.set(threadId, entry);
     return entry;
   }
 
-  // ── Queue serialization ──────────────────────────────
+  // ── Private: prompt logic ────────────────────────────
 
-  function enqueue<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
-    let tq = threadQueues.get(threadId);
-    if (!tq) {
-      tq = { queue: [], running: false };
-      threadQueues.set(threadId, tq);
-    }
-
-    return new Promise<T>((resolve, reject) => {
-      tq!.queue.push(async () => {
-        try { resolve(await fn()); }
-        catch (e) { reject(e); }
-      });
-      drainQueue(threadId);
-    });
-  }
-
-  async function drainQueue(threadId: string): Promise<void> {
-    const tq = threadQueues.get(threadId);
-    if (!tq || tq.running) return;
-    tq.running = true;
-    while (tq.queue.length > 0) {
-      const task = tq.queue.shift()!;
-      await task();
-    }
-    tq.running = false;
-  }
-
-  // ── Core prompt logic ────────────────────────────────
-
-  async function doPrompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
-    const session = await ensureSession(threadId);
-    store.markInFlight(threadId, true);
+  private async doPrompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
+    const session = await this.ensureSession(threadId);
+    this.store.markInFlight(threadId, true);
 
     try {
-      const proc = mainProcess!;
-      const text = formatMessage(message);
+      const proc = this.mainProcess!;
+      const text = this.formatMessage(message);
 
-      // Send prompt — events arrive as notifications
       const responsePromise = proc.client.call<void>("session/prompt", {
         sessionId: session.sessionId,
         text,
       });
 
-      // Collect text chunks until complete
       let fullText = "";
-      let done = false;
 
       const onTextChunk = (params: any) => {
         if (params?.sessionId === session.sessionId) {
@@ -183,7 +265,6 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
 
       const onPermission = (params: any) => {
         if (params?.sessionId === session.sessionId) {
-          // Auto-approve all tools in non-streaming mode
           proc.client.notify("permission/response", {
             tool_call_id: params.tool_call_id,
             decision: "approved",
@@ -191,21 +272,14 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
         }
       };
 
-      const onComplete = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          done = true;
-        }
-      };
-
       const onSessionUpdate = (params: any) => {
         if (params?.sessionId === session.sessionId) {
-          store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
         }
       };
 
       proc.client.on("text_chunk", onTextChunk);
       proc.client.on("permission_request", onPermission);
-      proc.client.on("complete", onComplete);
       proc.client.on("session/update", onSessionUpdate);
 
       try {
@@ -213,25 +287,23 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
       } finally {
         proc.client.off("text_chunk", onTextChunk);
         proc.client.off("permission_request", onPermission);
-        proc.client.off("complete", onComplete);
         proc.client.off("session/update", onSessionUpdate);
       }
 
       return { text: fullText };
     } finally {
-      store.markInFlight(threadId, false);
+      this.store.markInFlight(threadId, false);
     }
   }
 
-  async function* doPromptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
-    const session = await ensureSession(threadId);
-    store.markInFlight(threadId, true);
+  private async *doPromptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
+    const session = await this.ensureSession(threadId);
+    this.store.markInFlight(threadId, true);
 
     try {
-      const proc = mainProcess!;
-      const text = formatMessage(message);
+      const proc = this.mainProcess!;
+      const text = this.formatMessage(message);
 
-      // Use a channel pattern for yielding events
       const events: AgentStreamEvent[] = [];
       let done = false;
       let promptError: Error | null = null;
@@ -262,7 +334,6 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
 
       const onPermission = (params: any) => {
         if (params?.sessionId === session.sessionId) {
-          // Auto-approve for now (HookManager integration in PR 2)
           proc.client.notify("permission/response", {
             tool_call_id: params.tool_call_id,
             decision: "approved",
@@ -283,7 +354,7 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
 
       const onSessionUpdate = (params: any) => {
         if (params?.sessionId === session.sessionId) {
-          store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
         }
       };
 
@@ -321,23 +392,48 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
         proc.client.off("session/update", onSessionUpdate);
       }
     } finally {
-      store.markInFlight(threadId, false);
+      this.store.markInFlight(threadId, false);
     }
   }
 
-  // ── Idle reaping ─────────────────────────────────────
+  // ── Private: utilities ───────────────────────────────
 
-  function reapIdleSessions(): void {
-    const idle = store.getIdleSessions();
+  private enqueue<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    let tq = this.threadQueues.get(threadId);
+    if (!tq) {
+      tq = { queue: [], running: false };
+      this.threadQueues.set(threadId, tq);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      tq!.queue.push(async () => {
+        try { resolve(await fn()); }
+        catch (e) { reject(e); }
+      });
+      this.drainQueue(threadId);
+    });
+  }
+
+  private async drainQueue(threadId: string): Promise<void> {
+    const tq = this.threadQueues.get(threadId);
+    if (!tq || tq.running) return;
+    tq.running = true;
+    while (tq.queue.length > 0) {
+      const task = tq.queue.shift()!;
+      await task();
+    }
+    tq.running = false;
+  }
+
+  private reapIdleSessions(): void {
+    const idle = this.store.getIdleSessions();
     for (const threadId of idle) {
-      store.delete(threadId);
-      threadQueues.delete(threadId);
+      this.store.delete(threadId);
+      this.threadQueues.delete(threadId);
     }
   }
 
-  // ── Message formatting ───────────────────────────────
-
-  function formatMessage(msg: AgentMessage): string {
+  private formatMessage(msg: AgentMessage): string {
     let text = msg.text;
     if (msg.attachments && msg.attachments.length > 0) {
       const manifest = msg.attachments.map((a) => ({
@@ -349,124 +445,4 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
     }
     return text;
   }
-
-  // ── Public adapter interface ─────────────────────────
-
-  const adapter: AgentAdapter = {
-    name: "kiro",
-
-    prompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
-      return enqueue(threadId, () => doPrompt(threadId, message));
-    },
-
-    promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
-      // Channel-based approach: enqueue produces events, consumer reads them
-      const events: AgentStreamEvent[] = [];
-      let done = false;
-      let error: Error | null = null;
-      let resolveWait: (() => void) | null = null;
-      let innerIterator: AsyncIterator<AgentStreamEvent> | null = null;
-
-      // Start the stream inside the queue so it serializes with prompt()
-      enqueue(threadId, async () => {
-        try {
-          const gen = doPromptStream(threadId, message);
-          innerIterator = gen[Symbol.asyncIterator]();
-          let result = await innerIterator.next();
-          while (!result.done && !done) {
-            events.push(result.value);
-            resolveWait?.();
-            result = await innerIterator.next();
-          }
-        } catch (e: any) {
-          error = e;
-        } finally {
-          done = true;
-          resolveWait?.();
-        }
-      });
-
-      return {
-        [Symbol.asyncIterator]() {
-          return {
-            async next(): Promise<IteratorResult<AgentStreamEvent>> {
-              while (events.length === 0 && !done) {
-                await new Promise<void>((r) => { resolveWait = r; });
-                resolveWait = null;
-              }
-              if (events.length > 0) return { done: false, value: events.shift()! };
-              if (error) throw error;
-              return { done: true, value: undefined };
-            },
-            async return() {
-              done = true;
-              innerIterator?.return?.();
-              return { done: true, value: undefined };
-            },
-            async throw(e: any) {
-              done = true;
-              error = e;
-              return { done: true, value: undefined };
-            },
-          };
-        },
-      };
-    },
-
-    async abort(threadId: string): Promise<void> {
-      const session = store.get(threadId);
-      if (!session || !mainProcess) return;
-      await mainProcess.client.call("session/cancel", { sessionId: session.sessionId }).catch(() => {});
-    },
-
-    async restart(threadId: string): Promise<void> {
-      store.delete(threadId);
-      threadQueues.delete(threadId);
-    },
-
-    async compact(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
-      const session = store.get(threadId);
-      if (!session || !mainProcess) return null;
-
-      const before = session.contextTokens ?? 0;
-      await mainProcess.client.call("_kiro.dev/commands/execute", {
-        sessionId: session.sessionId,
-        command: "/compact",
-      });
-      const after = store.get(threadId)?.contextTokens ?? null;
-      return { tokensBefore: before, tokensAfter: after };
-    },
-
-    getInfo(threadId?: string): Record<string, unknown> {
-      const session = threadId ? store.get(threadId) : undefined;
-      return {
-        version: kiroVersion,
-        model: session?.model ?? config.agentName ?? "unknown",
-        activeSessions: store.size,
-        cwd: config.cwd,
-        contextTokens: session?.contextTokens ?? null,
-        contextWindow: session?.contextWindow ?? null,
-        contextPercent: session?.contextTokens && session?.contextWindow
-          ? Math.round((session.contextTokens / session.contextWindow) * 100)
-          : null,
-        hasMemoryExtension: false,
-        memoryTools: [],
-        extensions: [],
-      };
-    },
-
-    async dispose(): Promise<void> {
-      if (reaperInterval) {
-        clearInterval(reaperInterval);
-        reaperInterval = null;
-      }
-      if (mainProcess) {
-        await shutdownProcess(mainProcess);
-        mainProcess = null;
-      }
-      threadQueues.clear();
-    },
-  };
-
-  return adapter;
 }

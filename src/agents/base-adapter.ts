@@ -9,24 +9,7 @@
  * and lives in its own directory with no cross-adapter imports.
  */
 
-import type { AgentMessage, AgentResponse, AgentStreamEvent } from "../types.js";
-
-/** Result of a compact operation */
-export interface CompactResult {
-  tokensBefore: number;
-  tokensAfter: number | null;
-}
-
-/** Runtime info exposed via /status and memory lifecycle */
-export interface AdapterInfo {
-  version?: string;
-  model?: string;
-  cwd?: string;
-  contextTokens?: number | null;
-  contextWindow?: number | null;
-  contextPercent?: number | null;
-  [key: string]: unknown;
-}
+import type { AgentAdapter, AgentMessage, AgentResponse, AgentStreamEvent } from "../types.js";
 
 /**
  * Abstract base class for all agent adapters.
@@ -45,7 +28,7 @@ export interface AdapterInfo {
  *   - abort()            — defaults to no-op
  *   - getInfo()          — defaults to empty object
  */
-export abstract class BaseAdapter {
+export abstract class BaseAdapter implements AgentAdapter {
   /** Unique agent type identifier, e.g. "pi", "kiro" */
   abstract readonly name: string;
 
@@ -63,7 +46,7 @@ export abstract class BaseAdapter {
   // ── Optional: override for adapter-specific behavior ─
 
   /**
-   * Send a prompt using a specific model (e.g. for memory flush with Haiku).
+   * Send a prompt using a specific model (e.g. Haiku for memory flush).
    * Default: ignores modelId, delegates to prompt().
    */
   async promptWithModel(threadId: string, message: AgentMessage, _modelId: string): Promise<AgentResponse> {
@@ -80,7 +63,7 @@ export abstract class BaseAdapter {
    * Compact the session context for a thread.
    * Default: returns null (not supported).
    */
-  async compact(_threadId: string): Promise<CompactResult | null> {
+  async compact(_threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
     return null;
   }
 
@@ -88,7 +71,7 @@ export abstract class BaseAdapter {
    * Compact with a specific model.
    * Default: ignores modelId, delegates to compact().
    */
-  async compactWithModel(threadId: string, _modelId: string): Promise<CompactResult | null> {
+  async compactWithModel(threadId: string, _modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
     return this.compact(threadId);
   }
 
@@ -102,7 +85,7 @@ export abstract class BaseAdapter {
    * Return runtime info about the agent (model, version, context usage, etc.).
    * Default: returns empty object.
    */
-  getInfo(_threadId?: string): AdapterInfo {
+  getInfo(_threadId?: string): Record<string, unknown> {
     return {};
   }
 }

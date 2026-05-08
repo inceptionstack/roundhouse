@@ -143,15 +143,21 @@ interface AttachmentTranscript {
 }
 
 interface AgentAdapter {
-  name: string;
-  prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
-  promptStream?(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent>;
+  readonly name: string;
+  prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;        // required
+  promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent>; // required
+  dispose(): Promise<void>;                                                       // required
+  promptWithModel?(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse>;
   restart?(threadId: string): Promise<void>;
   compact?(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
+  compactWithModel?(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
   abort?(threadId: string): Promise<void>;
   getInfo?(threadId?: string): Record<string, unknown>;
-  dispose(): Promise<void>;
 }
+
+// New adapters extend BaseAdapter (src/agents/base-adapter.ts) which
+// provides default implementations for optional methods.
+// Each adapter lives in its own directory: pi/pi-adapter.ts, kiro/kiro-adapter.ts
 
 interface AgentResponse {
   text: string;
