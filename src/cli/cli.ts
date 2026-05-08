@@ -111,9 +111,10 @@ async function loadEnvFile(): Promise<void> {
   if (!(await fileExists(envPath))) return;
   try {
     const entries = parseEnvFile(await readFile(envPath, "utf8"));
-    for (const [key, value] of entries) {
+    for (const [key, raw] of entries) {
       if (!process.env[key]) {
-        process.env[key] = value;
+        // Strip surrounding quotes (envQuote wraps values in "...")
+        process.env[key] = raw.replace(/^["']|["']$/g, "");
       }
     }
   } catch (e: any) {
