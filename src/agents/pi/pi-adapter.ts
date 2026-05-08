@@ -205,6 +205,24 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       } else {
         console.log(`[pi-agent] no memory extension detected — roundhouse memory will manage`);
       }
+
+      // Warn loudly about pi extensions that own a chat bridge themselves.
+      // They hijack agent_start/message_update/agent_end and short-circuit
+      // Roundhouse's streaming pipeline — Telegram shows "typing" forever
+      // and no reply text is delivered.
+      const conflicting = extNames.filter((n) => /pi-telegram(\b|[\/\\])/i.test(n));
+      if (conflicting.length > 0) {
+        const lines = [
+          "",
+          "\u26a0\ufe0f  CONFLICT: detected pi extension(s) that bridge a chat platform directly:",
+          ...conflicting.map((n) => `   - ${n}`),
+          "   Roundhouse already drives Telegram. Loading a bridge extension inside",
+          "   the pi session causes lost replies (typing indicator without text).",
+          "   Remove the extension from ~/.pi/agent/extensions or pi config and restart.",
+          "",
+        ];
+        for (const line of lines) console.warn(line);
+      }
     }
 
     return entry;
