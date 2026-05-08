@@ -287,138 +287,8 @@ export class Gateway {
         return;
       }
 
-      // Save any attachments (voice messages, images, files, etc.)
-      let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
-      try {
-        attachmentResult = await saveAttachments(agentThreadId, rawAttachments);
-      } catch (err) {
-        console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
-        if (!userText.trim()) {
-          try { await thread.post("⚠️ Failed to process attachment(s). Please try again."); } catch {}
-          return;
-        }
-      }
-
-      // Notify user about skipped attachments
-      if (attachmentResult.skipped.length > 0) {
-        const skipMsg = attachmentResult.skipped.map((s) => `\u2022 ${s}`).join("\n");
-        try { await thread.post(`⚠️ Some attachments were skipped:\n${skipMsg}`); } catch {}
-      }
-
-      // Build AgentMessage
-      const promptText = userText.trim();
-      let agentMessage: AgentMessage = {
-        text: promptText,
-        attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
-      };
-
-      if (!promptText && !agentMessage.attachments) {
-        if (rawAttachments.length > 0) {
-          // All attachments failed to save but message was attachment-only
-          try { await thread.post("⚠️ Failed to save attachment(s). Please try again."); } catch {}
-        }
-        return;
-      }
-
-      const agent = this.router.resolve(agentThreadId);
-
-      // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
-      const prevLock = threadLocks.get(agentThreadId);
-      let releaseLock: () => void;
-      const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
-      threadLocks.set(agentThreadId, lockPromise);
-      if (prevLock) await prevLock;
-
-      console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
-
-      // Enrich audio attachments with transcripts (STT) — inside thread lock to prevent stampede
-      if (this.sttService && agentMessage.attachments?.length) {
-        try {
-          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
-          // Update text for voice-only messages after transcription
-          if (!agentMessage.text) {
-            const transcripts = agentMessage.attachments
-              .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
-              .map((a) => a.transcript!.text);
-            if (transcripts.length > 0) {
-              agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
-            } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
-              agentMessage.text = "Voice message attached, but automatic transcription failed.";
-            }
-          }
-        } catch (err) {
-          console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
-        }
-      }
-
-      // ── Memory: pre-turn injection (Full mode only) ───
-      const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
-      const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
-      let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
-      try {
-        memoryPrepared = await prepareMemoryForTurn(agentThreadId, agentMessage, agent, memoryRoot, this.config.memory);
-        agentMessage = memoryPrepared.message;
-      } catch (err) {
-        console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
-      }
-
-      const stopTyping = startTypingLoop(thread);
-
-      try {
-        let turnUsedTools = false;
-        if (agent.promptStream) {
-          const ac = new AbortController();
-          abortControllers.set(agentThreadId, ac);
-          try {
-            const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
-            turnUsedTools = streamResult.usedTools;
-          } finally {
-            abortControllers.delete(agentThreadId);
-          }
-        } else {
-          // Fallback: non-streaming prompt (assume tools may have been used)
-          const reply = await agent.prompt(agentThreadId, agentMessage);
-          turnUsedTools = true;
-          if (reply.text) {
-            await this.postWithFallback(thread, reply.text);
-          }
-        }
-
-        // ── Memory: post-turn finalize + pressure check ───
-        try {
-          if (memoryPrepared) memoryPrepared.turnUsedTools = turnUsedTools;
-          const pressure = await finalizeMemoryForTurn(
-            agentThreadId,
-            memoryPrepared ?? { message: agentMessage, beforeDigest: null, injected: false },
-            agent, memoryRoot, this.config.memory,
-          );
-          // Use higher severity between pending compact and current pressure
-          const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
-          if (effectivePressure !== "none") {
-            // Run flush/compact INSIDE the thread lock to prevent race with next user message
-            try {
-              await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
-            } catch (err) {
-              console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
-            }
-          }
-        } catch (err) {
-          console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
-        }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const safeMsg = errMsg.split('\n')[0].slice(0, 200);
-        console.error(`[roundhouse] agent error:`, err);
-        try {
-          await thread.post(`⚠️ Error: ${safeMsg}`);
-        } catch {}
-      } finally {
-        stopTyping();
-        releaseLock!();
-        if (threadLocks.get(agentThreadId) === lockPromise) {
-          threadLocks.delete(agentThreadId);
-        }
-      }
+      // Dispatch to agent turn handler
+      await this.handleAgentTurn(thread, agentThreadId, userText, rawAttachments, verboseThreads, threadLocks, abortControllers);
     };
 
     // ── Wire Chat SDK events ───────────────────────
@@ -487,6 +357,143 @@ export class Gateway {
 
     // Send startup notification (after cron init so we can include job counts)
     await this.notifyStartup(platforms);
+  }
+
+  /**
+   * Process a user message through the agent pipeline:
+   * save attachments → build message → STT → memory inject → prompt → memory finalize → pressure check
+   */
+  private async handleAgentTurn(
+    thread: any, agentThreadId: string, userText: string, rawAttachments: any[],
+    verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>, abortControllers: Map<string, AbortController>,
+  ): Promise<void> {
+    // Save any attachments (voice messages, images, files, etc.)
+    let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
+    try {
+      attachmentResult = await saveAttachments(agentThreadId, rawAttachments);
+    } catch (err) {
+      console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
+      if (!userText.trim()) {
+        try { await thread.post("⚠️ Failed to process attachment(s). Please try again."); } catch {}
+        return;
+      }
+    }
+
+    // Notify user about skipped attachments
+    if (attachmentResult.skipped.length > 0) {
+      const skipMsg = attachmentResult.skipped.map((s) => `\u2022 ${s}`).join("\n");
+      try { await thread.post(`⚠️ Some attachments were skipped:\n${skipMsg}`); } catch {}
+    }
+
+    // Build AgentMessage
+    const promptText = userText.trim();
+    let agentMessage: AgentMessage = {
+      text: promptText,
+      attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
+    };
+
+    if (!promptText && !agentMessage.attachments) {
+      if (rawAttachments.length > 0) {
+        try { await thread.post("⚠️ Failed to save attachment(s). Please try again."); } catch {}
+      }
+      return;
+    }
+
+    const agent = this.router.resolve(agentThreadId);
+
+    // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
+    const prevLock = threadLocks.get(agentThreadId);
+    let releaseLock: () => void;
+    const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
+    threadLocks.set(agentThreadId, lockPromise);
+    if (prevLock) await prevLock;
+
+    console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
+
+    // Enrich audio attachments with transcripts (STT)
+    if (this.sttService && agentMessage.attachments?.length) {
+      try {
+        await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
+        if (!agentMessage.text) {
+          const transcripts = agentMessage.attachments
+            .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
+            .map((a) => a.transcript!.text);
+          if (transcripts.length > 0) {
+            agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
+          } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
+            agentMessage.text = "Voice message attached, but automatic transcription failed.";
+          }
+        }
+      } catch (err) {
+        console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
+      }
+    }
+
+    // Memory: pre-turn injection (Full mode only)
+    const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
+    const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
+    let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
+    try {
+      memoryPrepared = await prepareMemoryForTurn(agentThreadId, agentMessage, agent, memoryRoot, this.config.memory);
+      agentMessage = memoryPrepared.message;
+    } catch (err) {
+      console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
+    }
+
+    const stopTyping = startTypingLoop(thread);
+
+    try {
+      let turnUsedTools = false;
+      if (agent.promptStream) {
+        const ac = new AbortController();
+        abortControllers.set(agentThreadId, ac);
+        try {
+          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+          turnUsedTools = streamResult.usedTools;
+        } finally {
+          abortControllers.delete(agentThreadId);
+        }
+      } else {
+        const reply = await agent.prompt(agentThreadId, agentMessage);
+        turnUsedTools = true;
+        if (reply.text) {
+          await this.postWithFallback(thread, reply.text);
+        }
+      }
+
+      // Memory: post-turn finalize + pressure check
+      try {
+        if (memoryPrepared) memoryPrepared.turnUsedTools = turnUsedTools;
+        const pressure = await finalizeMemoryForTurn(
+          agentThreadId,
+          memoryPrepared ?? { message: agentMessage, beforeDigest: null, injected: false },
+          agent, memoryRoot, this.config.memory,
+        );
+        const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
+        if (effectivePressure !== "none") {
+          try {
+            await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
+          } catch (err) {
+            console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
+          }
+        }
+      } catch (err) {
+        console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const safeMsg = errMsg.split('\n')[0].slice(0, 200);
+      console.error(`[roundhouse] agent error:`, err);
+      try {
+        await thread.post(`⚠️ Error: ${safeMsg}`);
+      } catch {}
+    } finally {
+      stopTyping();
+      releaseLock!();
+      if (threadLocks.get(agentThreadId) === lockPromise) {
+        threadLocks.delete(agentThreadId);
+      }
+    }
   }
 
   /**
