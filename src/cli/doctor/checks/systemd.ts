@@ -23,7 +23,7 @@ export const systemdChecks: DoctorCheck[] = [
         id: "systemd-unit", category: "systemd", name: "Service unit",
         status: result ? "pass" : "warn",
         summary: result ? "installed" : "not installed",
-        details: !result ? ["Run: roundhouse install"] : undefined,
+        details: !result ? ["Run: roundhouse setup --telegram"] : undefined,
       };
     },
   },
