@@ -8,6 +8,7 @@
 
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { SERVICE_NAME } from "../config";
 
@@ -46,7 +47,6 @@ class LaunchdManager implements ServiceManager {
   }
 
   private isInstalled(): boolean {
-    const { existsSync } = require("node:fs");
     return existsSync(this.plistPath);
   }
 
@@ -61,7 +61,7 @@ class LaunchdManager implements ServiceManager {
 
   async start(): Promise<{ started: boolean; message: string }> {
     if (!this.isInstalled()) {
-      return { started: false, message: "No LaunchAgent installed. Run: roundhouse setup --telegram" };
+      return { started: false, message: "no-service" };
     }
     if (this.isRunning()) {
       return { started: false, message: "Roundhouse is already running (LaunchAgent)." };
