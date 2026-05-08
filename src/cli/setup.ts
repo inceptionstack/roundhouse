@@ -22,7 +22,7 @@ import {
   ENV_FILE_PATH as ENV_PATH,
   fileExists,
 } from "../config";
-import { envQuote, parseEnvFile } from "./env-file";
+import { envQuote, parseEnvFile, unquoteEnvValue } from "./env-file";
 import {
   whichSync,
   systemctl,
@@ -132,10 +132,12 @@ function resolveAgentForSetup(opts: SetupOptions): AgentDefinition {
       // Ensure packages array exists
       if (!Array.isArray(settings.packages)) settings.packages = [];
 
-      // Add roundhouse itself (ships extensions via pi.extensions in package.json)
-      const selfPkg = "npm:@inceptionstack/roundhouse";
       const pkgs = settings.packages as string[];
-      if (!pkgs.includes(selfPkg)) pkgs.push(selfPkg);
+
+      // Remove stale self-reference (roundhouse no longer ships pi extensions)
+      const selfPkg = "npm:@inceptionstack/roundhouse";
+      const selfIdx = pkgs.indexOf(selfPkg);
+      if (selfIdx !== -1) pkgs.splice(selfIdx, 1);
 
       // Add code review + branch protection extensions
       const coreExtensions = [
@@ -1255,7 +1257,7 @@ export async function cmdPair(argv: string[]): Promise<void> {
     try {
       const entries = parseEnvFile(await readFile(ENV_PATH, "utf8"));
       const raw = entries.get("TELEGRAM_BOT_TOKEN");
-      if (raw) token = raw.replace(/^["']|["']$/g, "");
+      if (raw) token = unquoteEnvValue(raw);
     } catch {}
   }
 

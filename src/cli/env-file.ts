@@ -38,3 +38,28 @@ export function envQuote(value: string): string {
     .replace(/\n/g, "\\n");
   return `"${escaped}"`;
 }
+
+/**
+ * Reverse of envQuote: strip surrounding quotes and unescape interior sequences.
+ */
+export function unquoteEnvValue(raw: string): string {
+  // Strip surrounding double quotes (only if matched pair)
+  let value = raw;
+  if (value.startsWith('"') && value.endsWith('"')) {
+    value = value.slice(1, -1);
+  } else if (value.startsWith("'") && value.endsWith("'")) {
+    value = value.slice(1, -1);
+  }
+  // Single-pass unescape to handle \\ correctly (avoids double-replacement)
+  value = value.replace(/\\([\\"$`n])/g, (_match, ch) => {
+    switch (ch) {
+      case "n": return "\n";
+      case "\\": return "\\";
+      case '"': return '"';
+      case "$": return "$";
+      case "`": return "`";
+      default: return ch;
+    }
+  });
+  return value;
+}

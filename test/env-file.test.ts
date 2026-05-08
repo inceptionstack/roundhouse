@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseEnvFile, serializeEnvFile, envQuote } from "../src/cli/env-file";
+import { parseEnvFile, serializeEnvFile, envQuote, unquoteEnvValue } from "../src/cli/env-file";
 
 describe("parseEnvFile", () => {
   it("parses key=value lines", () => {
@@ -65,4 +65,68 @@ describe("envQuote", () => {
     const result = envQuote('a\\b"$`\n');
     expect(result).toBe('"a\\\\b\\"\\$\\`\\n"');
   });
+});
+
+describe("unquoteEnvValue", () => {
+  it("strips matched double quotes", () => {
+    expect(unquoteEnvValue('"hello"')).toBe("hello");
+  });
+
+  it("strips matched single quotes", () => {
+    expect(unquoteEnvValue("'hello'")).toBe("hello");
+  });
+
+  it("does not strip mismatched quotes", () => {
+    expect(unquoteEnvValue('"hello\'')).toBe('"hello\'');
+  });
+
+  it("returns unquoted value as-is", () => {
+    expect(unquoteEnvValue("plain")).toBe("plain");
+  });
+
+  it("unescapes backslashes", () => {
+    expect(unquoteEnvValue('"a\\\\b"')).toBe("a\\b");
+  });
+
+  it("unescapes double quotes", () => {
+    expect(unquoteEnvValue('"say\\"hi\\""')).toBe('say"hi"');
+  });
+
+  it("unescapes dollar signs", () => {
+    expect(unquoteEnvValue('"pa\\$\\$word"')).toBe("pa$$word");
+  });
+
+  it("unescapes backticks", () => {
+    expect(unquoteEnvValue('"\\`cmd\\`"')).toBe("`cmd`");
+  });
+
+  it("unescapes newlines", () => {
+    expect(unquoteEnvValue('"line1\\nline2"')).toBe("line1\nline2");
+  });
+
+  it("handles literal backslash-n (not a newline)", () => {
+    // envQuote("hello\\nworld") -> "hello\\\\nworld"
+    expect(unquoteEnvValue('"hello\\\\nworld"')).toBe("hello\\nworld");
+  });
+});
+
+describe("envQuote / unquoteEnvValue roundtrip", () => {
+  const cases = [
+    "simple_token_123",
+    "pa$$word",
+    'has"quotes"inside',
+    "back\\slash",
+    "hello\nworld",
+    "hello\\nworld",
+    'combo: $"`\n',
+    "",
+    "no_special_chars",
+    "trailing\\",
+  ];
+
+  for (const original of cases) {
+    it(`roundtrips: ${JSON.stringify(original)}`, () => {
+      expect(unquoteEnvValue(envQuote(original))).toBe(original);
+    });
+  }
 });
