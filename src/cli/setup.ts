@@ -1158,7 +1158,6 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       await stepInstallSystemd(opts);
 
       // Verify service is active and set serviceInstalled based on reality
-      // Verify service is active
       if (platform() === "darwin") {
         try {
           const { isLaunchAgentRunning } = await import("./launchd.ts");
