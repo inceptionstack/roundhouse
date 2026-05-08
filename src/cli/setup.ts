@@ -1156,15 +1156,15 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
     } else {
       await stepInstallSystemd(opts);
-      logger.ok("Service installed and started");
-      serviceInstalled = true;
 
+      // Verify service is active and set serviceInstalled based on reality
       // Verify service is active
       if (platform() === "darwin") {
         try {
           const { isLaunchAgentRunning } = await import("./launchd.ts");
           if (isLaunchAgentRunning()) {
             logger.ok("LaunchAgent is running");
+            serviceInstalled = true;
           } else {
             logger.warn("service.state", "LaunchAgent loaded but not yet running");
           }
@@ -1177,6 +1177,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
           const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
           if (state === "active") {
             logger.ok("Service is active");
+            serviceInstalled = true;
           } else {
             logger.warn("service.state", `Service state: ${state}`);
           }
