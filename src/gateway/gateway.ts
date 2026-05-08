@@ -21,10 +21,10 @@ import { maxPressure } from "./memory/policy";
 import type { PressureLevel, CompactResult } from "./memory/types";
 import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
 import { createProgressMessage } from "./telegram-progress";
-import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
-import { saveAttachments as _saveAttachments, type AttachmentResult } from "./gateway/attachments";
-import { handleStreaming as _handleStream, type StreamResult } from "./gateway/streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./gateway/commands";
+import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./helpers";
+import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
+import { handleStreaming as _handleStream, type StreamResult } from "./streaming";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
