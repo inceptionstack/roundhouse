@@ -1149,6 +1149,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
     await stepRegisterCommands(opts);
     logger.ok("Bot commands registered");
 
+    let serviceInstalled = false;
     // Step 9: Install and start service
     logger.step(9, 9, "service.install", "Installing and starting service");
     if (!opts.systemd && platform() !== "darwin") {
@@ -1156,6 +1157,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
     } else {
       await stepInstallSystemd(opts);
       logger.ok("Service installed and started");
+      serviceInstalled = true;
 
       // Verify service is active
       if (platform() === "darwin") {
@@ -1182,7 +1184,6 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
           logger.warn("service.state", "Could not verify service state");
         }
       }
-      }
     }
 
     // Success
@@ -1190,7 +1191,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       botUsername: botInfo.username,
       pairingLink,
       pairingStatus: "pending",
-      serviceInstalled: opts.systemd || platform() === "darwin",
+      serviceInstalled,
     });
     log("");
     log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
