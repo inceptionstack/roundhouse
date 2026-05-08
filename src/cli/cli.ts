@@ -83,6 +83,12 @@ async function cmdStart() {
 }
 
 async function cmdRun() {
+  // Guard: check config exists before launching gateway
+  if (!(await fileExists(CONFIG_PATH))) {
+    console.error("No config found. Run 'roundhouse setup --telegram' first.");
+    process.exit(1);
+  }
+
   process.env.ROUNDHOUSE_CONFIG = CONFIG_PATH;
 
   // Load .env file so secrets (TELEGRAM_BOT_TOKEN, etc.) are available

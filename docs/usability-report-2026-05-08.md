@@ -23,16 +23,17 @@
 
 ---
 
-### 4. ⚠️ Pairing timeout during setup
+### 4. ⚠️ Pairing UX during setup
 **Symptom:** "Pairing timed out. Run 'roundhouse pair' later."  
 **Root cause:** User must switch to Telegram, find the bot, send `/start <code>` within timeout window  
 **Impact:** Setup "succeeds" but pairing doesn't — user must run a second command later  
+**Note:** Timeout is actually 300s (5 min), not 60s as originally reported. The real issue is that users don't notice the link or don't know what to do with it.
 
 **Planned fixes:**
-- [ ] Increase pairing timeout (currently 60s → 180s)
 - [ ] Auto-open the Telegram deep link on macOS (`open <url>`)
 - [ ] After timeout: offer to retry immediately instead of requiring `roundhouse pair`
 - [ ] Show clearer instructions: "Open Telegram NOW and tap the link above"
+- [ ] Add a visual countdown or "waiting for pairing..." spinner
 
 ---
 
@@ -63,14 +64,16 @@
 
 ### 7. 💡 `roundhouse setup` output polish
 **Observations:**
-- Step numbers skip (①②③③④⑥b⑥⑥⑦⑧⑨⑩) — confusing
+- Step circled-number labels don't match execution order (e.g. ③ used for both username and stop-gateway, ⑥ used for both pairing and secrets, ⑥b for bundle)
 - "Not Linux — skipping service check" is internal jargon
 - Extensions installed during setup trigger npm output noise
+- No visual feedback during 5-min pairing wait
 
 **Planned fixes:**
-- [ ] Renumber steps sequentially (no skips, no 6b)
+- [ ] Renumber steps sequentially to match actual execution order (10 steps, ①-⑩)
 - [ ] Replace platform jargon with user-friendly messaging
 - [ ] Capture npm stdout/stderr during extension install; show only on failure
+- [ ] Add spinner/countdown during pairing wait
 - [ ] Add a final "What to do next" block
 
 ---
@@ -122,6 +125,17 @@
 
 ---
 
+### 12. 💡 `roundhouse start` without prior setup gives confusing error
+**Symptom:** `process.exit(1)` with "failed to load config from ROUNDHOUSE_CONFIG=..."  
+**Root cause:** No guard in `cmdStart`/`cmdRun` checking if config exists before launching  
+**Impact:** New user who skips setup and runs `start` sees a crash, not a helpful hint  
+
+**Planned fixes:**
+- [ ] Check if config file exists before spawning gateway
+- [ ] If missing: print "Run 'roundhouse setup --telegram' first" and exit cleanly
+
+---
+
 ## Priority Matrix
 
 | # | Friction | Severity | Status | Effort |
@@ -129,29 +143,28 @@
 | 1 | systemd on macOS | High | ✅ Done (PR #13) | — |
 | 2 | .env not loaded | High | ✅ Done (PR #13) | — |
 | 3 | Extension conflict | Medium | ✅ Done (PR #16) | — |
-| 4 | Pairing timeout | Medium | Open | Low |
+| 4 | Pairing UX (not timeout—already 5min) | Medium | Open | Low |
 | 5 | npm deprecation spam | Medium | Open | Medium |
 | 6 | Whisper auto-install | Low | Open | Low |
-| 7 | Setup output polish | Low | Open | Low |
+| 7 | Setup step numbering | Low | Open | Low |
 | 8 | Getting started flow | Medium | Open | Medium |
 | 9 | TAVILY_API_KEY guidance | Low | Open | Low |
 | 10 | Agent detection | Medium | Open | Medium |
 | 11 | Unnecessary reinstalls | Low | Open | Low |
+| 12 | start without setup crashes | Medium | Open | Low |
 
 ---
 
 ## Recommended Next Steps (updated)
 
-### Immediate (v0.4.4 release)
-1. Publish with fixes from PRs #13 + #16
+### v0.4.5 — Quick wins
+1. **Pairing UX** (item 4): Auto-open Telegram link on macOS, add spinner during wait
+2. **TAVILY_API_KEY** (item 9): Add placeholder to .env template, hint in postflight
+3. **Start guard** (item 12): Check config exists before spawning, hint to run setup
+4. **Step numbering** (item 7): Renumber to match execution order
+5. **Skip reinstall** (item 11): Check binary exists before npm install
 
-### Quick wins (v0.4.5)
-2. **Pairing UX** (item 4): increase timeout to 180s, auto-open link on macOS
-3. **TAVILY_API_KEY** (item 9): add placeholder to .env, hint in postflight
-4. **Skip reinstall** (item 11): check binary exists before npm install
-5. **Setup step numbers** (item 7): renumber sequentially
-
-### Medium-term (v0.5.0)
+### v0.5.0 — Onboarding
 6. **Agent detection** (item 10): `detectEnvironment()` in setup preflight
 7. **Simplify onboarding** (item 8): setup = single entry point, offer to auto-start
 8. **Suppress npm noise** (items 5, 11): pipe stderr, show only on failure

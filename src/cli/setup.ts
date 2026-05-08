@@ -443,7 +443,7 @@ async function stepValidateToken(opts: SetupOptions): Promise<BotInfo> {
 }
 
 async function stepStopGateway(): Promise<void> {
-  step("③", "Checking for running gateway...");
+  step("④", "Checking for running gateway...");
 
   if (platform() !== "linux") {
     ok("Not Linux — skipping service check");
@@ -464,7 +464,7 @@ async function stepStopGateway(): Promise<void> {
 }
 
 async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): Promise<void> {
-  step("④", "Installing packages...");
+  step("⑤", "Installing packages...");
 
   // Roundhouse
   const rhInstalled = whichSync("roundhouse");
@@ -596,12 +596,12 @@ async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): 
 
 async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<void> {
   if (!opts.psst) {
-    step("⑥", "Storing secrets...");
+    step("⑧", "Storing secrets...");
     ok("Skipped (default — use --with-psst to enable)");
     return;
   }
 
-  step("⑥", "Storing secrets in psst...");
+  step("⑧", "Storing secrets in psst...");
 
   const secrets: [string, string][] = [
     ["TELEGRAM_BOT_TOKEN", opts.botToken],
@@ -640,7 +640,7 @@ async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<v
 // ── Bundle install ──────────────────────────────────────────────────
 
 async function stepInstallBundle(opts: SetupOptions): Promise<void> {
-  step("⑥b", "Installing bundle (skills + CLI tools)...");
+  step("⑥", "Installing bundle (skills + CLI tools)...");
 
   const bundleLog: ProvisionLog = {
     info: (msg) => log(`   ${msg}`),
@@ -657,7 +657,7 @@ async function stepConfigure(
   pairResult: PairResult | null,
   agent: AgentDefinition,
 ): Promise<void> {
-  step("⑦", "Configuring...");
+  step("⑨", "Configuring...");
 
   await mkdir(ROUNDHOUSE_DIR, { recursive: true });
 
@@ -766,7 +766,7 @@ async function stepConfigure(
 }
 
 async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResult | null> {
-  step("⑤", "Pairing with Telegram...");
+  step("⑦", "Pairing with Telegram...");
 
   // Skip if chat IDs already known
   if (opts.notifyChatIds.length > 0) {
@@ -822,13 +822,13 @@ async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResul
 }
 
 async function stepRegisterCommands(opts: SetupOptions): Promise<void> {
-  step("⑧", "Registering bot commands...");
+  step("⑩", "Registering bot commands...");
   await registerBotCommands(opts.botToken);
   ok(`${BOT_COMMANDS.length} commands registered with Telegram`);
 }
 
 async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
-  step("⑨", "Installing systemd service...");
+  step("⑩b", "Installing systemd service...");
 
   if (!opts.systemd) {
     ok("Skipped (--no-systemd)");
@@ -873,7 +873,7 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
 }
 
 async function stepPostflight(): Promise<void> {
-  step("⑩", "Postflight checks...");
+  step("⑪", "Postflight checks...");
 
   if (platform() === "linux") {
     if (isServiceActive()) {
@@ -893,6 +893,11 @@ async function stepPostflight(): Promise<void> {
   // Optional checks
   if (!whichSync("ffmpeg")) {
     warn("ffmpeg not found (install for voice support)");
+  }
+
+  if (!process.env.TAVILY_API_KEY) {
+    warn("TAVILY_API_KEY not set — web search extension won't work");
+    log("    Get a free key at https://tavily.com and add to ~/.roundhouse/.env");
   }
 }
 
@@ -951,11 +956,11 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     // Step 5: Install packages
     await stepInstallPackages(opts, agent);
 
-    // Step 5b: Install bundle (skills + CLI tools)
+    // Step 6: Install bundle (skills + CLI tools)
     await stepInstallBundle(opts);
 
-    // Step 6: Pair via Telegram
-    step("⑥", "Pairing with Telegram...");
+    // Step 7: Pair via Telegram
+    step("⑦", "Pairing with Telegram...");
     const nonce = createPairingNonce();
     const pairingLink = createPairingLink(botInfo.username, nonce);
     log(`\n  Open this link to pair:\n`);
@@ -963,6 +968,17 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     printQr(pairingLink, opts.qr);
     log(`  Or send /start ${nonce} to @${botInfo.username}`);
     log("");
+
+    // Auto-open the pairing link on macOS
+    if (process.platform === "darwin") {
+      try {
+        const { execFileSync: efs } = await import("node:child_process");
+        efs("open", [pairingLink], { stdio: "ignore" });
+        log("  (Opened in Telegram — switch to the app to complete pairing)");
+      } catch { /* ignore if open fails */ }
+    }
+
+    log("  Waiting for you to tap the link in Telegram...");
 
     const pairResult = await pairTelegram(
       opts.botToken, botInfo.username, opts.users,
@@ -977,17 +993,17 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
       }
     }
 
-    // Step 7: Store secrets
+    // Step 8: Store secrets
     await stepStoreSecrets(opts, botInfo);
 
-    // Step 8: Write config
+    // Step 9: Write config
     await stepConfigure(opts, botInfo, pairResult, agent);
 
-    // Step 9: Register commands + install service
+    // Step 10: Register commands + install service
     await stepRegisterCommands(opts);
     await stepInstallSystemd(opts);
 
-    // Step 10: Verify
+    // Step 11: Verify
     await stepPostflight();
 
     // Done!
