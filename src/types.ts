@@ -43,7 +43,8 @@ export type AgentStreamEvent =
   | { type: "draining" }
   | { type: "drain_complete" }
   | { type: "agent_end" }
-  | { type: "custom_message"; customType: string; content: string };
+  | { type: "custom_message"; customType: string; content: string }
+  | { type: "model_error"; message: string };
 
 // ── AdapterInfo ──────────────────────────────────────
 
