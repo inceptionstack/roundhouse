@@ -236,6 +236,7 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
       // Use a channel pattern for yielding events
       const events: AgentStreamEvent[] = [];
       let done = false;
+      let promptError: Error | null = null;
       let resolveWait: (() => void) | null = null;
 
       function push(ev: AgentStreamEvent) {
@@ -296,8 +297,10 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
       proc.client.on("session/update", onSessionUpdate);
 
       // Fire the prompt (don't await — events stream in)
-      proc.client.call("session/prompt", { sessionId: session.sessionId, text }).catch(() => {
+      proc.client.call("session/prompt", { sessionId: session.sessionId, text }).catch((err) => {
+        push({ type: "agent_end" });
         done = true;
+        promptError = err;
         resolveWait?.();
       });
 
@@ -310,6 +313,7 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
             resolveWait = null;
           }
         }
+        if (promptError) throw promptError;
       } finally {
         proc.client.off("text_chunk", onTextChunk);
         proc.client.off("tool_call", onToolCall);
@@ -363,13 +367,18 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
       let done = false;
       let error: Error | null = null;
       let resolveWait: (() => void) | null = null;
+      let innerIterator: AsyncIterator<AgentStreamEvent> | null = null;
 
       // Start the stream inside the queue so it serializes with prompt()
       enqueue(threadId, async () => {
         try {
-          for await (const ev of doPromptStream(threadId, message)) {
-            events.push(ev);
+          const gen = doPromptStream(threadId, message);
+          innerIterator = gen[Symbol.asyncIterator]();
+          let result = await innerIterator.next();
+          while (!result.done && !done) {
+            events.push(result.value);
             resolveWait?.();
+            result = await innerIterator.next();
           }
         } catch (e: any) {
           error = e;
@@ -393,6 +402,7 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
             },
             async return() {
               done = true;
+              innerIterator?.return?.();
               return { done: true, value: undefined };
             },
             async throw(e: any) {

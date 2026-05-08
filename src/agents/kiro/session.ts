@@ -5,7 +5,7 @@
  * and persists session IDs for potential resumption.
  */
 
-import { resolve, dirname } from "node:path";
+import { resolve } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 

@@ -41,6 +41,8 @@ export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
   // Handle spawn failures (e.g. ENOENT if kiro-cli not on PATH)
   proc.on("error", (err) => {
     console.error(`[kiro] failed to spawn kiro-cli: ${err.message}`);
+    // Emit exit so AcpClient rejects pending requests immediately
+    proc.emit("exit", 1);
   });
 
   // Buffer stderr for diagnostics (capped)
