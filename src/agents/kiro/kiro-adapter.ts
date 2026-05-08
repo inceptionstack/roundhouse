@@ -12,8 +12,8 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
-import { BaseAdapter, type AdapterInfo } from "../base-adapter.js";
+import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo } from "../../types.js";
+import { BaseAdapter } from "../base-adapter.js";
 import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";

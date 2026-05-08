@@ -45,6 +45,47 @@ export type AgentStreamEvent =
   | { type: "agent_end" }
   | { type: "custom_message"; customType: string; content: string };
 
+// ── AdapterInfo ──────────────────────────────────────
+
+/**
+ * Information returned by getInfo(). All fields optional.
+ * Consumers (gateway /status, memory lifecycle) read these keys.
+ */
+export interface AdapterInfo {
+  /** Agent SDK/CLI version string */
+  version?: string;
+  /** Currently active model identifier */
+  model?: string;
+  /** Working directory the agent operates in */
+  cwd?: string;
+  /** Number of active sessions managed by this adapter */
+  activeSessions?: number;
+
+  // ── Context usage (drives memory pressure detection) ─
+
+  /** Current token count in context */
+  contextTokens?: number | null;
+  /** Maximum context window size in tokens */
+  contextWindow?: number | null;
+  /** Percentage of context used (0-100) */
+  contextPercent?: number | null;
+
+  // ── Memory system integration ──────────────────────
+
+  /** Whether agent has its own memory extension (determines roundhouse memory mode) */
+  hasMemoryExtension?: boolean;
+  /** Names of memory-related tools the agent exposes */
+  memoryTools?: string[];
+
+  // ── Extensions / capabilities ──────────────────────
+
+  /** List of loaded extension paths/names */
+  extensions?: string[];
+
+  /** Additional adapter-specific fields */
+  [key: string]: unknown;
+}
+
 /**
  * AgentAdapter interface — the contract between gateway and adapters.
  *
@@ -84,7 +125,7 @@ export interface AgentAdapter {
   abort?(threadId: string): Promise<void>;
 
   /** Return runtime info about the agent (model, version, etc.). */
-  getInfo?(threadId?: string): Record<string, unknown>;
+  getInfo?(threadId?: string): AdapterInfo;
 }
 
 export interface AgentResponse {

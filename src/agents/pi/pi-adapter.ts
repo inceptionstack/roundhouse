@@ -1,9 +1,12 @@
 /**
- * agents/pi.ts — Pi agent adapter
+ * agents/pi/pi-adapter.ts — Pi agent adapter
  *
  * Wraps pi's SDK (createAgentSession) as an AgentAdapter.
  * One persistent session per thread, stored at:
  *   ~/.roundhouse/sessions/<thread_id>/<session>.jsonl
+ *
+ * TODO: Migrate from factory+object-literal to class extending BaseAdapter
+ *       (separate PR — large file, needs careful testing)
  */
 
 import { mkdir } from "node:fs/promises";
