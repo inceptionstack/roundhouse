@@ -11,6 +11,47 @@
 
 import type { AgentAdapter, AgentMessage, AgentResponse, AgentStreamEvent } from "../types.js";
 
+// ── AdapterInfo: typed shape for getInfo() ───────────
+
+/**
+ * Information returned by getInfo(). All fields optional.
+ * Consumers (gateway /status, memory lifecycle) read these keys.
+ */
+export interface AdapterInfo {
+  /** Agent SDK/CLI version string */
+  version?: string;
+  /** Currently active model identifier */
+  model?: string;
+  /** Working directory the agent operates in */
+  cwd?: string;
+  /** Number of active sessions managed by this adapter */
+  activeSessions?: number;
+
+  // ── Context usage (drives memory pressure detection) ─
+
+  /** Current token count in context */
+  contextTokens?: number | null;
+  /** Maximum context window size in tokens */
+  contextWindow?: number | null;
+  /** Percentage of context used (0-100) */
+  contextPercent?: number | null;
+
+  // ── Memory system integration ──────────────────────
+
+  /** Whether agent has its own memory extension (determines roundhouse memory mode) */
+  hasMemoryExtension?: boolean;
+  /** Names of memory-related tools the agent exposes */
+  memoryTools?: string[];
+
+  // ── Extensions / capabilities ──────────────────────
+
+  /** List of loaded extension paths/names */
+  extensions?: string[];
+
+  /** Additional adapter-specific fields */
+  [key: string]: unknown;
+}
+
 /**
  * Abstract base class for all agent adapters.
  *
@@ -85,7 +126,7 @@ export abstract class BaseAdapter implements AgentAdapter {
    * Return runtime info about the agent (model, version, context usage, etc.).
    * Default: returns empty object.
    */
-  getInfo(_threadId?: string): Record<string, unknown> {
+  getInfo(_threadId?: string): AdapterInfo {
     return {};
   }
 }

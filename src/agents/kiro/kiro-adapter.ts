@@ -13,7 +13,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
-import { BaseAdapter } from "../base-adapter.js";
+import { BaseAdapter, type AdapterInfo } from "../base-adapter.js";
 import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
@@ -161,7 +161,7 @@ class KiroAdapter extends BaseAdapter {
     return { tokensBefore: before, tokensAfter: after };
   }
 
-  getInfo(threadId?: string): Record<string, unknown> {
+  getInfo(threadId?: string): AdapterInfo {
     const session = threadId ? this.store.get(threadId) : undefined;
     return {
       version: this.kiroVersion,
