@@ -9,1054 +9,40 @@
  * and starts the systemd service.
  */
 
-import { homedir, platform } from "node:os";
-import { resolve, dirname } from "node:path";
-import { readFile, writeFile, mkdir, rename, unlink, realpath, stat } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { BOT_COMMANDS } from "../commands";
-import { atomicWriteJson, atomicWriteText, execSafe, execOrFail } from "./setup/helpers";
-import { type SetupOptions, type StepStatus, PI_SETTINGS_PATH, DEFAULT_PROVIDER, DEFAULT_MODEL, EXTENSION_NAME_RE } from "./setup/types";
+import { atomicWriteJson, execSafe } from "./setup/helpers";
+import { type SetupOptions, EXTENSION_NAME_RE } from "./setup/types";
 import { parseSetupArgs } from "./setup/args";
 export { parseSetupArgs } from "./setup/args";
-import { provisionBundle, type ProvisionLog } from "../bundle";
 import {
-  ROUNDHOUSE_DIR,
   CONFIG_PATH,
   ENV_FILE_PATH as ENV_PATH,
-  fileExists,
 } from "../config";
-import { envQuote, parseEnvFile, unquoteEnvValue } from "./env-file";
-import {
-  whichSync,
-  systemctl,
-  isServiceActive,
-  systemctlShow,
-  resolveExecStart,
-  generateUnit,
-  writeServiceUnit,
-  hasSudoAccess,
-} from "./systemd";
+import { parseEnvFile, unquoteEnvValue } from "./env-file";
 import {
   getAgentDefinition,
   listAvailableAgentTypes,
-  type AgentDefinition,
-  type AgentSetupContext,
 } from "../agents/registry";
 import {
   validateBotToken,
-  checkWebhook,
-  registerBotCommands,
   pairTelegram,
-  sendMessage,
-  type BotInfo,
-  type PairResult,
 } from "./setup-telegram";
-import { promptText, promptMasked } from "./setup-prompts";
-import { createTextLogger, createJsonLogger, type SetupLogger, type SetupDiagnostics, printDiagnosticError } from "./setup-logger";
-import { printQr } from "./qr";
 import {
-  createPairingNonce,
-  createPairingLink,
-  readPendingPairing,
-  writePendingPairing,
-  type PendingPairing,
-} from "../pairing";
-import { detectEnvironment, formatDetectionResults } from "./detect";
-
-/**
- * Resolve agent definition and wire up setup-specific functions.
- * Pi: configure writes ~/.pi/agent/settings.json, installExtension calls pi install.
- */
-function resolveAgentForSetup(opts: SetupOptions): AgentDefinition {
-  const agent = { ...getAgentDefinition(opts.agent) };
-
-  if (agent.type === "pi") {
-    agent.configure = async (ctx: AgentSetupContext) => {
-      // Read existing settings if present
-      let existing: Record<string, unknown> = {};
-      try {
-        existing = JSON.parse(await readFile(PI_SETTINGS_PATH, "utf8"));
-      } catch {}
-
-      const settings: Record<string, unknown> = { ...existing };
-
-      if (ctx.force) {
-        settings.defaultProvider = ctx.provider;
-        settings.defaultModel = ctx.model;
-      } else {
-        if (existing.defaultProvider && existing.defaultProvider !== ctx.provider) {
-          warn(`Pi provider already set to '${existing.defaultProvider}' (keeping, use --force to override)`);
-        } else {
-          settings.defaultProvider = ctx.provider;
-        }
-        if (existing.defaultModel && existing.defaultModel !== ctx.model) {
-          warn(`Pi model already set to '${existing.defaultModel}' (keeping, use --force to override)`);
-        } else {
-          settings.defaultModel = ctx.model;
-        }
-      }
-
-      // Ensure packages array exists
-      if (!Array.isArray(settings.packages)) settings.packages = [];
-
-      const pkgs = settings.packages as string[];
-
-      // Remove stale self-reference (roundhouse no longer ships pi extensions)
-      const selfPkg = "npm:@inceptionstack/roundhouse";
-      const selfIdx = pkgs.indexOf(selfPkg);
-      if (selfIdx !== -1) pkgs.splice(selfIdx, 1);
-
-      // Add code review + branch protection extensions
-      const coreExtensions = [
-        "npm:@inceptionstack/pi-hard-no",
-        "npm:@inceptionstack/pi-branch-enforcer",
-      ];
-      for (const ext of coreExtensions) {
-        if (!pkgs.includes(ext)) pkgs.push(ext);
-      }
-
-      // Add pi-psst if using psst
-      if (ctx.psst) {
-        const psstPkg = "npm:@miclivs/pi-psst";
-        if (!pkgs.includes(psstPkg)) pkgs.push(psstPkg);
-      }
-
-      await mkdir(dirname(PI_SETTINGS_PATH), { recursive: true });
-      await atomicWriteJson(PI_SETTINGS_PATH, settings);
-      ok(`~/.pi/agent/settings.json (${settings.defaultProvider}, ${settings.defaultModel})`);
-    };
-
-    agent.installExtension = async (ext: string) => {
-      execOrFail("pi", ["install", `npm:${ext}`], `extension ${ext}`);
-    };
-  }
-
-  return agent;
-}
-
-// ── Helpers ──────────────────────────────────────────
-
-let log = (msg: string) => { console.log(msg); };
-let step = (n: string, label: string) => { log(`\n${n} ${label}`); };
-let ok = (msg: string) => { log(`   ✓ ${msg}`); };
-let warn = (msg: string) => { log(`   ⚠ ${msg}`); };
-let fail = (msg: string) => { log(`   ✗ ${msg}`); };
-
-// ── Steps ────────────────────────────────────────────
-
-async function stepPreflight(opts: SetupOptions, agent: AgentDefinition): Promise<void> {
-  step("①", "Preflight checks...");
-
-  // Node version
-  const nodeVer = process.version;
-  const major = parseInt(nodeVer.replace("v", ""));
-  if (major < 20) {
-    fail(`Node.js ${nodeVer} — version 20+ required`);
-    throw new Error("Node.js 20+ required");
-  }
-  ok(`Node.js ${nodeVer}`);
-
-  // npm
-  if (!whichSync("npm")) {
-    fail("npm not found on PATH");
-    throw new Error("npm required");
-  }
-  ok("npm available");
-
-  // Config dirs writable
-  const dirs = [ROUNDHOUSE_DIR, ...(agent.configDirs ?? [])];
-  for (const dir of dirs) {
-    try {
-      await mkdir(dir, { recursive: true });
-      ok(`Writable: ${dir.replace(homedir(), "~")}`);
-    } catch {
-      fail(`Cannot create: ${dir}`);
-      throw new Error(`Cannot write to ${dir}`);
-    }
-  }
-
-  // Seed .env with commented-out example if it doesn't exist yet
-  if (!(await fileExists(ENV_PATH))) {
-    const seed = [
-      "# Roundhouse environment file",
-      "# Uncomment and set values, or use: roundhouse setup",
-      "#",
-      "# TELEGRAM_BOT_TOKEN=\"your-bot-token\"",
-      "# BOT_USERNAME=\"your_bot_username\"",
-      "# ALLOWED_USERS=\"your_telegram_username\"",
-      "# AWS_PROFILE=\"default\"",
-      "# AWS_REGION=\"us-east-1\"",
-      "",
-    ].join("\n");
-    await writeFile(ENV_PATH, seed, { mode: 0o600 });
-  }
-
-  // Disk space (rough check)
-  try {
-    const dfOut = execSafe("df", ["-BG", "--output=avail", homedir()], { silent: true });
-    const match = dfOut.match(/(\d+)G/);
-    if (match) {
-      const freeGB = parseInt(match[1]);
-      if (freeGB < 1) {
-        fail(`Disk: ${freeGB} GB free (need >= 1 GB)`);
-        throw new Error("Insufficient disk space");
-      }
-      ok(`Disk: ${freeGB} GB free`);
-    }
-  } catch { /* non-fatal, df might not support these flags */ }
-
-  // Provider credentials (warn only)
-  if (opts.provider === "amazon-bedrock") {
-    const hasAws =
-      process.env.AWS_ACCESS_KEY_ID ||
-      process.env.AWS_PROFILE ||
-      await fileExists(resolve(homedir(), ".aws", "credentials")) ||
-      await fileExists(resolve(homedir(), ".aws", "config"));
-
-    // Also check instance metadata (EC2 IAM role)
-    let hasInstanceRole = false;
-    if (!hasAws) {
-      try {
-        const result = execSafe("curl", ["-sf", "--max-time", "2",
-          "http://169.254.169.254/latest/meta-data/iam/security-credentials/"], { silent: true });
-        hasInstanceRole = result.length > 0;
-      } catch {}
-    }
-
-    if (hasAws) {
-      ok("AWS credentials found");
-    } else if (hasInstanceRole) {
-      ok("AWS credentials found (instance IAM role)");
-    } else {
-      warn("AWS credentials not found — configure before first use");
-    }
-  }
-
-  // --cwd validation
-  try {
-    const resolved = await realpath(opts.cwd);
-    const st = await stat(resolved);
-    if (!st.isDirectory()) throw new Error("not a directory");
-    opts.cwd = resolved;
-    ok(`Working directory: ${resolved.replace(homedir(), "~")}`);
-  } catch {
-    fail(`--cwd path invalid: ${opts.cwd}`);
-    throw new Error(`Invalid --cwd: ${opts.cwd}`);
-  }
-}
-
-async function stepValidateToken(opts: SetupOptions): Promise<BotInfo> {
-  step("②", "Validating Telegram bot token...");
-
-  const botInfo = await validateBotToken(opts.botToken);
-  ok(`Bot: @${botInfo.username} (id: ${botInfo.id})`);
-
-  // Check for conflicting webhook
-  const webhook = await checkWebhook(opts.botToken);
-  if (webhook) {
-    warn(`Webhook active: ${webhook}`);
-    warn("Polling won't work while a webhook is set. Remove it or switch to webhook mode.");
-  }
-
-  return botInfo;
-}
-
-async function stepStopGateway(): Promise<void> {
-  step("④", "Checking for running gateway...");
-
-  if (platform() === "darwin") {
-    try {
-      const { isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
-      if (isLaunchAgentRunning()) {
-        log("   Stopping existing LaunchAgent...");
-        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
-        ok("LaunchAgent stopped");
-      } else {
-        ok("No running gateway");
-      }
-    } catch {
-      ok("No running gateway");
-    }
-    return;
-  }
-
-  if (platform() !== "linux") {
-    ok("Skipped (not Linux or macOS)");
-    return;
-  }
-  if (isServiceActive()) {
-    log("   Stopping existing gateway...");
-    try {
-      systemctl("stop");
-      ok("Service stopped");
-    } catch {
-      warn("Could not stop service (may need sudo). Continuing anyway.");
-    }
-  } else {
-    ok("No running gateway");
-  }
-}
-
-async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): Promise<void> {
-  step("⑤", "Installing packages...");
-
-  // Roundhouse
-  const rhInstalled = whichSync("roundhouse");
-  if (rhInstalled && !opts.force) {
-    ok(`@inceptionstack/roundhouse (already installed)`);
-  } else {
-    log("   Installing @inceptionstack/roundhouse...");
-    execOrFail("npm", ["install", "-g", "@inceptionstack/roundhouse"], "roundhouse install");
-    ok("@inceptionstack/roundhouse");
-  }
-
-  // Agent packages (driven by agent definition)
-  if (opts._skipAgentInstall) {
-    ok("Agent already configured — skipping package install");
-  } else {
-    for (const pkg of agent.packages) {
-      const label = pkg.name ?? pkg.packageName;
-      const installed = pkg.binary ? whichSync(pkg.binary) : false;
-      if (installed && !opts.force) {
-        ok(`${label} (already installed)`);
-      } else {
-        log(`   Installing ${label}...`);
-        const args = pkg.install === "global"
-          ? ["install", "-g", pkg.packageName]
-          : ["install", pkg.packageName];
-        execOrFail("npm", args, `${label} install`);
-        ok(label);
-      }
-    }
-  }
-
-  // psst-cli (requires bun runtime)
-  if (opts.psst) {
-    // Install bun if not present (psst-cli shebang is #!/usr/bin/env bun)
-    if (!whichSync("bun")) {
-      log("   Installing bun runtime (required by psst)...");
-      try {
-        execFileSync("bash", ["-c", "curl -fsSL https://bun.sh/install | bash"], {
-          encoding: "utf8", stdio: "pipe", timeout: 120_000,
-          env: { ...process.env, HOME: homedir() },
-        });
-        // bun installs to ~/.bun/bin/bun
-        const bunPath = resolve(homedir(), ".bun", "bin");
-        process.env.PATH = `${bunPath}:${process.env.PATH}`;
-        ok("bun runtime");
-      } catch (err: any) {
-        warn(`bun install failed: ${err.message}`);
-        warn("psst requires bun — install manually: curl -fsSL https://bun.sh/install | bash");
-        opts.psst = false;
-      }
-    } else {
-      ok("bun runtime (already installed)");
-    }
-  }
-
-  // psst-cli
-  if (opts.psst) {
-    const psstInstalled = whichSync("psst");
-    if (psstInstalled && !opts.force) {
-      ok(`psst-cli (already installed)`);
-    } else {
-      log("   Installing psst-cli...");
-      try {
-        execFileSync("npm", ["install", "-g", "psst-cli"], {
-          encoding: "utf8", stdio: "pipe", timeout: 120_000,
-        });
-      } catch {
-        // npm may exit non-zero due to postinstall warnings — check if binary exists
-      }
-      if (whichSync("psst")) {
-        ok("psst-cli");
-      } else {
-        warn("psst-cli install failed");
-        opts.psst = false;
-      }
-    }
-
-    // Initialize psst vault
-    const vaultExists = await fileExists(resolve(homedir(), ".psst", "envs"));
-    if (vaultExists) {
-      ok("psst vault exists");
-    } else {
-      log("   Initializing psst vault...");
-      // On headless servers, no keychain is available — use PSST_PASSWORD
-      const psstEnv = { ...process.env };
-      if (!psstEnv.PSST_PASSWORD) {
-        // Generate a random password and store it for future use
-        const psstPw = randomBytes(32).toString("base64");
-        const pwFile = resolve(ROUNDHOUSE_DIR, ".psst-password");
-        await atomicWriteText(pwFile, psstPw + "\n", 0o600);
-        psstEnv.PSST_PASSWORD = psstPw;
-        // Also set for subsequent psst calls in this process
-        process.env.PSST_PASSWORD = psstPw;
-      }
-      try {
-        execFileSync("psst", ["init"], {
-          encoding: "utf8", stdio: "pipe", timeout: 30_000,
-          env: psstEnv,
-        });
-        ok("psst vault initialized");
-      } catch (err: any) {
-        warn(`psst vault init failed: ${err.stderr?.trim() || err.message}`);
-        // Clean up orphan password file
-        try { await unlink(resolve(ROUNDHOUSE_DIR, ".psst-password")); } catch {}
-        delete process.env.PSST_PASSWORD;
-        opts.psst = false;
-      }
-    }
-
-    // Install agent-specific psst extension (Pi: pi-psst)
-    if (agent.installExtension) {
-      log("   Installing agent psst extension...");
-      try {
-        await agent.installExtension("@miclivs/pi-psst");
-        ok("@miclivs/pi-psst extension");
-      } catch {
-        ok("@miclivs/pi-psst extension (already installed)");
-      }
-    }
-  }
-
-  // User extensions
-  for (const ext of opts.extensions) {
-    if (!agent.installExtension) {
-      fail(`--extension is not supported for agent "${agent.type}"`);
-      throw new Error(`Agent "${agent.type}" does not support extensions`);
-    }
-    log(`   Installing extension: ${ext}...`);
-    await agent.installExtension(ext);
-    ok(ext);
-  }
-}
-
-async function stepStoreSecrets(opts: SetupOptions, botInfo: BotInfo): Promise<void> {
-  if (!opts.psst) {
-    step("⑧", "Storing secrets...");
-    ok("Skipped (default — use --with-psst to enable)");
-    return;
-  }
-
-  step("⑧", "Storing secrets in psst...");
-
-  const secrets: [string, string][] = [
-    ["TELEGRAM_BOT_TOKEN", opts.botToken],
-    ["BOT_USERNAME", botInfo.username],
-    ["ALLOWED_USERS", opts.users.join(",")],
-  ];
-
-  for (const [name, value] of secrets) {
-    try {
-      execFileSync("psst", ["set", name, "--stdin"], {
-        input: value,
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 10_000,
-      });
-      ok(`${name} → psst vault`);
-    } catch {
-      // May already exist with same value
-      // Try overwrite
-      try {
-        execFileSync("psst", ["set", name, "--stdin"], {
-          input: value,
-          encoding: "utf8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 10_000,
-          env: { ...process.env, PSST_FORCE: "1" },
-        });
-        ok(`${name} → psst vault (updated)`);
-      } catch (err: any) {
-        warn(`Failed to store ${name} in psst: ${err.message}`);
-      }
-    }
-  }
-}
-
-// ── Bundle install ──────────────────────────────────────────────────
-
-async function stepInstallBundle(opts: SetupOptions): Promise<void> {
-  step("⑥", "Installing bundle (skills + CLI tools)...");
-
-  const bundleLog: ProvisionLog = {
-    info: (msg) => log(`   ${msg}`),
-    warn: (msg) => warn(msg),
-    ok: (msg) => ok(msg),
-  };
-
-  provisionBundle({ force: opts.force, log: bundleLog });
-}
-
-async function stepConfigure(
-  opts: SetupOptions,
-  botInfo: BotInfo,
-  pairResult: PairResult | null,
-  agent: AgentDefinition,
-): Promise<void> {
-  step("⑨", "Configuring...");
-
-  await mkdir(ROUNDHOUSE_DIR, { recursive: true });
-
-  // Agent-specific config (Pi: ~/.pi/agent/settings.json)
-  if (agent.configure) {
-    await agent.configure({
-      provider: opts.provider,
-      model: opts.model,
-      cwd: opts.cwd,
-      force: opts.force,
-      psst: opts.psst,
-      extensions: opts.extensions,
-    });
-  }
-
-  // ── Gateway config ──
-  let gatewayConfig: Record<string, any> = {};
-  if (!opts.force) {
-    try {
-      gatewayConfig = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-    } catch { /* new install */ }
-  }
-
-  // Merge users
-  const existingUsers: string[] = gatewayConfig.chat?.allowedUsers ?? [];
-  const existingUserIds: number[] = gatewayConfig.chat?.allowedUserIds ?? [];
-  const existingNotifyIds: number[] = (gatewayConfig.chat?.notifyChatIds ?? []).map(Number).filter((n) => !isNaN(n));
-
-  const mergedUsers = [...new Set([...existingUsers, ...opts.users])];
-  const mergedUserIds = [...existingUserIds];
-  const mergedNotifyIds = [...new Set([...existingNotifyIds, ...opts.notifyChatIds])];
-
-  // Add paired user data
-  if (pairResult) {
-    if (!mergedUserIds.includes(pairResult.userId)) {
-      mergedUserIds.push(pairResult.userId);
-    }
-    if (!mergedNotifyIds.includes(pairResult.chatId)) {
-      mergedNotifyIds.push(pairResult.chatId);
-    }
-  }
-
-  gatewayConfig = {
-    ...gatewayConfig,
-    _version: 1, // Config schema version — for future migration support
-    agent: { ...gatewayConfig.agent, ...agent.configDefaults, type: agent.type, cwd: opts.cwd },
-    chat: {
-      ...gatewayConfig.chat,
-      botUsername: botInfo.username,
-      allowedUsers: mergedUsers,
-      allowedUserIds: mergedUserIds,
-      notifyChatIds: mergedNotifyIds,
-      adapters: gatewayConfig.chat?.adapters ?? { telegram: { mode: "polling" } },
-    },
-    ...(opts.voice === false ? { voice: { stt: { enabled: false } } } : {}),
-  };
-
-  await atomicWriteJson(CONFIG_PATH, gatewayConfig);
-  ok(`~/.roundhouse/gateway.config.json`);
-
-  // ── Env file ──
-  // With psst: only non-secret config
-  // Without psst: include secrets
-  const envLines: string[] = [];
-
-  if (!opts.psst) {
-    envLines.push(`TELEGRAM_BOT_TOKEN=${envQuote(opts.botToken)}`);
-    envLines.push(`BOT_USERNAME=${envQuote(botInfo.username)}`);
-    envLines.push(`ALLOWED_USERS=${envQuote(opts.users.join(","))}`);
-  }
-
-  // If psst uses a generated password (headless), include it in env for systemd.
-  // Threat model tradeoff: the vault key is plaintext in a 0600 file, but this is
-  // unavoidable on headless servers with no keychain. The benefit is that individual
-  // secrets are still managed centrally via psst and injected at runtime.
-  if (opts.psst) {
-    const pwFile = resolve(ROUNDHOUSE_DIR, ".psst-password");
-    if (await fileExists(pwFile)) {
-      const pw = (await readFile(pwFile, "utf8")).trim();
-      envLines.push(`PSST_PASSWORD=${envQuote(pw)}`);
-    }
-  }
-
-  if (opts.provider === "amazon-bedrock") {
-    // Preserve existing AWS config
-    let existingEnv = new Map<string, string>();
-    try {
-      existingEnv = parseEnvFile(await readFile(ENV_PATH, "utf8"));
-    } catch {}
-    const getExisting = (key: string) => existingEnv.get(key);
-
-    if (!envLines.some((l) => l.startsWith("AWS_PROFILE="))) {
-      envLines.push(`AWS_PROFILE=${getExisting("AWS_PROFILE") ?? '"default"'}`);
-    }
-    if (!envLines.some((l) => l.startsWith("AWS_DEFAULT_REGION="))) {
-      envLines.push(`AWS_DEFAULT_REGION=${getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"'}`);
-    }
-    // Pi agent requires AWS_REGION (not just AWS_DEFAULT_REGION) to discover Bedrock models
-    if (!envLines.some((l) => l.startsWith("AWS_REGION="))) {
-      envLines.push(`AWS_REGION=${getExisting("AWS_REGION") ?? getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"'}`);
-    }
-  }
-
-  await atomicWriteText(ENV_PATH, envLines.join("\n") + "\n");
-  ok(`~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
-}
-
-async function stepPair(opts: SetupOptions, botInfo: BotInfo): Promise<PairResult | null> {
-  step("⑦", "Pairing with Telegram...");
-
-  // Skip if chat IDs already known
-  if (opts.notifyChatIds.length > 0) {
-    ok(`Using provided notify chat IDs: ${opts.notifyChatIds.join(", ")}`);
-
-    // Send test message
-    for (const chatId of opts.notifyChatIds) {
-      try {
-        await sendMessage(opts.botToken, chatId, "✅ Roundhouse setup complete! Gateway is starting.");
-        ok(`Sent test message to chat ${chatId}`);
-      } catch {
-        warn(`Could not send message to chat ${chatId}`);
-      }
-    }
-    return null;
-  }
-
-  // Skip if existing config already has notifyChatIds
-  if (!opts.force) {
-    try {
-      const existing = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-      const existingIds = existing.chat?.notifyChatIds ?? [];
-      if (existingIds.length > 0) {
-        ok(`Already paired (chat IDs: ${existingIds.join(", ")})`);
-        return null;
-      }
-    } catch {}
-  }
-
-  // Skip if non-interactive
-  if (opts.nonInteractive) {
-    warn("Skipping pairing (--non-interactive)");
-    warn("Startup notifications won't work until paired.");
-    warn("Run 'roundhouse pair' later to pair.");
-    return null;
-  }
-
-  const result = await pairTelegram(opts.botToken, botInfo.username, opts.users, 300_000, log);
-
-  if (result) {
-    ok(`Paired with @${result.username} (user id: ${result.userId}, chat: ${result.chatId})`);
-    // Add paired username to allowedUsers if not already present
-    const lcUsername = result.username.toLowerCase();
-    if (!opts.users.some((u) => u.toLowerCase() === lcUsername)) {
-      opts.users.push(result.username);
-    }
-    return result;
-  }
-
-  warn("Pairing timed out.");
-  warn("Run 'roundhouse pair' later to pair.");
-  return null;
-}
-
-async function stepRegisterCommands(opts: SetupOptions): Promise<void> {
-  step("⑩", "Registering bot commands...");
-  await registerBotCommands(opts.botToken);
-  ok(`${BOT_COMMANDS.length} commands registered with Telegram`);
-}
-
-async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
-  step("⑩b", "Installing service...");
-
-  // macOS: install launchd agent
-  if (platform() === "darwin") {
-    try {
-      const { installLaunchAgent } = await import("./launchd.ts");
-      await installLaunchAgent();
-      ok("LaunchAgent installed and loaded");
-      log("   Logs: ~/.roundhouse/logs/roundhouse.log");
-    } catch (err: any) {
-      warn(`LaunchAgent install failed: ${err.message}`);
-      log("   Run manually: roundhouse start");
-    }
-    return;
-  }
-
-
-  if (!opts.systemd) {
-    ok("Skipped (--no-systemd)");
-    log("   Run manually: roundhouse start");
-    return;
-  }
-  if (platform() !== "linux") {
-    warn(`Service install not supported on ${platform()}`);
-    log("   Run manually: roundhouse start");
-    return;
-  }
-
-  // Check sudo
-  if (!hasSudoAccess()) {
-    warn("No passwordless sudo — cannot install systemd service");
-    log("   Run manually: roundhouse start");
-    log("   Or install with: roundhouse setup --telegram");
-    return;
-  }
-
-  const user = process.env.USER || process.env.LOGNAME;
-  if (!user) {
-    warn("Cannot determine current user ($USER not set). Skipping systemd.");
-    log("   Run manually: roundhouse start");
-    return;
-  }
-
-  const psstBin = opts.psst ? whichSync("psst") : null;
-  const { execStart, nodeBinDir } = resolveExecStart({ psstBin });
-  const unit = generateUnit({ execStart, nodeBinDir, user });
-
-  try {
-    await writeServiceUnit(unit);
-    systemctl("enable");
-    systemctl("start");
-    ok("roundhouse.service enabled and started");
-  } catch (err: any) {
-    warn(`Systemd install failed: ${err.message}`);
-    log("   Run manually: roundhouse start");
-  }
-}
-
-async function stepPostflight(): Promise<void> {
-  step("⑪", "Postflight checks...");
-
-  if (platform() === "linux") {
-    if (isServiceActive()) {
-      const pid = systemctlShow("MainPID");
-      ok(`Service active (PID ${pid})`);
-    } else {
-      warn("Service not active — check: roundhouse logs");
-    }
-  }
-
-  if (await fileExists(CONFIG_PATH)) {
-    ok("Config readable");
-  } else {
-    warn(`Config missing: ${CONFIG_PATH}`);
-  }
-
-  // Optional checks
-  if (!whichSync("ffmpeg")) {
-    warn("ffmpeg not found (install for voice support)");
-  }
-
-  // Whisper STT check (only if voice is enabled)
-  if (platform() === "linux" || process.env.ROUNDHOUSE_VOICE === "1") {
-    if (!whichSync("whisper")) {
-      warn("whisper not found — STT will auto-install on first voice message");
-      log("    Pre-install: pip3 install openai-whisper");
-    } else {
-      ok("whisper available");
-    }
-  }
-
-  if (!process.env.TAVILY_API_KEY) {
-    warn("TAVILY_API_KEY not set — web search extension won't work");
-    log("    Get a free key at https://tavily.com and add to ~/.roundhouse/.env");
-  }
-}
-
-// ── BotFather Guide ──────────────────────────────────
-
-function printBotFatherGuide(): void {
-  log("");
-  log("  🤖 Create a Telegram Bot");
-  log("  ────────────────────────");
-  log("  1. Open https://t.me/BotFather");
-  log("  2. Send /newbot");
-  log("  3. Choose a display name (e.g. 'My Roundhouse')");
-  log("  4. Choose a username ending in 'bot' (e.g. 'my_roundhouse_bot')");
-  log("  5. Copy the token BotFather returns");
-  log("");
-}
-
-// ── Interactive Telegram Setup ───────────────────────
-
-async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
-  const agent = resolveAgentForSetup(opts);
-  log("\n🔧 Roundhouse Telegram Setup");
-  log("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-  try {
-    // Step 1: Preflight
-    await stepPreflight(opts, agent);
-
-    // Detect existing agent installations
-    const env = detectEnvironment();
-    if (env.agents.length > 0) {
-      log("");
-      log("  🔍 Agent detection:");
-      for (const line of formatDetectionResults(env)) {
-        ok(line);
-      }
-      // If the selected agent is already configured, skip package install
-      if (!opts.force) {
-        const selected = env.agents.find(a => a.type === opts.agent);
-        if (selected?.configured) {
-          opts._skipAgentInstall = true;
-        }
-      }
-    }
-
-    // Step 2: Get bot token (prompt if not provided)
-    if (!opts.botToken) {
-      log("");
-      printBotFatherGuide();
-      opts.botToken = await promptMasked("  Paste your bot token");
-      if (!opts.botToken) {
-        fail("No token provided");
-        process.exit(2);
-      }
-    }
-    const botInfo = await stepValidateToken(opts);
-
-    // Step 3: Get username (prompt if not provided)
-    if (opts.users.length === 0) {
-      step("③", "Telegram username...");
-      const username = await promptText("  Your Telegram username (without @)");
-      if (!username) {
-        fail("Username required");
-        process.exit(2);
-      }
-      opts.users.push(username.replace(/^@/, ""));
-      ok(`Allowed: ${opts.users.map(u => `@${u}`).join(", ")}`);
-    }
-
-    // Step 4: Stop existing gateway
-    await stepStopGateway();
-
-    // Step 5: Install packages
-    await stepInstallPackages(opts, agent);
-
-    // Step 6: Install bundle (skills + CLI tools)
-    await stepInstallBundle(opts);
-
-    // Step 7: Pair via Telegram
-    step("⑦", "Pairing with Telegram...");
-    const nonce = createPairingNonce();
-    const pairingLink = createPairingLink(botInfo.username, nonce);
-    log(`\n  Open this link to pair:\n`);
-    log(`  🔗 ${pairingLink}\n`);
-    printQr(pairingLink, opts.qr);
-    log(`  Or send /start ${nonce} to @${botInfo.username}`);
-    log("");
-
-    // Auto-open the pairing link on macOS
-    if (process.platform === "darwin") {
-      try {
-        execFileSync("open", [pairingLink], { stdio: "ignore" });
-        log("  (Opened in Telegram — switch to the app to complete pairing)");
-      } catch { /* ignore if open fails */ }
-    }
-
-    log("  Waiting for you to tap the link in Telegram...");
-
-    const pairResult = await pairTelegram(
-      opts.botToken, botInfo.username, opts.users,
-      300_000, log, { nonce, showLink: false },
-    );
-    if (!pairResult) {
-      warn("Pairing timed out. Run 'roundhouse pair' later.");
-    } else {
-      ok(`Paired with @${pairResult.username} (chat: ${pairResult.chatId})`);
-      if (!opts.notifyChatIds.includes(pairResult.chatId)) {
-        opts.notifyChatIds.push(pairResult.chatId);
-      }
-    }
-
-    // Step 8: Store secrets
-    await stepStoreSecrets(opts, botInfo);
-
-    // Step 9: Write config
-    await stepConfigure(opts, botInfo, pairResult, agent);
-
-    // Step 10: Register commands + install service
-    await stepRegisterCommands(opts);
-    await stepInstallSystemd(opts);
-
-    // Step 11: Verify
-    await stepPostflight();
-
-    // Done!
-    log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    log("✅ Roundhouse is ready!");
-    log(`   Bot: @${botInfo.username}`);
-    log(`   Send /status to @${botInfo.username} on Telegram.\n`);
-  } catch (err: any) {
-    log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    log(`❌ Setup failed: ${err.message}`);
-    log("   Re-run: roundhouse setup --telegram\n");
-    process.exit(1);
-  }
-}
-
-// ── Headless Telegram Setup ─────────────────────────
-
-async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
-  const agent = resolveAgentForSetup(opts);
-  const logger = createJsonLogger();
-
-  // Override module-level log helpers to emit JSON instead of text
-  const savedLog = log, savedStep = step, savedOk = ok, savedWarn = warn, savedFail = fail;
-  log = (msg) => logger.info("log", msg);
-  step = (_n, label) => logger.info("step", label);
-  ok = (msg) => logger.ok(msg);
-  warn = (msg) => logger.warn("warn", msg);
-  fail = (msg) => logger.fail(msg);
-
-  try {
-    // Validate required inputs
-    if (!opts.botToken) {
-      logger.error("validation.failed", "TELEGRAM_BOT_TOKEN env var required for --headless");
-      process.exit(2);
-    }
-    if (opts.users.length === 0) {
-      logger.error("validation.failed", "--user is required for --headless");
-      process.exit(2);
-    }
-
-    // Step 1: Preflight
-    logger.step(1, 9, "preflight.start", "Running preflight checks");
-    await stepPreflight(opts, agent);
-    logger.ok("Preflight passed");
-
-    // Step 2: Validate token
-    logger.step(2, 9, "telegram.validate", "Validating Telegram bot token");
-    const botInfo = await stepValidateToken(opts);
-    logger.ok(`Bot: @${botInfo.username} (id: ${botInfo.id})`);
-
-    // Step 3: Stop existing gateway
-    logger.step(3, 9, "gateway.stop", "Checking for running gateway");
-    await stepStopGateway();
-
-    // Step 4: Install packages
-    logger.step(4, 9, "packages.install", "Installing packages");
-    await stepInstallPackages(opts, agent);
-    logger.ok("Packages installed");
-
-    // Step 4b: Install bundle
-    await stepInstallBundle(opts);
-
-    // Step 5: Create pending pairing
-    logger.step(5, 9, "pairing.pending", "Creating pending pairing");
-    let nonce: string;
-    const existing = await readPendingPairing();
-    if (existing?.status === "pending" && !opts.force) {
-      nonce = existing.nonce;
-      logger.info("pairing.reuse", `Reusing existing nonce: ${nonce}`);
-    } else {
-      nonce = createPairingNonce();
-    }
-    const pairingLink = createPairingLink(botInfo.username, nonce);
-    const pendingPairing: PendingPairing = {
-      version: 1,
-      nonce,
-      botUsername: botInfo.username,
-      allowedUsers: opts.users,
-      createdAt: new Date().toISOString(),
-      status: "pending",
-    };
-    await writePendingPairing(pendingPairing);
-    logger.info("pairing.link", `Pairing link: ${pairingLink}`, { pairingLink, nonce });
-
-    // Step 6: Store secrets
-    logger.step(6, 9, "secrets.store", "Storing secrets");
-    await stepStoreSecrets(opts, botInfo);
-
-    // Step 7: Write config (no pair result yet — gateway will complete pairing)
-    logger.step(7, 9, "config.write", "Writing configuration");
-    await stepConfigure(opts, botInfo, null, agent);
-    logger.ok("Config written");
-
-    // Step 8: Register commands
-    logger.step(8, 9, "commands.register", "Registering bot commands");
-    await stepRegisterCommands(opts);
-    logger.ok("Bot commands registered");
-
-    let serviceInstalled = false;
-    // Step 9: Install and start service
-    logger.step(9, 9, "service.install", "Installing and starting service");
-    if (!opts.systemd && platform() !== "darwin") {
-      logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
-    } else {
-      await stepInstallSystemd(opts);
-
-      // Verify service is active and set serviceInstalled based on reality
-      if (platform() === "darwin") {
-        try {
-          const { isLaunchAgentRunning } = await import("./launchd.ts");
-          if (isLaunchAgentRunning()) {
-            logger.ok("LaunchAgent is running");
-            serviceInstalled = true;
-          } else {
-            logger.warn("service.state", "LaunchAgent loaded but not yet running");
-          }
-        } catch {
-          logger.warn("service.state", "Could not verify LaunchAgent state");
-        }
-      } else {
-        try {
-          const { execFileSync } = await import("node:child_process");
-          const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
-          if (state === "active") {
-            logger.ok("Service is active");
-            serviceInstalled = true;
-          } else {
-            logger.warn("service.state", `Service state: ${state}`);
-          }
-        } catch {
-          logger.warn("service.state", "Could not verify service state");
-        }
-      }
-    }
-
-    // Success
-    logger.info("setup.complete", "Headless setup complete", {
-      botUsername: botInfo.username,
-      pairingLink,
-      pairingStatus: "pending",
-      serviceInstalled,
-    });
-    log("");
-    log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    log(`✅ Roundhouse installed and running!`);
-    log(``);
-    log(`   Bot: @${botInfo.username}`);
-    log(`   Pairing: Open ${pairingLink} to complete setup`);
-    log(`   Gateway is running and will accept pairing automatically.`);
-    log(``);
-  } catch (err: any) {
-    const diag: SetupDiagnostics = {
-      node: process.version,
-      platform: platform(),
-      arch: process.arch,
-      cwd: process.cwd(),
-      roundhouseDir: ROUNDHOUSE_DIR,
-      configExists: await fileExists(CONFIG_PATH).catch(() => false),
-      envExists: await fileExists(ENV_PATH).catch(() => false),
-      pairingStatus: (await readPendingPairing())?.status ?? "not found",
-      serviceState: "unknown",
-      error: { name: err.name, message: err.message, stack: err.stack },
-    };
-    try {
-      const { execFileSync } = await import("node:child_process");
-      diag.serviceState = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
-    } catch {}
-    printDiagnosticError(diag, true);
-    process.exit(1);
-  } finally {
-    // Restore module-level log helpers
-    log = savedLog; step = savedStep; ok = savedOk; warn = savedWarn; fail = savedFail;
-  }
-}
+  stepPreflight,
+  stepValidateToken,
+  stepStopGateway,
+  stepInstallPackages,
+  stepStoreSecrets,
+  stepInstallBundle,
+  stepConfigure,
+  stepPair,
+  stepRegisterCommands,
+  stepInstallSystemd,
+  stepPostflight,
+} from "./setup/steps";
+import { resolveAgentForSetup, textLog, textStepLog } from "./setup/runtime";
+import { runInteractiveTelegramSetup, runHeadlessTelegramSetup } from "./setup/flows";
 
 // ── Orchestrator ─────────────────────────────────────
 
@@ -1086,58 +72,59 @@ export async function cmdSetup(argv: string[]): Promise<void> {
   }
 
   // Legacy flow (no --telegram flag)
-  const agent = resolveAgentForSetup(opts);
-  log("\n🔧 Roundhouse Setup");
-  log("━━━━━━━━━━━━━━━━━━━");
+  const logger = textStepLog;
+  const agent = resolveAgentForSetup(opts, logger);
+  textLog("\n🔧 Roundhouse Setup");
+  textLog("━━━━━━━━━━━━━━━━━━━");
 
   try {
     // Phase 1: Validate (no mutations)
-    await stepPreflight(opts, agent);
-    const botInfo = await stepValidateToken(opts);
-    await stepStopGateway();
+    await stepPreflight(logger, opts, agent);
+    const botInfo = await stepValidateToken(logger, opts);
+    await stepStopGateway(logger);
 
     // Phase 2: Install packages
-    await stepInstallPackages(opts, agent);
+    await stepInstallPackages(logger, opts, agent);
 
     // Phase 2b: Install bundle (skills + CLI tools)
-    await stepInstallBundle(opts);
+    await stepInstallBundle(logger, opts);
 
     // Phase 3: Pair (before secrets/config, so paired username is included)
-    const pairResult = await stepPair(opts, botInfo);
+    const pairResult = await stepPair(logger, opts, botInfo);
 
     // Phase 4: Store secrets (after pairing, so ALLOWED_USERS includes paired user)
-    await stepStoreSecrets(opts, botInfo);
+    await stepStoreSecrets(logger, opts, botInfo);
 
     // Phase 5: Write config (includes pair data)
-    await stepConfigure(opts, botInfo, pairResult, agent);
+    await stepConfigure(logger, opts, botInfo, pairResult, agent);
 
     // Phase 6: Remote setup
-    await stepRegisterCommands(opts);
+    await stepRegisterCommands(logger, opts);
 
     // Phase 7: Service
-    await stepInstallSystemd(opts);
+    await stepInstallSystemd(logger, opts);
 
     // Phase 8: Verify
-    await stepPostflight();
+    await stepPostflight(logger);
 
     // Final message
     const warnings = !opts.notifyChatIds.length && !pairResult;
-    log("\n━━━━━━━━━━━━━━━━━━━");
+    textLog("\n━━━━━━━━━━━━━━━━━━━");
     if (warnings) {
-      log("⚠️  Installed, action required:");
-      log(`   • Not paired — run: roundhouse pair`);
+      textLog("⚠️  Installed, action required:");
+      textLog(`   • Not paired — run: roundhouse pair`);
     } else {
-      log("✅ Roundhouse is running!");
+      textLog("✅ Roundhouse is running!");
     }
-    log(`   Bot: @${botInfo.username}`);
-    log(`   Memory: ${opts.extensions.some((e) => e.includes("pi-memory")) ? "agent-managed" : "roundhouse-managed"}`);
-    log(`   Secrets: ${opts.psst ? "psst vault (encrypted)" : "~/.roundhouse/.env (plaintext)"}`);
-    log(`   Send /status to @${botInfo.username} on Telegram.\n`);
+    textLog(`   Bot: @${botInfo.username}`);
+    textLog(`   Memory: ${opts.extensions.some((e) => e.includes("pi-memory")) ? "agent-managed" : "roundhouse-managed"}`);
+    textLog(`   Secrets: ${opts.psst ? "psst vault (encrypted)" : "~/.roundhouse/.env (plaintext)"}`);
+    textLog(`   Send /status to @${botInfo.username} on Telegram.\n`);
   } catch (err: any) {
-    log("\n━━━━━━━━━━━━━━━━━━━");
-    log(`❌ Setup failed: ${err.message}`);
-    log("   Partial changes may have been applied.");
-    log("   Re-run setup to complete, or run: roundhouse doctor\n");
+    textLog("\n━━━━━━━━━━━━━━━━━━━");
+    textLog(`❌ Setup failed: ${err.message}`);
+    textLog("   Partial changes may have been applied.");
+    textLog("   Re-run setup to complete, or run: roundhouse doctor\n");
     process.exit(1);
   }
 }
@@ -1189,19 +176,19 @@ export async function cmdPair(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  log("\n🔗 Roundhouse Pairing\n");
+  textLog("\n🔗 Roundhouse Pairing\n");
 
   const botInfo = await validateBotToken(token);
-  ok(`Bot: @${botInfo.username}`);
+  textStepLog.ok(`Bot: @${botInfo.username}`);
 
-  const result = await pairTelegram(token, botInfo.username, users, 300_000, log);
+  const result = await pairTelegram(token, botInfo.username, users, 300_000, textLog);
 
   if (!result) {
-    log("\n⚠ Pairing timed out. Try again: roundhouse pair\n");
+    textLog("\n⚠ Pairing timed out. Try again: roundhouse pair\n");
     process.exit(1);
   }
 
-  ok(`Paired with @${result.username} (user id: ${result.userId}, chat: ${result.chatId})`);
+  textStepLog.ok(`Paired with @${result.username} (user id: ${result.userId}, chat: ${result.chatId})`);
 
   // Update config
   try {
@@ -1217,52 +204,52 @@ export async function cmdPair(argv: string[]): Promise<void> {
     config.chat.notifyChatIds = existingNotifyIds;
 
     await atomicWriteJson(CONFIG_PATH, config);
-    ok("Config updated with chat ID");
+    textStepLog.ok("Config updated with chat ID");
   } catch {
-    warn("Could not update config — add notifyChatIds manually");
+    textStepLog.warn("Could not update config — add notifyChatIds manually");
   }
 
-  log("\n✅ Paired! Restart gateway to apply: roundhouse restart\n");
+  textLog("\n✅ Paired! Restart gateway to apply: roundhouse restart\n");
 }
 
 // ── Dry run ──────────────────────────────────────────
 
 function printDryRun(opts: SetupOptions): void {
   const agent = getAgentDefinition(opts.agent);
-  log("\n🔧 Roundhouse Setup (DRY RUN)");
-  log("━━━━━━━━━━━━━━━━━━━\n");
-  log(`Agent: ${agent.name} (${agent.type})`);
-  log("Would validate Telegram token");
-  log("Would stop existing gateway (if running)");
-  log(`Would install: npm install -g @inceptionstack/roundhouse`);
+  textLog("\n🔧 Roundhouse Setup (DRY RUN)");
+  textLog("━━━━━━━━━━━━━━━━━━━\n");
+  textLog(`Agent: ${agent.name} (${agent.type})`);
+  textLog("Would validate Telegram token");
+  textLog("Would stop existing gateway (if running)");
+  textLog(`Would install: npm install -g @inceptionstack/roundhouse`);
   for (const pkg of agent.packages) {
     const scope = pkg.install === "global" ? "-g " : "";
-    log(`Would install: npm install ${scope}${pkg.packageName}`);
+    textLog(`Would install: npm install ${scope}${pkg.packageName}`);
   }
   if (opts.psst) {
-    log(`Would install: bun runtime (if not present)`);
-    log(`Would install: npm install -g psst-cli`);
-    log(`Would initialize psst vault`);
-    log(`Would install: pi-psst extension`);
+    textLog(`Would install: bun runtime (if not present)`);
+    textLog(`Would install: npm install -g psst-cli`);
+    textLog(`Would initialize psst vault`);
+    textLog(`Would install: pi-psst extension`);
   }
-  for (const ext of opts.extensions) log(`Would install extension: ${ext}`);
+  for (const ext of opts.extensions) textLog(`Would install extension: ${ext}`);
   if (!opts.nonInteractive && opts.notifyChatIds.length === 0) {
-    log(`Would pair via Telegram (interactive)`);
+    textLog(`Would pair via Telegram (interactive)`);
   }
   if (opts.psst) {
-    log(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
+    textLog(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
   }
   if (agent.configDirs?.length) {
-    log(`Would configure: agent-specific settings`);
-    log(`  Agent: ${agent.name}`);
+    textLog(`Would configure: agent-specific settings`);
+    textLog(`  Agent: ${agent.name}`);
   }
-  log(`  Set defaultProvider: ${opts.provider}`);
-  log(`  Set defaultModel: ${opts.model}`);
-  log(`Would write: ~/.roundhouse/gateway.config.json`);
-  log(`Would write: ~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
-  log(`Would register ${BOT_COMMANDS.length} bot commands`);
-  if (opts.systemd) log(`Would install systemd service`);
-  log("\nNo changes made.\n");
+  textLog(`  Set defaultProvider: ${opts.provider}`);
+  textLog(`  Set defaultModel: ${opts.model}`);
+  textLog(`Would write: ~/.roundhouse/gateway.config.json`);
+  textLog(`Would write: ~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
+  textLog(`Would register ${BOT_COMMANDS.length} bot commands`);
+  if (opts.systemd) textLog(`Would install systemd service`);
+  textLog("\nNo changes made.\n");
 }
 
 // ── Help ─────────────────────────────────────────────
