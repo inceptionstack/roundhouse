@@ -35,6 +35,15 @@ export interface SetupOptions {
 
 export type StepStatus = "ok" | "warn" | "skip" | "fail";
 
+/** Logger interface passed to setup step functions */
+export interface StepLog {
+  log(msg: string): void;
+  step(n: string, label: string): void;
+  ok(msg: string): void;
+  warn(msg: string): void;
+  fail(msg: string): void;
+}
+
 // ── Constants ────────────────────────────────────────
 
 export const PI_SETTINGS_PATH = resolve(homedir(), ".pi", "agent", "settings.json");
