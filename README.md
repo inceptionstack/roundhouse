@@ -58,7 +58,8 @@ When you run `roundhouse setup`, the following are installed automatically:
 
 - **30+ Skills** (agent knowledge): Synced from [loki-skills](https://github.com/inceptionstack/loki-skills) (AWS, infrastructure, DevOps patterns)
 - **CLI Tools**: `mcporter` (MCP server bridge), `@playwright/cli` (browser automation), `uv`/`uvx` (Python package runner)
-- **Extensions** (provisioned via `settings.json` packages): `pi-hard-no` (code review), `pi-branch-enforcer` (branch protection)
+- **Extensions** (copied to `~/.pi/agent/extensions/` if not present; never overwrites user copies): `web-search` (Tavily)
+- **Extension packages** (registered in `settings.json`): `pi-hard-no` (code review), `pi-branch-enforcer` (branch protection)
 - **Config**: MCP server definitions copied to `~/.mcporter/mcporter.json`
 
 This gives the agent access to:
