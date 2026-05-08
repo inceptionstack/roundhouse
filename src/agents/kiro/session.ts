@@ -5,8 +5,9 @@
  * and persists session IDs for potential resumption.
  */
 
-import { resolve } from "node:path";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 
 export interface SessionEntry {
   sessionId: string;
@@ -102,11 +103,13 @@ export class SessionStore {
     const dir = this.threadDir(threadId);
     mkdirSync(dir, { recursive: true });
     const filePath = resolve(dir, "kiro.json");
-    writeFileSync(filePath, JSON.stringify({
+    const tmpPath = filePath + "." + randomBytes(4).toString("hex") + ".tmp";
+    writeFileSync(tmpPath, JSON.stringify({
       sessionId: entry.sessionId,
       createdAt: entry.createdAt,
       lastUsed: entry.lastUsed,
     }) + "\n");
+    renameSync(tmpPath, filePath);
   }
 
   private sessionFilePath(threadId: string): string {

@@ -358,24 +358,47 @@ function createAdapter(config: KiroAdapterConfig): AgentAdapter {
     },
 
     promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
-      // Wrap in queue — return async iterable that serializes
-      const self = this;
+      // Channel-based approach: enqueue produces events, consumer reads them
+      const events: AgentStreamEvent[] = [];
+      let done = false;
+      let error: Error | null = null;
+      let resolveWait: (() => void) | null = null;
+
+      // Start the stream inside the queue so it serializes with prompt()
+      enqueue(threadId, async () => {
+        try {
+          for await (const ev of doPromptStream(threadId, message)) {
+            events.push(ev);
+            resolveWait?.();
+          }
+        } catch (e: any) {
+          error = e;
+        } finally {
+          done = true;
+          resolveWait?.();
+        }
+      });
+
       return {
         [Symbol.asyncIterator]() {
-          let iterator: AsyncIterator<AgentStreamEvent> | null = null;
-          let started = false;
           return {
-            async next() {
-              if (!started) {
-                started = true;
-                // Enqueue returns when the generator is created, not when it finishes
-                const gen = doPromptStream(threadId, message);
-                iterator = gen[Symbol.asyncIterator]();
+            async next(): Promise<IteratorResult<AgentStreamEvent>> {
+              while (events.length === 0 && !done) {
+                await new Promise<void>((r) => { resolveWait = r; });
+                resolveWait = null;
               }
-              return iterator!.next();
+              if (events.length > 0) return { done: false, value: events.shift()! };
+              if (error) throw error;
+              return { done: true, value: undefined };
             },
-            async return(value?: any) {
-              return iterator?.return?.(value) ?? { done: true, value: undefined };
+            async return() {
+              done = true;
+              return { done: true, value: undefined };
+            },
+            async throw(e: any) {
+              done = true;
+              error = e;
+              return { done: true, value: undefined };
             },
           };
         },

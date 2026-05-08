@@ -38,6 +38,11 @@ export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
     detached: true, // own process group for clean kill
   });
 
+  // Handle spawn failures (e.g. ENOENT if kiro-cli not on PATH)
+  proc.on("error", (err) => {
+    console.error(`[kiro] failed to spawn kiro-cli: ${err.message}`);
+  });
+
   // Buffer stderr for diagnostics (capped)
   const stderr: string[] = [];
   let stderrBytes = 0;
@@ -59,7 +64,9 @@ export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
       try { proc.kill(signal); } catch {}
     },
     killGroup() {
-      try { process.kill(-proc.pid!, "SIGKILL"); } catch {}
+      if (proc.pid) {
+        try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+      }
     },
   };
 }
