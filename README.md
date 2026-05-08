@@ -429,24 +429,30 @@ pi install git:github.com/inceptionstack/pi-autoreview
 
 ## Adding a new agent backend
 
-1. Create `src/agents/kiro.ts` implementing `AgentAdapter`
-2. Register in `src/agents/registry.ts`: `registry.set("kiro", createKiroAgentAdapter)`
-3. Set `"agent": { "type": "kiro" }` in config
+1. Create `src/agents/myagent/myagent-adapter.ts` extending `BaseAdapter`
+2. Register in `src/agents/registry.ts`
+3. Set `"agent": { "type": "myagent" }` in config
 
 ```typescript
-import type { AgentAdapter, AgentAdapterFactory } from "../types";
+import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
+import { BaseAdapter } from "../base-adapter.js";
 
-export const createKiroAgentAdapter: AgentAdapterFactory = (config) => {
-  return {
-    name: "kiro",
-    async prompt(threadId, message) {
-      // message.text contains user text
-      // message.attachments contains saved file metadata
-      return { text: "response" };
-    },
-    async dispose() {},
-  };
-};
+class MyAgentAdapter extends BaseAdapter {
+  readonly name = "myagent";
+
+  async prompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
+    return { text: "response" };
+  }
+
+  async *promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
+    yield { type: "text_delta", text: "response" };
+    yield { type: "agent_end" };
+  }
+
+  async dispose(): Promise<void> {}
+}
+
+export const createMyAgentAdapter: AgentAdapterFactory = (config) => new MyAgentAdapter();
 ```
 
 ## Adding a new chat platform
@@ -480,7 +486,9 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/cron/` | Cron scheduler, runner, store, schedule, template, format |
 | `src/cron/helpers.ts` | Shared cron constants and utilities |
 | `src/notify/telegram.ts` | Shared Telegram Bot API sender |
-| `src/agents/pi.ts` | Pi agent adapter (persistent sessions via pi SDK) |
+| `src/agents/pi/pi-adapter.ts` | Pi agent adapter (persistent sessions via pi SDK) |
+| `src/agents/kiro/kiro-adapter.ts` | Kiro CLI agent adapter (ACP over stdio) |
+| `src/agents/base-adapter.ts` | Abstract base class — adapter interface contract |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
 | `test/` | Unit tests (vitest, 75 passing) |

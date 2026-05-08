@@ -1,9 +1,12 @@
 /**
- * agents/pi.ts — Pi agent adapter
+ * agents/pi/pi-adapter.ts — Pi agent adapter
  *
  * Wraps pi's SDK (createAgentSession) as an AgentAdapter.
  * One persistent session per thread, stored at:
  *   ~/.roundhouse/sessions/<thread_id>/<session>.jsonl
+ *
+ * TODO: Migrate from factory+object-literal to class extending BaseAdapter
+ *       (separate PR — large file, needs careful testing)
  */
 
 import { mkdir } from "node:fs/promises";
@@ -23,9 +26,9 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types";
-import { SESSIONS_DIR } from "../config";
-import { DEBUG_STREAM, threadIdToDir } from "../util";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types";
+import { SESSIONS_DIR } from "../../config";
+import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
 interface SessionEntry {
   session: AgentSession;
@@ -601,7 +604,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       // Read agent version
       let version = "unknown";
       try {
-        const piPkgPath = join(__piAdapterDir, "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
+        const piPkgPath = join(__piAdapterDir, "..", "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
         version = JSON.parse(readFileSync(piPkgPath, "utf8")).version;
       } catch {}
 
