@@ -23,9 +23,9 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types";
-import { SESSIONS_DIR } from "../config";
-import { DEBUG_STREAM, threadIdToDir } from "../util";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types";
+import { SESSIONS_DIR } from "../../config";
+import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
 interface SessionEntry {
   session: AgentSession;

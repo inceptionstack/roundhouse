@@ -12,10 +12,10 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types.js";
-import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./kiro/acp/index.js";
-import { SessionStore, type SessionEntry } from "./kiro/session.js";
-import { normalizeToolName } from "./kiro/tool-names.js";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types.js";
+import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
+import { SessionStore, type SessionEntry } from "./session.js";
+import { normalizeToolName } from "./tool-names.js";
 
 // ── Types ────────────────────────────────────────────
 

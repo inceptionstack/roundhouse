@@ -6,8 +6,8 @@
  */
 
 import type { AgentAdapterFactory } from "../types";
-import { createPiAgentAdapter } from "./pi";
-import { createKiroAgentAdapter } from "./kiro";
+import { createPiAgentAdapter } from "./pi/pi-adapter";
+import { createKiroAgentAdapter } from "./kiro/kiro-adapter";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
