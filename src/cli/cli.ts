@@ -5,17 +5,14 @@
  */
 
 import { resolve, dirname } from "node:path";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { performUpdate } from "../commands/update";
 
 import {
-  CONFIG_DIR,
   CONFIG_PATH,
-  ENV_FILE_PATH,
-  DEFAULT_CONFIG,
   SESSIONS_DIR,
   SERVICE_NAME,
   fileExists,
@@ -24,7 +21,7 @@ import {
 } from "../config";
 import { getAgentSdkPackage } from "../agents/registry";
 import { threadIdToDir } from "../util";
-import { parseEnvFile, serializeEnvFile, envQuote, unquoteEnvValue } from "./env-file";
+import { parseEnvFile, unquoteEnvValue } from "./env-file";
 import {
   SERVICE_PATH,
   systemctl,
@@ -32,9 +29,6 @@ import {
   isServiceInstalled,
   isServiceActive,
   systemctlShow,
-  resolveExecStart,
-  generateUnit,
-  writeServiceUnit,
 } from "./systemd";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -108,7 +102,11 @@ async function cmdRun() {
     const tsxPath = resolve(__dirname, "..", "..", "node_modules", "tsx", "dist", "cli.mjs");
     execFileSync(process.execPath, [tsxPath, indexPath], {
       stdio: "inherit",
-      env: { ...process.env, ROUNDHOUSE_CONFIG: CONFIG_PATH },
+      env: {
+        ...process.env,
+        ROUNDHOUSE_CONFIG: CONFIG_PATH,
+        NODE_NO_WARNINGS: "1",  // Suppress npm deprecation spam
+      },
     });
   }
 }
@@ -133,70 +131,23 @@ async function loadEnvFile(): Promise<void> {
 }
 
 async function cmdInstall() {
+  console.log("[roundhouse] 'install' is deprecated — use 'roundhouse setup --telegram' instead.\n");
+
   if (process.platform === "darwin") {
-    console.log("[roundhouse] macOS detected — systemd is not available.\n");
-    console.log("  On macOS, use 'roundhouse start' to run in foreground,");
-    console.log("  or set up a launchd plist manually.\n");
-    console.log("  Tip: run 'roundhouse setup --telegram' to configure first.");
+    console.log("  On macOS:");
+    console.log("    1. roundhouse setup --telegram");
+    console.log("    2. roundhouse start\n");
     process.exitCode = 1;
     return;
   }
 
-  console.log("[roundhouse] Installing as systemd daemon...\n");
-
-  await mkdir(CONFIG_DIR, { recursive: true });
-  if (await fileExists(CONFIG_PATH)) {
-    console.log(`  Config exists: ${CONFIG_PATH}`);
-  } else {
-    await writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
-    console.log(`  Created config: ${CONFIG_PATH}`);
-    console.log(`  ⚠️  Edit this file to set allowedUsers and other settings.`);
-  }
-
-  // Write environment file for secrets — merge with existing to preserve manually-added keys
-  const ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "BOT_USERNAME", "ALLOWED_USERS", "NOTIFY_CHAT_IDS", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"];
-  const resolvedEnvPath = await resolveEnvFilePath();
-  const existing = await fileExists(resolvedEnvPath)
-    ? parseEnvFile(await readFile(resolvedEnvPath, "utf8"))
-    : new Map<string, string>();
-
-  // Override with current env vars for known keys
-  let envChanged = false;
-  for (const key of ENV_KEYS) {
-    if (process.env[key]) {
-      existing.set(key, envQuote(process.env[key]));
-      envChanged = true;
-    }
-  }
-  if (envChanged || !(await fileExists(ENV_FILE_PATH))) {
-    if (resolvedEnvPath !== ENV_FILE_PATH && await fileExists(resolvedEnvPath)) {
-      console.log(`  Copying env file from ${resolvedEnvPath} to ${ENV_FILE_PATH}`);
-    }
-    await writeFile(ENV_FILE_PATH, serializeEnvFile(existing), { mode: 0o600 });
-    console.log(`  Environment file: ${ENV_FILE_PATH}`);
-  }
-
-  // Generate and install systemd unit
-  const { execStart, nodeBinDir } = resolveExecStart();
-  const unit = generateUnit({ execStart, nodeBinDir });
-  await writeServiceUnit(unit);
-  systemctl("enable");
-  systemctl("start", "Daemon installed and started.");
-
-  console.log(`\n  Config:   ${CONFIG_PATH}`);
-  console.log(`  Env file: ${ENV_FILE_PATH}`);
-  console.log(`  Service:  ${SERVICE_PATH}`);
-  console.log(`  Logs:     roundhouse logs`);
-  console.log(`  Status:   roundhouse status`);
-
-  if (!envChanged) {
-    console.log(`\n  ⚠️  No env vars detected. Edit ${ENV_FILE_PATH} with your secrets:`);
-    console.log(`     TELEGRAM_BOT_TOKEN=...`);
-    console.log(`     Then add your API keys and run: roundhouse restart`);
-  }
+  console.log("  Recommended:");
+  console.log("    roundhouse setup --telegram\n");
+  console.log("  This sets up config, installs packages, pairs Telegram,");
+  console.log("  and installs the systemd service — all in one command.\n");
 }
-
 async function cmdUninstall() {
+
   console.log("[roundhouse] Removing systemd daemon...");
   try { systemctl("stop"); } catch {}
   try { systemctl("disable"); } catch {}

@@ -234,7 +234,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     cwd: homedir(),
     notifyChatIds: [],
     systemd: platform() === "linux",
-    voice: true,
+    voice: platform() === "linux",  // Default off on macOS (whisper install is heavy)
     psst: false,
     nonInteractive: false,
     force: false,
@@ -900,6 +900,16 @@ async function stepPostflight(): Promise<void> {
   // Optional checks
   if (!whichSync("ffmpeg")) {
     warn("ffmpeg not found (install for voice support)");
+  }
+
+  // Whisper STT check (only if voice is enabled)
+  if (platform() === "linux" || process.env.ROUNDHOUSE_VOICE === "1") {
+    if (!whichSync("whisper")) {
+      warn("whisper not found — STT will auto-install on first voice message");
+      log("    Pre-install: pip3 install openai-whisper");
+    } else {
+      ok("whisper available");
+    }
   }
 
   if (!process.env.TAVILY_API_KEY) {

@@ -9,6 +9,8 @@ Multiple chat inputs (Telegram, Slack, Discord via [Vercel Chat SDK](https://cha
 
 ```bash
 npm install -g @inceptionstack/roundhouse
+roundhouse setup --telegram
+roundhouse start  # macOS (foreground) — Linux auto-starts via systemd
 ```
 
 ## Architecture
