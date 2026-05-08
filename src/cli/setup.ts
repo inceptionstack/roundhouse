@@ -15,6 +15,7 @@ import { readFile, writeFile, mkdir, rename, unlink, realpath, stat } from "node
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { BOT_COMMANDS } from "../commands";
+import { atomicWriteJson, atomicWriteText, execSafe, execOrFail } from "./setup/helpers";
 import { provisionBundle, type ProvisionLog } from "../bundle";
 import {
   ROUNDHOUSE_DIR,
@@ -177,50 +178,6 @@ let step = (n: string, label: string) => { log(`\n${n} ${label}`); };
 let ok = (msg: string) => { log(`   ✓ ${msg}`); };
 let warn = (msg: string) => { log(`   ⚠ ${msg}`); };
 let fail = (msg: string) => { log(`   ✗ ${msg}`); };
-
-async function atomicWriteJson(path: string, data: unknown): Promise<void> {
-  const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-  try {
-    await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, path);
-  } catch (err) {
-    try { await unlink(tmp); } catch {}
-    throw err;
-  }
-}
-
-async function atomicWriteText(path: string, content: string, mode = 0o600): Promise<void> {
-  const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-  try {
-    await writeFile(tmp, content, { mode });
-    await rename(tmp, path);
-  } catch (err) {
-    try { await unlink(tmp); } catch {}
-    throw err;
-  }
-}
-
-function execSafe(cmd: string, args: string[], opts: { silent?: boolean; input?: string } = {}): string {
-  try {
-    const result = execFileSync(cmd, args, {
-      encoding: "utf8",
-      stdio: opts.silent ? "pipe" : opts.input ? ["pipe", "pipe", "pipe"] : "pipe",
-      input: opts.input,
-      timeout: 120_000,
-    });
-    return result.trim();
-  } catch {
-    return "";
-  }
-}
-
-function execOrFail(cmd: string, args: string[], label: string): string {
-  try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", timeout: 120_000 }).trim();
-  } catch (err: any) {
-    throw new Error(`${label}: ${err.stderr?.trim() || err.message}`);
-  }
-}
 
 // ── Arg parser ───────────────────────────────────────
 
