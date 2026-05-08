@@ -15,8 +15,6 @@ import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
-import { isBuiltinJob } from "./cron/helpers";
-import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
 import { BOT_COMMANDS } from "./commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
@@ -26,7 +24,7 @@ import { createProgressMessage } from "./telegram-progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./gateway/attachments";
 import { handleStreaming as _handleStream, type StreamResult } from "./gateway/streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, type CommandContext } from "./gateway/commands";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./gateway/commands";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
@@ -427,106 +425,28 @@ export class Gateway {
     const handleOrAbort = async (thread: any, message: any) => {
       const agentThreadId = resolveAgentThreadId(thread, message);
       const text = (message.text ?? "").trim();
-      // /stop is handled immediately — abort the in-flight agent run
-      // without waiting for the current handler to finish
+      // /stop — abort the in-flight agent run immediately
       if (isCommand(text, "/stop")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const agent = this.router.resolve(agentThreadId);
-        if (agent.abort) {
-          await agent.abort(agentThreadId);
-          abortControllers.get(agentThreadId)?.abort();
-          try { await thread.post("⏹️ Stopped."); } catch {}
-        } else {
-          try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
-        }
-        console.log(`[roundhouse] /stop for thread=${thread.id} agentThread=${agentThreadId}`);
+        await handleStop({ thread, agentThreadId, agent: this.router.resolve(agentThreadId), abortControllers });
         return;
       }
-      // /verbose is a gateway toggle — runs immediately, no queuing
+      // /verbose — toggle verbose mode immediately
       if (isCommand(text, "/verbose")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const threadId = agentThreadId;
-        if (verboseThreads.has(threadId)) {
-          verboseThreads.delete(threadId);
-          try { await thread.post("🔇 Verbose mode OFF — tool status messages hidden."); } catch {}
-        } else {
-          verboseThreads.add(threadId);
-          try { await thread.post("📢 Verbose mode ON — showing tool calls."); } catch {}
-        }
-        console.log(`[roundhouse] /verbose for thread=${thread.id} agentThread=${threadId} -> ${verboseThreads.has(threadId) ? "on" : "off"}`);
+        await handleVerbose({ thread, agentThreadId, verboseThreads });
         return;
       }
-      // /doctor runs health checks immediately — no agent access needed
+      // /doctor — run health checks immediately
       if (isCommand(text, "/doctor")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const stopTyping = startTypingLoop(thread);
-        try {
-          const results = await runDoctor(await createDoctorContext());
-          const report = formatDoctorTelegram(results);
-          await this.postWithFallback(thread, report);
-        } catch (err) {
-          try { await thread.post(`⚠️ Doctor failed: ${(err as Error).message}`); } catch {}
-        } finally {
-          stopTyping();
-        }
-        console.log(`[roundhouse] /doctor for thread=${thread.id}`);
+        await handleDoctor({ thread, runDoctor, createDoctorContext, formatDoctorTelegram, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
       // /crons manages scheduled jobs
       if (isCommandWithArgs(text, "/crons") || isCommandWithArgs(text, "/jobs")) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        const stopTyping = startTypingLoop(thread);
-        try {
-          const parts = text.split(/\s+/).slice(1); // remove /crons
-          const sub = parts[0];
-          const id = parts[1];
-
-          if (!this.cronScheduler) {
-            await thread.post("⚠️ Cron scheduler not running.");
-          } else if (sub === "trigger" && id) {
-            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
-            else { await thread.post(`⏳ Triggering ${id}...`); await this.cronScheduler.trigger(id); await thread.post(`✅ ${id} queued.`); }
-          } else if (sub === "pause" && id) {
-            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
-            else { await this.cronScheduler.pauseJob(id); await thread.post(`⏸️ ${id} paused.`); }
-          } else if (sub === "resume" && id) {
-            if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
-            else { await this.cronScheduler.resumeJob(id); await thread.post(`▶️ ${id} resumed.`); }
-          } else {
-            // Default: list jobs
-            const items = await this.cronScheduler.listJobs();
-            if (items.length === 0) {
-              await thread.post("No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`");
-            } else {
-              const lines = ["🕓 *Scheduled Jobs*", ""];
-              for (const { job, state } of items) {
-                const icon = jobEnabledIcon(job.enabled);
-                const sched = formatSchedule(job.schedule);
-                lines.push(`${icon} *${job.id}*`);
-                lines.push(`   📅 ${sched}`);
-                if (job.description) lines.push(`   📝 ${job.description}`);
-                if (state.totalRuns > 0) {
-                  lines.push(`   📊 ${formatRunCounts(state)}`);
-                  if (state.lastFinishedAt) {
-                    const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
-                    const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
-                    lines.push(`   ⏱ Last run: ${agoStr}`);
-                  }
-                } else {
-                  lines.push(`   📊 No runs yet`);
-                }
-                lines.push("");
-              }
-              lines.push(`_${items.length} job(s) configured_`);
-              await this.postWithFallback(thread, lines.join("\n"));
-            }
-          }
-        } catch (err) {
-          try { await thread.post(`⚠️ Cron error: ${(err as Error).message}`); } catch {}
-        } finally {
-          stopTyping();
-        }
-        console.log(`[roundhouse] /crons for thread=${thread.id}`);
+        await handleCrons({ thread, text, cronScheduler: this.cronScheduler, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
       await handle(thread, message);
