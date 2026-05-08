@@ -26,6 +26,7 @@ import { createProgressMessage } from "./telegram-progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./gateway/attachments";
 import { handleStreaming as _handleStream, type StreamResult } from "./gateway/streaming";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, type CommandContext } from "./gateway/commands";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
@@ -258,213 +259,33 @@ export class Gateway {
       if (isCommand(userText, "/start")) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
-      // Handle /new command — dispose current session, start fresh
+      // Handle /new command
       if (isCommand(userText.trim(), "/new")) {
-        const agent = this.router.resolve(agentThreadId);
-        if (agent.restart) {
-          await agent.restart(agentThreadId);
-          await thread.post(`🔄 Session restarted (\`${agentThreadId}\`). Send a message to begin a new conversation.`);
-        } else {
-          await thread.post("⚠️ New session not supported for this agent.");
-        }
-        console.log(`[roundhouse] /new for thread=${thread.id} agentThread=${agentThreadId}`);
+        await handleNew(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
         return;
       }
 
-      // Handle /restart command — restart the gateway process
-      // Only available when an allowlist is configured (all allowed users can restart)
+      // Handle /restart command
       if (isCommand(userText.trim(), "/restart")) {
-        if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
-          await thread.post("⚠️ /restart requires an allowlist (allowedUsers or allowedUserIds) to be configured.");
-          return;
-        }
-        console.log(`[roundhouse] /restart requested by @${authorName} in thread=${thread.id}`);
-        await thread.post("🔄 Restarting gateway...");
-        // Graceful shutdown then exit with non-zero so systemd Restart=on-failure brings us back
-        setTimeout(async () => {
-          console.log("[roundhouse] shutting down for restart");
-          try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
-          process.exit(75);
-        }, 1000);
+        await handleRestart(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
         return;
       }
 
-      // Handle /update command — update roundhouse then restart
+      // Handle /update command
       if (isCommand(userText.trim(), "/update")) {
-        if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
-          await thread.post("⚠️ /update requires an allowlist to be configured.");
-          return;
-        }
-        console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
-        const progress = await createProgressMessage(thread, "📦 Checking for updates...");
-        try {
-          const { performUpdate } = await import("./commands/update");
-          const result = await performUpdate(progress);
-          if (result.action === "already-latest") {
-            await progress.update(`✅ Already on latest (v${result.currentVersion})`);
-          } else if (result.action === "updated") {
-            await progress.update(`✅ Updated v${result.currentVersion} → v${result.latestVersion}. Restarting...`);
-            console.log(`[roundhouse] updated ${result.currentVersion} -> ${result.latestVersion}, restarting`);
-            setTimeout(async () => {
-              try { await this.stop(); } catch (e) { console.error("[roundhouse] stop error:", e); }
-              process.exit(75);
-            }, 1500);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          await progress.update(`⚠️ Update failed: ${msg.slice(0, 200)}`);
-          console.error(`[roundhouse] /update failed:`, msg);
-        }
+        await handleUpdate(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
         return;
       }
 
-      // Handle /compact command — flush memory then compact session context
-      // Routed through the per-thread lock to prevent concurrent agent access
+      // Handle /compact command
       if (isCommand(userText.trim(), "/compact")) {
-        const agent = this.router.resolve(agentThreadId);
-        if (!agent.compact) {
-          await thread.post("⚠️ Compaction not supported for this agent.");
-          return;
-        }
-        console.log(`[roundhouse] /compact for thread=${thread.id} agentThread=${agentThreadId}`);
-
-        // Acquire per-thread lock (same as normal prompts)
-        const prevLock = threadLocks.get(agentThreadId);
-        let releaseLock: () => void;
-        const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
-        threadLocks.set(agentThreadId, lockPromise);
-        if (prevLock) await prevLock;
-
-        const progress = await createProgressMessage(thread, "📝 Saving memory and compacting...");
-        const stopTyping = startTypingLoop(thread);
-        try {
-          const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
-          const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
-          // If memory is disabled, compact directly without flush
-          if (this.config.memory?.enabled === false) {
-            const result = await agent.compact(agentThreadId);
-            if (!result) {
-              await progress.update("⚠️ No active session to compact. Send a message first.");
-            } else {
-              const beforeK = (result.tokensBefore / 1000).toFixed(1);
-              await progress.update(`✅ Compaction complete\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.`);
-            }
-          } else {
-            const result = await flushMemoryThenCompact(
-              agentThreadId, agent, memoryRoot, "manual", this.config.memory,
-              (step) => progress.update(step),
-            );
-            if (!result) {
-              await progress.update("⚠️ No active session to compact. Send a message first.");
-            } else {
-              const beforeK = (result.tokensBefore / 1000).toFixed(1);
-              const timing = result.timing;
-              const timingLine = timing ? `\nTiming: flush ${(timing.flushMs / 1000).toFixed(1)}s, compact ${(timing.compactMs / 1000).toFixed(1)}s, total ${(timing.totalMs / 1000).toFixed(1)}s\nModel: ${timing.model}` : "";
-              await progress.update(`✅ Memory saved & compacted\n\nCompacted ${beforeK}K tokens down to a summary.\nContext usage will update after your next message.${timingLine}`);
-            }
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          await progress.update(`⚠️ Compaction failed: ${msg.slice(0, 200)}`);
-        } finally {
-          stopTyping();
-          releaseLock!();
-          if (threadLocks.get(agentThreadId) === lockPromise) {
-            threadLocks.delete(agentThreadId);
-          }
-        }
+        await handleCompact(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
         return;
       }
 
-      // Handle /status command — show gateway details
+      // Handle /status command
       if (isCommand(userText.trim(), "/status")) {
-        const agent = this.router.resolve(agentThreadId);
-        const uptimeSec = process.uptime();
-        const uptimeStr = uptimeSec < 3600
-          ? `${Math.floor(uptimeSec / 60)}m ${Math.floor(uptimeSec % 60)}s`
-          : `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
-        const platforms = Object.keys(this.config.chat.adapters).join(", ");
-        const debugStream = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
-        const nodeVer = process.version;
-        const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
-
-        const info = agent.getInfo ? agent.getInfo(agentThreadId) : {};
-        const agentVersion = info.version ? `v${info.version}` : "";
-        const agentLabel = agentVersion ? `\`${agent.name}\` (${agentVersion})` : `\`${agent.name}\``;
-
-        const lines = [
-          `📊 *Roundhouse Status*`,
-          ``,
-          `🎫 Session: \`${agentThreadId}\``,
-          `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`,
-          `🤖 Agent: ${agentLabel}`,
-        ];
-
-        if (info.model) lines.push(`🧠 Model: \`${info.model}\``);
-        if (info.activeSessions !== undefined) lines.push(`💬 Active sessions: ${info.activeSessions}`);
-
-        lines.push(
-          `🌐 Platforms: ${platforms}`,
-          `👤 Bot: @${this.config.chat.botUsername}`,
-          `⏱ Uptime: ${uptimeStr}`,
-          `💾 Memory: ${memMB} MB`,
-          `🟢 Node: ${nodeVer}`,
-          `🔧 Debug stream: ${debugStream ? "on" : "off"}`,
-          `📢 Verbose: ${verboseThreads.has(agentThreadId) ? "on" : "off"}`,
-        );
-
-        const allowedCount = allowedUsers.length;
-        lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);
-
-        // System resources
-        const sys = getSystemResources();
-        lines.push(``);
-        lines.push(`🖥 *System*`);
-        lines.push(`   CPU: ${sys.cpuPct}% (load ${sys.load1.toFixed(2)}, ${sys.cpuCount} cores)`);
-        lines.push(`   RAM: ${sys.usedGB}/${sys.totalGB} GB (${sys.memPct}%)`);
-        lines.push(`   Process: ${memMB} MB RSS`);
-
-        // Memory system mode
-        const memMode = determineMemoryMode(info);
-        const memEnabled = this.config.memory?.enabled !== false;
-        const memLabel = !memEnabled ? "disabled"
-          : memMode === "complement" ? "agent-managed (pi-memory)"
-          : memMode === "full" ? "roundhouse-managed"
-          : "pending detection";
-        lines.push(``);
-        lines.push(`🧠 Memory: ${memLabel}`);
-
-        // Context usage with progress bar
-        if (typeof info.contextTokens === "number" && typeof info.contextWindow === "number" && info.contextWindow > 0) {
-          const pct = Math.min(100, Math.round((info.contextTokens as number) / (info.contextWindow as number) * 100));
-          const barLen = 20;
-          const filled = Math.round(pct / 100 * barLen);
-          const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
-          const tokensK = ((info.contextTokens as number) / 1000).toFixed(1);
-          const windowK = ((info.contextWindow as number) / 1000).toFixed(0);
-          lines.push(``);
-          lines.push(`📝 Context: \`${bar}\` ${pct}%`);
-          lines.push(`   ${tokensK}K / ${windowK}K tokens`);
-        } else if (typeof info.contextWindow === "number" && info.contextWindow > 0) {
-          const windowK = ((info.contextWindow as number) / 1000).toFixed(0);
-          lines.push(``);
-          lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
-        }
-
-        // Extensions
-        const extensions = Array.isArray(info.extensions) ? info.extensions as string[] : [];
-        if (extensions.length > 0) {
-          lines.push(``);
-          lines.push(`🧩 Extensions (${extensions.length}):`);
-          for (const ext of extensions) {
-            // Show short name: strip npm: prefix and path noise
-            const short = ext.replace(/^.*node_modules\//, "").replace(/\/index\.[tj]s$/, "");
-            lines.push(`   • ${short}`);
-          }
-        }
-
-        await this.postWithFallback(thread, lines.join("\n"));
-        console.log(`[roundhouse] /status for thread=${thread.id} agentThread=${agentThreadId}`);
+        await handleStatus(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
         return;
       }
 
@@ -796,6 +617,28 @@ export class Gateway {
    * - Tool starts/ends are sent as compact status messages.
    * - Turn boundaries trigger a new message for the next turn's text.
    */
+
+  private buildCommandContext(
+    thread: any, message: any, agentThreadId: string, authorName: string,
+    allowedUsers: string[], allowedUserIds: number[],
+    verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>,
+  ): CommandContext {
+    return {
+      thread,
+      message,
+      agentThreadId,
+      authorName,
+      agent: this.router.resolve(agentThreadId),
+      config: this.config,
+      allowedUsers,
+      allowedUserIds,
+      verboseThreads,
+      threadLocks,
+      postWithFallback: (t, text) => this.postWithFallback(t, text),
+      stopGateway: () => this.stop(),
+    };
+  }
+
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
     return _handleStream(stream, {
       thread,
