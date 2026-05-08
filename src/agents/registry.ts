@@ -7,6 +7,7 @@
 
 import type { AgentAdapterFactory } from "../types";
 import { createPiAgentAdapter } from "./pi";
+import { createKiroAgentAdapter } from "./kiro";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -80,13 +81,34 @@ const piDefinition: AgentDefinition = {
   // setup-specific helpers (execOrFail, atomicWriteJson, etc.)
 };
 
+// ── Kiro Definition ──────────────────────────────────
+
+const kiroDefinition: AgentDefinition = {
+  type: "kiro",
+  name: "Kiro",
+  factory: createKiroAgentAdapter,
+  available: true,
+  packages: [
+    {
+      name: "Kiro CLI",
+      packageName: "kiro-cli",
+      install: "global",
+      binary: "kiro-cli",
+    },
+  ],
+  sdkPackage: undefined,
+  configDefaults: { cwd: homedir() },
+  configDirs: [
+    resolve(homedir(), ".kiro", "agents"),
+    resolve(homedir(), ".kiro", "settings"),
+  ],
+};
+
 // ── Registry ─────────────────────────────────────────
 
 const definitions = new Map<string, AgentDefinition>();
 definitions.set("pi", piDefinition);
-
-// Future:
-// definitions.set("kiro", kiroDefinition);
+definitions.set("kiro", kiroDefinition);
 
 // ── Public API ───────────────────────────────────────
 

@@ -5,7 +5,7 @@
  * One process per agent config (main or flush).
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { AcpClient } from "./client.js";
 
 export interface SpawnOptions {
@@ -100,7 +100,6 @@ export async function shutdownProcess(acpProc: AcpProcess, gracePeriodMs = 5_000
  */
 export function getKiroCliVersion(): string | null {
   try {
-    const { execFileSync } = require("node:child_process");
     const output = execFileSync("kiro-cli", ["--version"], {
       encoding: "utf8",
       timeout: 5_000,

@@ -13,9 +13,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../types.js";
-import { AcpClient } from "./kiro/acp/client.js";
-import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess } from "./kiro/acp/process.js";
-import type { AcpEvent, InitializeResult, SessionNewResult } from "./kiro/acp/types.js";
+import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./kiro/acp/index.js";
 import { SessionStore, type SessionEntry } from "./kiro/session.js";
 import { normalizeToolName } from "./kiro/tool-names.js";
 
