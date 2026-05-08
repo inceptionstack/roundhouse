@@ -24,7 +24,7 @@ import {
 } from "../config";
 import { getAgentSdkPackage } from "../agents/registry";
 import { threadIdToDir } from "../util";
-import { parseEnvFile, serializeEnvFile, envQuote } from "./env-file";
+import { parseEnvFile, serializeEnvFile, envQuote, unquoteEnvValue } from "./env-file";
 import {
   SERVICE_PATH,
   systemctl,
@@ -113,8 +113,7 @@ async function loadEnvFile(): Promise<void> {
     const entries = parseEnvFile(await readFile(envPath, "utf8"));
     for (const [key, raw] of entries) {
       if (!process.env[key]) {
-        // Strip surrounding quotes (envQuote wraps values in "...")
-        process.env[key] = raw.replace(/^["']|["']$/g, "");
+        process.env[key] = unquoteEnvValue(raw);
       }
     }
   } catch (e: any) {

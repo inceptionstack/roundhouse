@@ -38,3 +38,19 @@ export function envQuote(value: string): string {
     .replace(/\n/g, "\\n");
   return `"${escaped}"`;
 }
+
+/**
+ * Reverse of envQuote: strip surrounding quotes and unescape interior sequences.
+ */
+export function unquoteEnvValue(raw: string): string {
+  // Strip surrounding quotes
+  let value = raw.replace(/^["']|["']$/g, "");
+  // Unescape sequences inserted by envQuote
+  value = value
+    .replace(/\\n/g, "\n")
+    .replace(/\\`/g, "`")
+    .replace(/\\\$/g, "$")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+  return value;
+}
