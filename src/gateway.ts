@@ -429,6 +429,12 @@ export class Gateway {
       }
     }
 
+    // Append Telegram formatting hint (after STT may have set agentMessage.text)
+    const TELEGRAM_HINT = "\n\n[Format your final answer for Telegram: concise, use markdown sparingly, avoid long code blocks.]";
+    if (agentMessage.text) {
+      agentMessage.text += TELEGRAM_HINT;
+    }
+
     // Memory: pre-turn injection (Full mode only)
     const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
     const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
