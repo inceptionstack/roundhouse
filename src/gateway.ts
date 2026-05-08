@@ -7,9 +7,9 @@
 
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig, MessageAttachment } from "./types";
-import { splitMessage, isAllowed, startTypingLoop, threadIdToDir, generateAttachmentId, DEBUG_STREAM } from "./util";
-import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "./telegram-html";
+import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
+import { splitMessage, isAllowed, startTypingLoop } from "./util";
+import { isTelegramThread, postTelegramHtml } from "./telegram-html";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
@@ -21,7 +21,6 @@ import { BOT_COMMANDS } from "./commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel, CompactResult } from "./memory/types";
-import { READ_ONLY_TOOLS } from "./memory/types";
 import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
 import { createProgressMessage } from "./telegram-progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
@@ -33,67 +32,23 @@ import { handleStreaming as _handleStream, type StreamResult } from "./gateway/s
 let _botUsername = "";
 
 function isCommand(text: string, cmd: string): boolean {
-  if (text === cmd) return true;
-  if (!text.startsWith(`${cmd}@`)) return false;
-  if (!_botUsername) return false; // no bot name configured, reject suffixed commands
-  const suffix = text.slice(cmd.length + 1).toLowerCase();
-  return suffix === _botUsername.toLowerCase();
+  return _isCmd(text, cmd, _botUsername);
 }
 
 /** Match a command that accepts subcommands (e.g. /crons trigger <id>) */
 function isCommandWithArgs(text: string, cmd: string): boolean {
-  if (text === cmd || text.startsWith(`${cmd} `)) return true;
-  if (!text.startsWith(`${cmd}@`)) return false;
-  if (!_botUsername) return false;
-  const rest = text.slice(cmd.length + 1);
-  const spaceIdx = rest.indexOf(" ");
-  const suffix = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
-  return suffix.toLowerCase() === _botUsername.toLowerCase();
+  return _isCmdArgs(text, cmd, _botUsername);
 }
-import { hostname, loadavg, totalmem, freemem, cpus } from "node:os";
+import { hostname } from "node:os";
 
-/** Get system resource info */
 function getSystemResources() {
-  const load1 = loadavg()[0];
-  const cpuCount = cpus().length;
-  const totalGB = (totalmem() / 1024 / 1024 / 1024).toFixed(1);
-  const usedGB = ((totalmem() - freemem()) / 1024 / 1024 / 1024).toFixed(1);
-  const memPct = Math.round(((totalmem() - freemem()) / totalmem()) * 100);
-  const cpuPct = Math.min(100, Math.round((load1 / cpuCount) * 100));
-  return { load1, cpuCount, totalGB, usedGB, memPct, cpuPct };
+  return _getSysRes();
 }
-import { readFileSync, mkdirSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { join, dirname, basename } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const __gatewayDir = dirname(fileURLToPath(import.meta.url));
-
-function telegramChatIdFromThreadId(threadId: unknown): number | null {
-  if (typeof threadId !== "string") return null;
-  const match = threadId.match(/^telegram:(-?\d+)/);
-  if (!match) return null;
-  const parsed = parseInt(match[1], 10);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function getChatId(thread: any, message: any): string {
-  const id = message?.chat?.id ?? message?.chatId ?? thread?.chatId;
-  if (id !== undefined && id !== null) return String(id);
-  return String(thread?.id ?? "unknown");
-}
 
 function resolveAgentThreadId(thread: any, message: any): string {
-  const chatType = String(message?.chat?.type ?? thread?.chat?.type ?? thread?.type ?? "").toLowerCase();
-  if (["private", "dm", "direct", "im"].includes(chatType)) return "main";
-  if (["group", "supergroup", "channel"].includes(chatType)) return `group:${getChatId(thread, message)}`;
-
-  const telegramChatId = telegramChatIdFromThreadId(thread?.id);
-  if (telegramChatId !== null) {
-    return telegramChatId < 0 ? `group:${telegramChatId}` : "main";
-  }
-
-  return String(thread?.id ?? "main");
+  return _resolveThread(thread, message);
 }
 
 // ── Chat SDK adapter factories ───────────────────────
@@ -114,155 +69,13 @@ async function buildChatAdapters(
   return adapters;
 }
 
-// ── Tool name formatting ─────────────────────────────
-
-const TOOL_ICONS: Record<string, string> = {
-  bash: "⚡",
-  read: "📖",
-  edit: "✏️",
-  write: "📝",
-  grep: "🔍",
-  find: "🔎",
-  ls: "📂",
-};
-
 function toolIcon(name: string): string {
-  return TOOL_ICONS[name] ?? "🔧";
+  return _toolIcon(name);
 }
 
-// ── Incoming file storage ─────────────────────────────
-
-const INCOMING_DIR = process.env.ROUNDHOUSE_INCOMING_DIR
-  ?? join(ROUNDHOUSE_DIR, "incoming");
-
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB per file
-const MAX_ATTACHMENTS = 5;
-
-const MIME_EXTENSIONS: Record<string, string> = {
-  "audio/ogg": ".ogg",
-  "audio/mpeg": ".mp3",
-  "audio/mp4": ".m4a",
-  "audio/wav": ".wav",
-  "audio/webm": ".webm",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-  "video/mp4": ".mp4",
-  "application/pdf": ".pdf",
-};
-
-/** Sanitize a filename to safe ASCII characters, capped length */
-function safeName(raw: string): string {
-  let name = basename(raw);
-  // Replace anything not alphanumeric, dot, dash, underscore with _
-  name = name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  // Cap length (truncate from start to preserve extension)
-  if (name.length > 100) name = name.slice(-100);
-  // Remove leading dashes/dots/underscores (prevent hidden files or option-like names)
-  // Applied AFTER truncation so slice(-100) can't reintroduce them
-  name = name.replace(/^[-_.]+/, "");
-  return name || "attachment";
-}
-
-/** Result of saving attachments: saved files + user-facing warnings */
-interface AttachmentResult {
-  saved: MessageAttachment[];
-  skipped: string[]; // user-facing reasons for skipped attachments
-}
 
 async function saveAttachments(threadId: string, attachments: any[]): Promise<AttachmentResult> {
-  if (!attachments?.length) return { saved: [], skipped: [] };
-
-  const skipped: string[] = [];
-  const toProcess = attachments.slice(0, MAX_ATTACHMENTS);
-  if (attachments.length > MAX_ATTACHMENTS) {
-    skipped.push(`${attachments.length - MAX_ATTACHMENTS} attachment(s) skipped (max ${MAX_ATTACHMENTS} per message)`);
-    console.warn(`[roundhouse] too many attachments (${attachments.length}), processing first ${MAX_ATTACHMENTS}`);
-  }
-
-  // Per-message directory: <thread>/<timestamp_nonce>/
-  const msgDir = join(INCOMING_DIR, threadIdToDir(threadId), `${Date.now()}_${generateAttachmentId()}`);
-  try {
-    mkdirSync(msgDir, { recursive: true, mode: 0o700 });
-  } catch (err) {
-    console.error(`[roundhouse] failed to create incoming dir ${msgDir}:`, (err as Error).message);
-    return { saved: [], skipped: ["Failed to create storage directory"] };
-  }
-
-  const saved: MessageAttachment[] = [];
-  for (let i = 0; i < toProcess.length; i++) {
-    const att = toProcess[i];
-    try {
-      // Check size hint before downloading if available
-      if (att.size && att.size > MAX_FILE_SIZE) {
-        const sizeMB = (att.size / 1024 / 1024).toFixed(1);
-        skipped.push(`${att.name ?? att.type} (${sizeMB} MB) exceeds ${MAX_FILE_SIZE / 1024 / 1024} MB limit`);
-        console.warn(`[roundhouse] attachment too large (${att.size} bytes), skipping: ${att.name ?? att.type}`);
-        continue;
-      }
-
-      const data = att.data ?? (att.fetchData ? await att.fetchData() : null);
-      if (!data) {
-        console.warn(`[roundhouse] attachment has no data: ${att.name ?? att.type}`);
-        continue;
-      }
-
-      // Convert to Buffer with size cap to prevent memory exhaustion
-      let buf: Buffer;
-      if (Buffer.isBuffer(data)) {
-        buf = data;
-      } else if (data instanceof Blob) {
-        // Stream blobs with size cap
-        if (data.size > MAX_FILE_SIZE) {
-          skipped.push(`${att.name ?? att.type} (${(data.size / 1024 / 1024).toFixed(1)} MB) exceeds size limit`);
-          continue;
-        }
-        buf = Buffer.from(await data.arrayBuffer());
-      } else if (ArrayBuffer.isView(data)) {
-        buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-      } else if (data instanceof ArrayBuffer) {
-        buf = Buffer.from(data);
-      } else {
-        console.warn(`[roundhouse] unknown attachment data type, skipping: ${att.name ?? att.type}`);
-        continue;
-      }
-
-      if (buf.length > MAX_FILE_SIZE) {
-        const sizeMB = (buf.length / 1024 / 1024).toFixed(1);
-        skipped.push(`${att.name ?? att.type} (${sizeMB} MB) exceeds size limit`);
-        console.warn(`[roundhouse] attachment too large after download (${buf.length} bytes), skipping`);
-        continue;
-      }
-
-      const mime = att.mimeType ?? "application/octet-stream";
-      const ext = att.name
-        ? (att.name.includes(".") ? "" : (MIME_EXTENSIONS[mime] ?? ""))
-        : (MIME_EXTENSIONS[mime] ?? ".bin");
-      const rawName = att.name ? safeName(att.name) + ext : `${att.type ?? "file"}${ext}`;
-      const fileName = `${i}-${rawName}`;
-      const filePath = join(msgDir, fileName);
-
-      await writeFile(filePath, buf, { mode: 0o600 });
-
-      const VALID_MEDIA_TYPES = new Set(["audio", "image", "file", "video"]);
-      const mediaType = VALID_MEDIA_TYPES.has(att.type) ? att.type : "file";
-      const id = generateAttachmentId();
-      saved.push({
-        id,
-        mediaType,
-        name: rawName,
-        localPath: filePath,
-        mime,
-        sizeBytes: buf.length,
-        untrusted: true,
-      });
-      console.log(`[roundhouse] saved ${att.type} [${id}]: ${filePath} (${buf.length} bytes)`);
-    } catch (err) {
-      console.error(`[roundhouse] failed to save attachment:`, (err as Error).message);
-    }
-  }
-  return { saved, skipped };
+  return _saveAttachments(threadId, attachments);
 }
 
 // ── Gateway ──────────────────────────────────────────
@@ -984,184 +797,12 @@ export class Gateway {
    * - Turn boundaries trigger a new message for the next turn's text.
    */
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
-    let activeTools = new Map<string, string>(); // toolCallId -> toolName
-    let usedFileModifyingTools = false;
-
-    // Per-turn streaming state — each turn gets a fresh iterable + promise
-    let currentPush: ((text: string) => void) | null = null;
-    let currentFinish: (() => void) | null = null;
-    let currentPromise: Promise<void> | null = null;
-
-    function createTextStream(): { iterable: AsyncIterable<string>; push: (text: string) => void; finish: () => void } {
-      let buffer = "";
-      let resolve: ((value: IteratorResult<string>) => void) | null = null;
-      let done = false;
-
-      const iterable: AsyncIterable<string> = {
-        [Symbol.asyncIterator]() {
-          return {
-            async next(): Promise<IteratorResult<string>> {
-              if (buffer) {
-                const chunk = buffer;
-                buffer = "";
-                return { value: chunk, done: false };
-              }
-              if (done) return { value: undefined as any, done: true };
-              return new Promise((r) => { resolve = r; });
-            },
-          };
-        },
-      };
-
-      return {
-        iterable,
-        push(text: string) {
-          if (resolve) {
-            const r = resolve;
-            resolve = null;
-            r({ value: text, done: false });
-          } else {
-            buffer += text;
-          }
-        },
-        finish() {
-          done = true;
-          resolve?.({ value: undefined as any, done: true });
-        },
-      };
-    }
-
-    const flushCurrentStream = async () => {
-      if (!currentPromise) return;
-      currentFinish?.();
-      try {
-        await currentPromise;
-      } catch (err) {
-        console.warn(`[roundhouse] stream flush error:`, (err as Error).message);
-      }
-      currentPush = null;
-      currentFinish = null;
-      currentPromise = null;
-    };
-
-    const useTelegramHtml = isTelegramThread(thread);
-
-    const ensureStream = () => {
-      if (!currentPromise) {
-        const ts = createTextStream();
-        currentPush = ts.push;
-        currentFinish = ts.finish;
-        currentPromise = useTelegramHtml
-          ? handleTelegramHtmlStream(thread, ts.iterable).catch((err: Error) => {
-              console.warn(`[roundhouse] telegram html stream error:`, err.message);
-            })
-          : thread.handleStream(ts.iterable).catch((err: Error) => {
-              console.warn(`[roundhouse] handleStream error:`, err.message);
-            });
-      }
-    };
-
-    let hasTextInCurrentTurn = false;
-    let eventCount = 0;
-    let drainingNotified = false;
-
-    for await (const event of stream) {
-      // Check if /stop was called
-      if (signal?.aborted) {
-        console.log(`[roundhouse] stream aborted for thread`);
-        break;
-      }
-      if (DEBUG_STREAM) {
-        eventCount++;
-        const preview = event.type === "text_delta" ? `"${event.text.slice(0, 30)}"`
-          : event.type === "custom_message" ? `${event.customType}:${event.content.slice(0, 30)}`
-          : event.type === "tool_start" || event.type === "tool_end" ? event.toolName
-          : "";
-        console.log(`[roundhouse/stream] #${eventCount} ${event.type} ${preview}`);
-      }
-      switch (event.type) {
-        case "text_delta": {
-          ensureStream();
-          currentPush!(event.text);
-          hasTextInCurrentTurn = true;
-          break;
-        }
-
-        case "tool_start": {
-          activeTools.set(event.toolCallId, event.toolName);
-          if (!READ_ONLY_TOOLS.has(event.toolName)) usedFileModifyingTools = true;
-          if (verbose) {
-            try {
-              await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`);
-            } catch {}
-          }
-          break;
-        }
-
-        case "tool_end": {
-          activeTools.delete(event.toolCallId);
-          break;
-        }
-
-        case "custom_message": {
-          // Extension messages (e.g. code review) — flush current stream and post as distinct message
-          if (currentPromise) {
-            await flushCurrentStream();
-            hasTextInCurrentTurn = false;
-          }
-          await this.postWithFallback(thread, event.content);
-          break;
-        }
-
-        case "turn_end": {
-          if (hasTextInCurrentTurn) {
-            await flushCurrentStream();
-            hasTextInCurrentTurn = false;
-          }
-          break;
-        }
-
-        case "draining": {
-          if (hasTextInCurrentTurn) {
-            await flushCurrentStream();
-            hasTextInCurrentTurn = false;
-          }
-          try {
-            await thread.post("⏳ Hold on — waiting for follow-up messages...");
-            drainingNotified = true;
-          } catch {}
-          break;
-        }
-
-        case "drain_complete": {
-          if (hasTextInCurrentTurn) {
-            await flushCurrentStream();
-            hasTextInCurrentTurn = false;
-          }
-          if (drainingNotified) {
-            try {
-              await thread.post("✅ All done — waiting for your input.");
-            } catch {}
-            drainingNotified = false;
-          }
-          break;
-        }
-
-        case "agent_end": {
-          if (hasTextInCurrentTurn) {
-            await flushCurrentStream();
-          }
-          break;
-        }
-      }
-    }
-
-    // Safety: make sure we flush
-    if (currentPromise) {
-      await flushCurrentStream();
-    }
-
-    return { usedTools: usedFileModifyingTools };
+    return _handleStream(stream, {
+      thread,
+      verbose,
+      signal,
+      postWithFallback: (t, text) => this.postWithFallback(t, text),
+    });
   }
 
   /** Post text with markdown, falling back to plain text */
