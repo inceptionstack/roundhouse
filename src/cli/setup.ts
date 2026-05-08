@@ -1158,16 +1158,30 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       logger.ok("Service installed and started");
 
       // Verify service is active
-      try {
-        const { execFileSync } = await import("node:child_process");
-        const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
-        if (state === "active") {
-          logger.ok("Service is active");
-        } else {
-          logger.warn("service.state", `Service state: ${state}`);
+      if (platform() === "darwin") {
+        try {
+          const { isLaunchAgentRunning } = await import("./launchd.ts");
+          if (isLaunchAgentRunning()) {
+            logger.ok("LaunchAgent is running");
+          } else {
+            logger.warn("service.state", "LaunchAgent loaded but not yet running");
+          }
+        } catch {
+          logger.warn("service.state", "Could not verify LaunchAgent state");
         }
-      } catch {
-        logger.warn("service.state", "Could not verify service state");
+      } else {
+        try {
+          const { execFileSync } = await import("node:child_process");
+          const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
+          if (state === "active") {
+            logger.ok("Service is active");
+          } else {
+            logger.warn("service.state", `Service state: ${state}`);
+          }
+        } catch {
+          logger.warn("service.state", "Could not verify service state");
+        }
+      }
       }
     }
 
@@ -1176,7 +1190,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       botUsername: botInfo.username,
       pairingLink,
       pairingStatus: "pending",
-      serviceInstalled: opts.systemd,
+      serviceInstalled: opts.systemd || platform() === "darwin",
     });
     log("");
     log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
