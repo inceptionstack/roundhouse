@@ -12,7 +12,7 @@
 import { readFile } from "node:fs/promises";
 import { BOT_COMMANDS } from "../commands";
 import { atomicWriteJson, execSafe } from "./setup/helpers";
-import { type SetupOptions, EXTENSION_NAME_RE } from "./setup/types";
+import { type SetupOptions } from "./setup/types";
 import { parseSetupArgs } from "./setup/args";
 export { parseSetupArgs } from "./setup/args";
 import {
