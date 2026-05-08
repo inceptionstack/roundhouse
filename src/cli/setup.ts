@@ -972,8 +972,7 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
     // Auto-open the pairing link on macOS
     if (process.platform === "darwin") {
       try {
-        const { execFileSync: efs } = await import("node:child_process");
-        efs("open", [pairingLink], { stdio: "ignore" });
+        execFileSync("open", [pairingLink], { stdio: "ignore" });
         log("  (Opened in Telegram — switch to the app to complete pairing)");
       } catch { /* ignore if open fails */ }
     }

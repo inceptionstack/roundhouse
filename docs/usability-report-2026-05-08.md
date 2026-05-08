@@ -70,7 +70,7 @@
 - No visual feedback during 5-min pairing wait
 
 **Planned fixes:**
-- [ ] Renumber steps sequentially to match actual execution order (10 steps, ①-⑩)
+- [ ] Renumber steps sequentially to match actual execution order (①-⑪, with ⑩b for conditional systemd)
 - [ ] Replace platform jargon with user-friendly messaging
 - [ ] Capture npm stdout/stderr during extension install; show only on failure
 - [ ] Add spinner/countdown during pairing wait
