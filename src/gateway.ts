@@ -367,37 +367,10 @@ export class Gateway {
     thread: any, agentThreadId: string, userText: string, rawAttachments: any[],
     verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>, abortControllers: Map<string, AbortController>,
   ): Promise<void> {
-    // Save any attachments (voice messages, images, files, etc.)
-    let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
-    try {
-      attachmentResult = await saveAttachments(agentThreadId, rawAttachments);
-    } catch (err) {
-      console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
-      if (!userText.trim()) {
-        try { await thread.post("⚠️ Failed to process attachment(s). Please try again."); } catch {}
-        return;
-      }
-    }
-
-    // Notify user about skipped attachments
-    if (attachmentResult.skipped.length > 0) {
-      const skipMsg = attachmentResult.skipped.map((s) => `\u2022 ${s}`).join("\n");
-      try { await thread.post(`⚠️ Some attachments were skipped:\n${skipMsg}`); } catch {}
-    }
-
-    // Build AgentMessage
-    const promptText = userText.trim();
-    let agentMessage: AgentMessage = {
-      text: promptText,
-      attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
-    };
-
-    if (!promptText && !agentMessage.attachments) {
-      if (rawAttachments.length > 0) {
-        try { await thread.post("⚠️ Failed to save attachment(s). Please try again."); } catch {}
-      }
-      return;
-    }
+    // Prepare message (save attachments, build AgentMessage)
+    const result = await this.prepareAgentMessage(thread, agentThreadId, userText, rawAttachments);
+    if (!result) return; // nothing to send (empty message after attachment failure)
+    let agentMessage = result;
 
     const agent = this.router.resolve(agentThreadId);
 
@@ -413,23 +386,7 @@ export class Gateway {
       console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
       // Enrich audio attachments with transcripts (STT)
-      if (this.sttService && agentMessage.attachments?.length) {
-        try {
-          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
-          if (!agentMessage.text) {
-            const transcripts = agentMessage.attachments
-              .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
-              .map((a) => a.transcript!.text);
-            if (transcripts.length > 0) {
-              agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
-            } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
-              agentMessage.text = "Voice message attached, but automatic transcription failed.";
-            }
-          }
-        } catch (err) {
-          console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
-        }
-      }
+      await this.enrichWithStt(thread, agentMessage);
 
       // Let the agent adapter apply platform-specific message transforms
       if (agent.prepareMessage) {
@@ -510,6 +467,68 @@ export class Gateway {
         threadLocks.delete(agentThreadId);
       }
     }
+  }
+
+  /**
+   * Enrich audio attachments with speech-to-text transcripts.
+   * Updates agentMessage.text for voice-only messages.
+   */
+  private async enrichWithStt(thread: any, agentMessage: AgentMessage): Promise<void> {
+    if (!this.sttService || !agentMessage.attachments?.length) return;
+    try {
+      await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
+      if (!agentMessage.text) {
+        const transcripts = agentMessage.attachments
+          .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
+          .map((a) => a.transcript!.text);
+        if (transcripts.length > 0) {
+          agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
+        } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
+          agentMessage.text = "Voice message attached, but automatic transcription failed.";
+        }
+      }
+    } catch (err) {
+      console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
+    }
+  }
+
+  /**
+   * Save attachments, notify skipped, and build the AgentMessage.
+   * Returns null if there's nothing to send (empty text + failed attachments).
+   */
+  private async prepareAgentMessage(
+    thread: any, agentThreadId: string, userText: string, rawAttachments: any[],
+  ): Promise<AgentMessage | null> {
+    let attachmentResult: AttachmentResult = { saved: [], skipped: [] };
+    try {
+      attachmentResult = await saveAttachments(agentThreadId, rawAttachments);
+    } catch (err) {
+      console.error(`[roundhouse] saveAttachments error:`, (err as Error).message);
+      if (!userText.trim()) {
+        try { await thread.post("⚠️ Failed to process attachment(s). Please try again."); } catch {}
+        return null;
+      }
+    }
+
+    if (attachmentResult.skipped.length > 0) {
+      const skipMsg = attachmentResult.skipped.map((s) => `\u2022 ${s}`).join("\n");
+      try { await thread.post(`⚠️ Some attachments were skipped:\n${skipMsg}`); } catch {}
+    }
+
+    const promptText = userText.trim();
+    const agentMessage: AgentMessage = {
+      text: promptText,
+      attachments: attachmentResult.saved.length > 0 ? attachmentResult.saved : undefined,
+    };
+
+    if (!promptText && !agentMessage.attachments) {
+      if (rawAttachments.length > 0) {
+        try { await thread.post("⚠️ Failed to save attachment(s). Please try again."); } catch {}
+      }
+      return null;
+    }
+
+    return agentMessage;
   }
 
   /**
