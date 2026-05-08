@@ -54,6 +54,30 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
+  // macOS: check launchd agent
+  if (process.platform === "darwin") {
+    const { isLaunchAgentInstalled, isLaunchAgentRunning } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      if (isLaunchAgentRunning()) {
+        console.log("Roundhouse is already running (LaunchAgent).");
+        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+        console.log("  Stop: launchctl unload ~/Library/LaunchAgents/com.inceptionstack.roundhouse.plist");
+        return;
+      }
+      // Load it
+      const { execFileSync } = await import("node:child_process");
+      try {
+        const { PLIST_PATH } = await import("./launchd.ts");
+        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
+        console.log("LaunchAgent started.");
+        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+        return;
+      } catch {
+        // Fall through to foreground
+      }
+    }
+  }
+
   if (isServiceInstalled()) {
     if (isServiceActive()) {
       console.log("Roundhouse is already running.");
@@ -167,7 +191,22 @@ async function cmdUpdate() {
 
   console.log(`[roundhouse] Updated to v${result.latestVersion}`);
 
-  if (process.platform === "darwin" || !isServiceInstalled()) {
+  if (process.platform === "darwin") {
+    // Try to restart launchd agent
+    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      try {
+        const { execFileSync } = await import("node:child_process");
+        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
+        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
+        console.log("\n  ✅ Updated and restarted (LaunchAgent).");
+      } catch {
+        console.log("\n  ✅ Update complete. Restart with: roundhouse start");
+      }
+    } else {
+      console.log("\n  ✅ Update complete. Restart with: roundhouse start");
+    }
+  } else if (!isServiceInstalled()) {
     console.log("\n  ✅ Update complete. Restart with: roundhouse start");
   } else {
     console.log("\n[roundhouse] Restarting daemon...");
