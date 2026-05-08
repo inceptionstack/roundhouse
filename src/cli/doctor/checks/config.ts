@@ -47,7 +47,7 @@ export const configChecks: DoctorCheck[] = [
           details: [`${ctx.configPath} does not exist`],
           fix: {
             description: "Create default config",
-            command: `roundhouse install`,
+            command: `roundhouse setup --telegram`,
             run: async () => {
               const configDir = dirname(ctx.configPath);
               await mkdir(configDir, { recursive: true });

@@ -74,7 +74,7 @@ async function cmdStart() {
 
   console.log("No systemd service found. Running in foreground (use Ctrl+C to stop)...");
   if (process.platform !== "darwin") {
-    console.log("  Tip: run 'roundhouse install' to set up the systemd daemon.\n");
+    console.log("  Tip: run 'roundhouse setup --telegram' to install as systemd daemon.\n");
   } else {
     console.log("");
   }
@@ -166,19 +166,23 @@ async function cmdUpdate() {
   }
 
   console.log(`[roundhouse] Updated to v${result.latestVersion}`);
-  console.log("\n[roundhouse] Restarting daemon...");
-  try {
-    systemctl("restart", "Updated and restarted.");
-  } catch {
-    console.log("  ⚠️  Daemon not running. Start with: roundhouse install");
+
+  if (process.platform === "darwin" || !isServiceInstalled()) {
+    console.log("\n  ✅ Update complete. Restart with: roundhouse start");
+  } else {
+    console.log("\n[roundhouse] Restarting daemon...");
+    try {
+      systemctl("restart", "Updated and restarted.");
+    } catch {
+      console.log("  ⚠️  Could not restart. Run: roundhouse start");
+    }
   }
 }
 
 async function cmdStatus() {
   if (!isServiceActive()) {
     console.log("\n  ❌ Roundhouse is not running.\n");
-    console.log("  Install with: roundhouse install");
-    console.log("  Or start foreground: roundhouse start\n");
+    console.log("  Start with: roundhouse start\n");
     return;
   }
 

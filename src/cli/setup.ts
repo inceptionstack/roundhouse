@@ -853,7 +853,7 @@ async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
   if (!hasSudoAccess()) {
     warn("No passwordless sudo — cannot install systemd service");
     log("   Run manually: roundhouse start");
-    log("   Or install with: sudo roundhouse install");
+    log("   Or install with: roundhouse setup --telegram");
     return;
   }
 
