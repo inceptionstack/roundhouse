@@ -60,12 +60,6 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
-  // Guard: check config exists before any start path
-  if (!(await fileExists(CONFIG_PATH))) {
-    console.error("No config found. Run 'roundhouse setup --telegram' first.");
-    process.exit(1);
-  }
-
   if (isServiceInstalled()) {
     if (isServiceActive()) {
       console.log("Roundhouse is already running.");
@@ -78,7 +72,12 @@ async function cmdStart() {
     return;
   }
 
-  // No systemd service — fall back to foreground
+  // No systemd service — fall back to foreground. Check config before launching.
+  if (!(await fileExists(CONFIG_PATH))) {
+    console.error("No config found. Run 'roundhouse setup --telegram' first.");
+    process.exit(1);
+  }
+
   console.log("No systemd service found. Running in foreground (use Ctrl+C to stop)...");
   if (process.platform !== "darwin") {
     console.log("  Tip: run 'roundhouse install' to set up the systemd daemon.\n");

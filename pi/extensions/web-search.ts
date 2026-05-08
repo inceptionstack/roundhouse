@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "typebox";
+import { Type } from "@sinclair/typebox";
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
@@ -46,6 +46,13 @@ export default function (pi: ExtensionAPI) {
           }),
           signal: controller.signal,
         });
+      } catch (err: any) {
+        clearTimeout(timeout);
+        const msg = err.name === "AbortError" ? "Request timed out (30s)" : `Network error: ${err.message}`;
+        return {
+          content: [{ type: "text", text: msg }],
+          details: { query: params.query, error: err.name },
+        };
       } finally {
         clearTimeout(timeout);
       }
