@@ -349,7 +349,7 @@ async function cmdStop() {
   if (process.platform === "darwin") {
     const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
     if (isLaunchAgentInstalled()) {
-      execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
+      try { execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" }); } catch {}
       console.log("LaunchAgent stopped.");
     } else {
       console.log("No LaunchAgent installed. Nothing to stop.");
