@@ -62,7 +62,7 @@ async function cmdStart() {
       if (isLaunchAgentRunning()) {
         console.log("Roundhouse is already running (LaunchAgent).");
         console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
-        console.log("  Stop: launchctl unload ~/Library/LaunchAgents/com.inceptionstack.roundhouse.plist");
+        console.log("  Stop: roundhouse stop");
         return;
       }
       // Load it
