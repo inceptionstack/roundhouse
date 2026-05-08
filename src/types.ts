@@ -126,6 +126,20 @@ export interface AgentAdapter {
 
   /** Return runtime info about the agent (model, version, etc.). */
   getInfo?(threadId?: string): AdapterInfo;
+
+  /**
+   * Hook called after message is built (attachments resolved, STT transcribed)
+   * but before memory injection and prompt/promptStream. Adapter can append
+   * platform-specific hints, rewrite text, etc. Return the (possibly modified) message.
+   */
+  prepareMessage?(threadId: string, message: AgentMessage, context: MessageContext): AgentMessage;
+}
+
+export interface MessageContext {
+  /** Chat platform: "telegram", "discord", etc. */
+  platform: string;
+  /** Whether the message has file/image/audio attachments */
+  hasAttachments: boolean;
 }
 
 export interface AgentResponse {

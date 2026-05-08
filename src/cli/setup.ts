@@ -15,6 +15,10 @@ import { readFile, writeFile, mkdir, rename, unlink, realpath, stat } from "node
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { BOT_COMMANDS } from "../commands";
+import { atomicWriteJson, atomicWriteText, execSafe, execOrFail } from "./setup/helpers";
+import { type SetupOptions, type StepStatus, PI_SETTINGS_PATH, DEFAULT_PROVIDER, DEFAULT_MODEL, EXTENSION_NAME_RE } from "./setup/types";
+import { parseSetupArgs } from "./setup/args";
+export { parseSetupArgs } from "./setup/args";
 import { provisionBundle, type ProvisionLog } from "../bundle";
 import {
   ROUNDHOUSE_DIR,
@@ -59,45 +63,6 @@ import {
   type PendingPairing,
 } from "../pairing";
 import { detectEnvironment, formatDetectionResults } from "./detect";
-
-// ── Types ────────────────────────────────────────────
-
-interface SetupOptions {
-  botToken: string;
-  users: string[];
-  provider: string;
-  model: string;
-  extensions: string[];
-  cwd: string;
-  notifyChatIds: number[];
-  systemd: boolean;
-  voice: boolean;
-  psst: boolean;
-  nonInteractive: boolean;
-  force: boolean;
-  dryRun: boolean;
-  /** Telegram-focused setup flow */
-  telegram: boolean;
-  /** Fully headless automation (no TTY prompts) */
-  headless: boolean;
-  /** QR code display mode */
-  qr: "auto" | "always" | "never";
-  /** Agent type (default: pi) */
-  agent: string;
-  /** Set by detection: skip agent package install if already configured */
-  _skipAgentInstall?: boolean;
-}
-
-type StepStatus = "ok" | "warn" | "skip" | "fail";
-
-// ── Constants ────────────────────────────────────────
-
-const PI_SETTINGS_PATH = resolve(homedir(), ".pi", "agent", "settings.json");
-
-const DEFAULT_PROVIDER = "amazon-bedrock";
-const DEFAULT_MODEL = "us.anthropic.claude-opus-4-6-v1";
-
-const EXTENSION_NAME_RE = /^@?[a-z0-9][\w.\-/]*$/i;
 
 /**
  * Resolve agent definition and wire up setup-specific functions.
@@ -177,154 +142,6 @@ let step = (n: string, label: string) => { log(`\n${n} ${label}`); };
 let ok = (msg: string) => { log(`   ✓ ${msg}`); };
 let warn = (msg: string) => { log(`   ⚠ ${msg}`); };
 let fail = (msg: string) => { log(`   ✗ ${msg}`); };
-
-async function atomicWriteJson(path: string, data: unknown): Promise<void> {
-  const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-  try {
-    await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
-    await rename(tmp, path);
-  } catch (err) {
-    try { await unlink(tmp); } catch {}
-    throw err;
-  }
-}
-
-async function atomicWriteText(path: string, content: string, mode = 0o600): Promise<void> {
-  const tmp = `${path}.tmp.${randomBytes(4).toString("hex")}`;
-  try {
-    await writeFile(tmp, content, { mode });
-    await rename(tmp, path);
-  } catch (err) {
-    try { await unlink(tmp); } catch {}
-    throw err;
-  }
-}
-
-function execSafe(cmd: string, args: string[], opts: { silent?: boolean; input?: string } = {}): string {
-  try {
-    const result = execFileSync(cmd, args, {
-      encoding: "utf8",
-      stdio: opts.silent ? "pipe" : opts.input ? ["pipe", "pipe", "pipe"] : "pipe",
-      input: opts.input,
-      timeout: 120_000,
-    });
-    return result.trim();
-  } catch {
-    return "";
-  }
-}
-
-function execOrFail(cmd: string, args: string[], label: string): string {
-  try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", timeout: 120_000 }).trim();
-  } catch (err: any) {
-    throw new Error(`${label}: ${err.stderr?.trim() || err.message}`);
-  }
-}
-
-// ── Arg parser ───────────────────────────────────────
-
-export function parseSetupArgs(argv: string[]): SetupOptions {
-  const opts: SetupOptions = {
-    botToken: "",
-    users: [],
-    provider: DEFAULT_PROVIDER,
-    model: DEFAULT_MODEL,
-    extensions: [],
-    cwd: homedir(),
-    notifyChatIds: [],
-    systemd: platform() === "linux",
-    voice: platform() === "linux",  // Default off on macOS (whisper install is heavy)
-    psst: false,
-    nonInteractive: false,
-    force: false,
-    dryRun: false,
-    telegram: false,
-    headless: false,
-    qr: "auto",
-    agent: "pi",
-  };
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const next = () => {
-      if (i + 1 >= argv.length) throw new Error(`Missing value for ${arg}`);
-      return argv[++i];
-    };
-
-    switch (arg) {
-      case "--bot-token": opts.botToken = next(); break;
-      case "--user": opts.users.push(next().replace(/^@/, "")); break;
-      case "--provider": opts.provider = next(); break;
-      case "--model": opts.model = next(); break;
-      case "--extension": opts.extensions.push(next()); break;
-      case "--cwd": opts.cwd = next(); break;
-      case "--notify-chat": opts.notifyChatIds.push(parseInt(next(), 10)); break;
-      case "--no-systemd": opts.systemd = false; break;
-      case "--no-voice": opts.voice = false; break;
-      case "--with-psst": opts.psst = true; break;
-      case "--non-interactive": opts.nonInteractive = true; break;
-      case "--telegram": opts.telegram = true; break;
-      case "--headless": opts.headless = true; opts.nonInteractive = true; break;
-      case "--agent": opts.agent = next().toLowerCase(); break;
-      case "--qr": opts.qr = "always"; break;
-      case "--no-qr": opts.qr = "never"; break;
-      case "--force": opts.force = true; break;
-      case "--dry-run": opts.dryRun = true; break;
-      default:
-        if (arg.startsWith("-")) throw new Error(`Unknown flag: ${arg}`);
-        throw new Error(`Unexpected argument: ${arg}`);
-    }
-  }
-
-  // Token from env if not in flags
-  if (!opts.botToken) {
-    opts.botToken = process.env.TELEGRAM_BOT_TOKEN ?? "";
-  }
-
-  // Headless: reject --bot-token (argv visible in process listings)
-  if (opts.headless && argv.some((a) => a === "--bot-token")) {
-    throw new Error(
-      "--bot-token is not accepted in --headless mode (argv visible in process listings).\n" +
-      "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --headless --user USERNAME",
-    );
-  }
-
-  // Validate agent type
-  try {
-    getAgentDefinition(opts.agent);
-  } catch (err: any) {
-    throw new Error(err.message);
-  }
-
-  // Interactive --telegram defers token/user prompting to the wizard
-  const isInteractiveTelegram = opts.telegram && !opts.headless && !opts.nonInteractive && process.stdin.isTTY;
-
-  // Validate
-  if (!opts.botToken && !opts.dryRun && !isInteractiveTelegram) {
-    throw new Error(
-      "Bot token required. Provide via:\n" +
-      "  TELEGRAM_BOT_TOKEN=... roundhouse setup --user USERNAME\n" +
-      "  roundhouse setup --bot-token TOKEN --user USERNAME",
-    );
-  }
-  if (opts.users.length === 0 && !isInteractiveTelegram) {
-    throw new Error(
-      "At least one --user USERNAME is required.\n" +
-      "This is your Telegram username (without @).",
-    );
-  }
-  for (const ext of opts.extensions) {
-    if (!EXTENSION_NAME_RE.test(ext)) {
-      throw new Error(`Invalid extension name: ${ext}`);
-    }
-  }
-  if (opts.notifyChatIds.some(isNaN)) {
-    throw new Error("--notify-chat must be a number");
-  }
-
-  return opts;
-}
 
 // ── Steps ────────────────────────────────────────────
 

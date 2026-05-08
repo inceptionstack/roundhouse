@@ -12,7 +12,7 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo } from "../../types.js";
+import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo, MessageContext } from "../../types.js";
 import { ROUNDHOUSE_VERSION } from "../../config.js";
 import { BaseAdapter } from "../base-adapter.js";
 import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
@@ -178,6 +178,13 @@ class KiroAdapter extends BaseAdapter {
       memoryTools: [],
       extensions: [],
     };
+  }
+
+  prepareMessage(_threadId: string, message: AgentMessage, context: MessageContext): AgentMessage {
+    if (context.platform === "telegram" && message.text) {
+      return { ...message, text: message.text + "\n\n[Format your final answer for Telegram: concise, use markdown sparingly, avoid long code blocks.]" };
+    }
+    return message;
   }
 
   // ── Private: process lifecycle ───────────────────────

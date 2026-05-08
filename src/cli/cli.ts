@@ -5,7 +5,6 @@
  */
 
 import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, execFileSync, spawn } from "node:child_process";
@@ -15,7 +14,6 @@ import { performUpdate } from "../commands/update";
 import {
   CONFIG_PATH,
   SESSIONS_DIR,
-  SERVICE_NAME,
   fileExists,
   loadConfig,
   resolveEnvFilePath,
@@ -23,14 +21,7 @@ import {
 import { getAgentSdkPackage } from "../agents/registry";
 import { threadIdToDir } from "../util";
 import { parseEnvFile, unquoteEnvValue } from "./env-file";
-import {
-  SERVICE_PATH,
-  systemctl,
-  runSudo,
-  isServiceInstalled,
-  isServiceActive,
-  systemctlShow,
-} from "./systemd";
+import { getServiceManager } from "./service-manager";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -42,7 +33,7 @@ const __dirname = dirname(__filename);
  * Only call with trusted/hardcoded strings. Any dynamic segments must be
  * validated (e.g. `/^\d+$/.test(pid)`) before interpolation.
  */
-function run(cmd: string, opts?: { silent?: boolean }): string {
+function shellExec(cmd: string, opts?: { silent?: boolean }): string {
   try {
     const out = execSync(cmd, { encoding: "utf8", stdio: opts?.silent ? "pipe" : "inherit" });
     return (out ?? "").trim();
@@ -55,53 +46,32 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
-  // macOS: check launchd agent
-  if (process.platform === "darwin") {
-    const { isLaunchAgentInstalled, isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
-    if (isLaunchAgentInstalled()) {
-      if (isLaunchAgentRunning()) {
-        console.log("Roundhouse is already running (LaunchAgent).");
-        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
-        console.log("  Stop: roundhouse stop");
-        return;
-      }
-      // Load it
-      try {
-        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
-        console.log("LaunchAgent started.");
-        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
-        return;
-      } catch {
-        // Fall through to foreground
-      }
-    }
-  }
+  const svc = getServiceManager();
+  const result = await svc.start();
 
-  if (isServiceInstalled()) {
-    if (isServiceActive()) {
-      console.log("Roundhouse is already running.");
-      console.log("  Use: roundhouse restart   to restart");
-      console.log("       roundhouse status    to check status");
-      console.log("       roundhouse logs      to tail logs");
-      return;
+  if (result.message === "no-service") {
+    // No service installed — fall back to foreground
+    if (!(await fileExists(CONFIG_PATH))) {
+      console.error("No config found. Run 'roundhouse setup --telegram' first.");
+      process.exit(1);
     }
-    systemctl("start", "Daemon started.");
+    console.log("No service found. Running in foreground (use Ctrl+C to stop)...");
+    if (process.platform !== "darwin") {
+      console.log("  Tip: run 'roundhouse setup --telegram' to install as systemd daemon.\n");
+    } else {
+      console.log("");
+    }
+    await cmdRun();
     return;
   }
 
-  // No systemd service — fall back to foreground. Check config before launching.
-  if (!(await fileExists(CONFIG_PATH))) {
-    console.error("No config found. Run 'roundhouse setup --telegram' first.");
-    process.exit(1);
+  console.log(result.message);
+  if (result.started && process.platform === "darwin") {
+    console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+  } else if (!result.started) {
+    console.log("  Logs: roundhouse logs");
+    console.log("  Stop: roundhouse stop");
   }
-
-  console.log("No systemd service found. Running in foreground (use Ctrl+C to stop)...");
-  if (process.platform !== "darwin") {
-    console.log("  Tip: run 'roundhouse setup --telegram' to install as systemd daemon.\n");
-  } else {
-    console.log("");
-  }
-  await cmdRun();
 }
 
 async function cmdRun() {
@@ -128,7 +98,7 @@ async function cmdRun() {
       env: {
         ...process.env,
         ROUNDHOUSE_CONFIG: CONFIG_PATH,
-        NODE_NO_WARNINGS: "1",  // Suppress npm deprecation spam
+        NODE_NO_WARNINGS: "1",
       },
     });
   }
@@ -169,24 +139,11 @@ async function cmdInstall() {
   console.log("  This sets up config, installs packages, pairs Telegram,");
   console.log("  and installs the systemd service — all in one command.\n");
 }
-async function cmdUninstall() {
-  if (process.platform === "darwin") {
-    const { uninstallLaunchAgent, isLaunchAgentInstalled } = await import("./launchd.ts");
-    if (isLaunchAgentInstalled()) {
-      await uninstallLaunchAgent();
-      console.log("  ✅ LaunchAgent removed. Config preserved at:", CONFIG_PATH);
-    } else {
-      console.log("  No LaunchAgent installed.");
-    }
-    return;
-  }
 
-  console.log("[roundhouse] Removing systemd daemon...");
-  try { systemctl("stop"); } catch {}
-  try { systemctl("disable"); } catch {}
-  try { runSudo("rm", "-f", SERVICE_PATH); } catch {}
-  runSudo("systemctl", "daemon-reload");
-  console.log("  ✅ Daemon removed. Config preserved at:", CONFIG_PATH);
+async function cmdUninstall() {
+  const svc = getServiceManager();
+  const result = await svc.uninstall();
+  console.log(`  ✅ ${result.message} Config preserved at:`, CONFIG_PATH);
 }
 
 async function cmdUpdate() {
@@ -200,26 +157,16 @@ async function cmdUpdate() {
 
   console.log(`[roundhouse] Updated to v${result.latestVersion}`);
 
-  if (process.platform === "darwin") {
-    // Try to restart launchd agent
-    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
-    if (isLaunchAgentInstalled()) {
-      try {
-        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
-        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
-        console.log("\n  ✅ Updated and restarted (LaunchAgent).");
-      } catch {
-        console.log("\n  ✅ Update complete. Restart with: roundhouse start");
-      }
-    } else {
-      console.log("\n  ✅ Update complete. Restart with: roundhouse start");
-    }
-  } else if (!isServiceInstalled()) {
+  const svc = getServiceManager();
+  const status = await svc.status();
+
+  if (!status.installed) {
     console.log("\n  ✅ Update complete. Restart with: roundhouse start");
   } else {
-    console.log("\n[roundhouse] Restarting daemon...");
+    console.log("\n[roundhouse] Restarting service...");
     try {
-      systemctl("restart", "Updated and restarted.");
+      const restartResult = await svc.restart();
+      console.log(`  ✅ ${restartResult.message}`);
     } catch {
       console.log("  ⚠️  Could not restart. Run: roundhouse start");
     }
@@ -227,41 +174,34 @@ async function cmdUpdate() {
 }
 
 async function cmdStatus() {
-  // macOS: check launchd
-  if (process.platform === "darwin") {
-    const { isLaunchAgentInstalled, isLaunchAgentRunning } = await import("./launchd.ts");
-    if (isLaunchAgentRunning()) {
-      console.log("\n  ✅ Roundhouse is running (LaunchAgent).\n");
-      console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
-      console.log("  Stop: roundhouse stop\n");
-    } else if (isLaunchAgentInstalled()) {
-      console.log("\n  ⚠️  LaunchAgent installed but not running.\n");
-      console.log("  Start with: roundhouse start\n");
-    } else {
-      console.log("\n  ❌ Roundhouse is not running.\n");
-      console.log("  Start with: roundhouse start\n");
-    }
-    return;
-  }
+  const svc = getServiceManager();
+  const svcStatus = await svc.status();
 
-  if (!isServiceActive()) {
-    console.log("\n  ❌ Roundhouse is not running.\n");
+  if (!svcStatus.running) {
+    const icon = svcStatus.installed ? "⚠️" : "❌";
+    console.log(`\n  ${icon} ${svcStatus.message}\n`);
     console.log("  Start with: roundhouse start\n");
     return;
   }
 
-  // Load config for details
-  let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
-  try {
-    config = await loadConfig();
-  } catch {}
+  // macOS: simple status
+  if (process.platform === "darwin") {
+    console.log("\n  ✅ Roundhouse is running (LaunchAgent).\n");
+    console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+    console.log("  Stop: roundhouse stop\n");
+    return;
+  }
 
-  // Gather systemd info
+  // Linux: detailed systemd status
+  const { systemctlShow } = await import("./systemd");
+
+  let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+  try { config = await loadConfig(); } catch {}
+
   const pid = systemctlShow("MainPID");
   const activeState = systemctlShow("ActiveState");
   const startedAt = systemctlShow("ActiveEnterTimestamp");
 
-  // Compute uptime
   let uptimeStr = "unknown";
   if (startedAt) {
     const startMs = new Date(startedAt).getTime();
@@ -272,17 +212,15 @@ async function cmdStatus() {
     }
   }
 
-  // Memory from PID
   let memStr = "unknown";
   if (pid && pid !== "0" && /^\d+$/.test(pid)) {
-    const rssKb = run(`ps -o rss= -p ${pid}`, { silent: true }).trim();
+    const rssKb = shellExec(`ps -o rss= -p ${pid}`, { silent: true }).trim();
     if (rssKb) {
       const parsed = parseInt(rssKb, 10);
       if (!isNaN(parsed)) memStr = `${(parsed / 1024).toFixed(1)} MB`;
     }
   }
 
-  // Read env file for debug flags
   let debugStream = false;
   const statusEnvPath = await resolveEnvFilePath();
   try {
@@ -290,7 +228,6 @@ async function cmdStatus() {
     debugStream = envContent.includes("ROUNDHOUSE_DEBUG_STREAM=1") || envContent.includes('ROUNDHOUSE_DEBUG_STREAM="1"');
   } catch {}
 
-  // Read versions
   let roundhouseVersion = "unknown";
   let agentVersion = "unknown";
   try {
@@ -299,7 +236,6 @@ async function cmdStatus() {
     roundhouseVersion = pkg.version;
   } catch {}
 
-  // Resolve agent SDK version from registry
   const agentPkg = config ? getAgentSdkPackage(config.agent.type) : undefined;
   if (agentPkg) {
     try {
@@ -332,46 +268,21 @@ async function cmdStatus() {
   console.log();
 }
 
-async function cmdLogs() {
-  if (process.platform === "darwin") {
-    const logPath = resolve(homedir(), ".roundhouse", "logs", "roundhouse.log");
-    const child = spawn("tail", ["-f", "-n", "100", logPath], { stdio: "inherit" });
-    child.on("error", () => console.log("Could not read logs. Check ~/.roundhouse/logs/"));
-    return;
-  }
-  const child = spawn("journalctl", ["-u", SERVICE_NAME, "-f", "--no-pager", "-n", "100"], {
-    stdio: "inherit",
-  });
-  child.on("error", () => console.log("Could not read logs. Is the daemon installed?"));
-}
-
 async function cmdStop() {
-  if (process.platform === "darwin") {
-    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
-    if (isLaunchAgentInstalled()) {
-      try { execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" }); } catch (e: any) { if (!e.message?.includes("Could not find")) console.warn("  (unload warning:", e.message?.split("\n")[0], ")"); }
-      console.log("LaunchAgent stopped.");
-    } else {
-      console.log("No LaunchAgent installed. Nothing to stop.");
-    }
-    return;
-  }
-  systemctl("stop", "Daemon stopped.");
+  const svc = getServiceManager();
+  const result = await svc.stop();
+  console.log(result.message);
 }
 
 async function cmdRestart() {
-  if (process.platform === "darwin") {
-    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
-    if (isLaunchAgentInstalled()) {
-      try { execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" }); } catch {}
-      execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
-      console.log("LaunchAgent restarted.");
-    } else {
-      console.log("No LaunchAgent installed. Run: roundhouse setup --telegram");
-    }
-    return;
-  }
-  systemctl("restart", "Daemon restarted.");
+  const svc = getServiceManager();
+  const result = await svc.restart();
+  console.log(result.message);
+}
+
+async function cmdLogs() {
+  const svc = getServiceManager();
+  svc.logs();
 }
 
 async function cmdConfig() {
@@ -467,162 +378,9 @@ Environment:
 
 // ── Main ────────────────────────────────────────────
 
-async function cmdAgent() {
-  // Usage: roundhouse agent <message>
-  //        roundhouse agent --thread <id> <message>
-  //        roundhouse agent --ephemeral <message>
-  //        echo "message" | roundhouse agent --stdin
-  const args = process.argv.slice(3);
-  let threadId = "";
-  let messageText = "";
-  let useStdin = false;
-  let timeoutMs = 120_000;
-  let verbose = false;
-  let ephemeral = false;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--thread" && args[i + 1]) {
-      threadId = args[++i];
-    } else if (args[i] === "--stdin") {
-      useStdin = true;
-    } else if (args[i] === "--timeout" && args[i + 1]) {
-      const val = parseInt(args[++i], 10);
-      if (isNaN(val) || val <= 0) { console.error("--timeout must be a positive number (seconds)"); process.exit(1); }
-      timeoutMs = val * 1000;
-    } else if (args[i] === "--no-timeout") {
-      timeoutMs = 0;
-    } else if (args[i] === "--verbose") {
-      verbose = true;
-    } else if (args[i] === "--ephemeral") {
-      ephemeral = true;
-    } else if (args[i].startsWith("-")) {
-      console.error(`Unknown flag: ${args[i]}`);
-      process.exit(1);
-    } else {
-      messageText = args.slice(i).join(" ");
-      break;
-    }
-  }
-
-  if (useStdin) {
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    const MAX_INPUT = 1024 * 1024; // 1 MB
-    for await (const chunk of process.stdin) {
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_INPUT) {
-        console.error(`Input exceeds ${MAX_INPUT / 1024}KB limit. Use a file instead.`);
-        process.exit(1);
-      }
-      chunks.push(chunk);
-    }
-    // Strip single trailing newline (shell echo adds one)
-    let raw = Buffer.concat(chunks).toString("utf8");
-    if (raw.endsWith("\n")) raw = raw.slice(0, -1);
-    messageText = raw;
-  }
-
-  if (!messageText) {
-    console.error("Usage: roundhouse agent <message>");
-    console.error("       roundhouse agent --thread <id> <message>");
-    console.error("       echo \"message\" | roundhouse agent --stdin");
-    console.error("       roundhouse agent --timeout 60 <message>");
-    console.error("       roundhouse agent --verbose <message>");
-    console.error("       roundhouse agent --ephemeral <message>");
-    process.exit(1);
-  }
-
-  if (threadId && ephemeral) {
-    console.error("--thread and --ephemeral cannot be used together");
-    process.exit(1);
-  }
-
-  // Default: shared main session. --ephemeral restores one-off CLI behavior.
-  if (!threadId) {
-    threadId = ephemeral
-      ? `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      : "main";
-  }
-
-  // Suppress debug/info logs unless --verbose
-  const origLog = console.log;
-  const origWarn = console.warn;
-  const origError = console.error;
-  if (!verbose) {
-    console.log = () => {};
-    console.warn = () => {};
-  }
-
-  let agent: import("../types").AgentAdapter | undefined;
-  let aborted = false;
-
-  // Clean abort on SIGINT/SIGTERM
-  const handleSignal = async () => {
-    if (aborted) return;
-    aborted = true;
-    console.log = origLog;
-    console.warn = origWarn;
-    console.error = origError;
-    try { await agent?.abort?.(threadId); } catch {}
-    try { await agent?.dispose(); } catch {}
-    process.exit(130);
-  };
-  process.on("SIGINT", handleSignal);
-  process.on("SIGTERM", handleSignal);
-
-  // Timeout race
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = timeoutMs > 0
-    ? new Promise<never>((_, reject) => {
-        timer = setTimeout(async () => {
-          aborted = true;
-          try { await agent?.abort?.(threadId); } catch {}
-          reject(new Error(`Timeout after ${timeoutMs / 1000}s`));
-        }, timeoutMs);
-      })
-    : null;
-
-  try {
-    const config = await loadConfig();
-    const { getAgentFactory } = await import("../agents/registry");
-    const factory = getAgentFactory(config.agent.type);
-    agent = factory(config.agent);
-
-    const runAgent = async () => {
-      if (agent!.promptStream) {
-        for await (const event of agent!.promptStream(threadId, { text: messageText })) {
-          if (event.type === "text_delta") {
-            process.stdout.write(event.text);
-          }
-        }
-        process.stdout.write("\n");
-      } else {
-        const response = await agent!.prompt(threadId, { text: messageText });
-        origLog(response.text);
-      }
-    };
-
-    if (timeoutPromise) {
-      await Promise.race([runAgent(), timeoutPromise]);
-    } else {
-      await runAgent();
-    }
-  } catch (err: any) {
-    console.error = origError;
-    console.error(`Error: ${err.message}`);
-    process.exit(aborted ? 124 : 1); // 124 = timeout (like coreutils)
-  } finally {
-    if (timer) clearTimeout(timer);
-    process.off("SIGINT", handleSignal);
-    process.off("SIGTERM", handleSignal);
-    console.log = origLog;
-    console.warn = origWarn;
-    console.error = origError;
-    if (!aborted) await agent?.dispose();
-  }
-}
 
 import { cmdDoctor } from "./doctor";
+import { cmdAgent } from "./agent-command";
 import { cmdCron } from "./cron";
 import { cmdSetup, cmdPair } from "./setup";
 
