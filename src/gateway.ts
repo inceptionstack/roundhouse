@@ -24,6 +24,9 @@ import type { PressureLevel, CompactResult } from "./memory/types";
 import { READ_ONLY_TOOLS } from "./memory/types";
 import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
 import { createProgressMessage } from "./telegram-progress";
+import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
+import { saveAttachments as _saveAttachments, type AttachmentResult } from "./gateway/attachments";
+import { handleStreaming as _handleStream, type StreamResult } from "./gateway/streaming";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
