@@ -17,14 +17,11 @@ const LABEL = "com.inceptionstack.roundhouse";
 const PLIST_DIR = resolve(homedir(), "Library", "LaunchAgents");
 export const PLIST_PATH = resolve(PLIST_DIR, `${LABEL}.plist`);
 
-export interface LaunchdOptions {
-  envFilePath?: string;
-}
 
 /**
  * Generate a LaunchAgent plist for roundhouse.
  */
-export function generatePlist(opts: LaunchdOptions = {}): string {
+export function generatePlist(): string {
   const nodeBin = whichSync("node") || process.execPath;
   const roundhouseBin = whichSync("roundhouse");
 
@@ -95,11 +92,11 @@ ${envSection}
 /**
  * Install the plist and load the service.
  */
-export async function installLaunchAgent(opts: LaunchdOptions = {}): Promise<void> {
+export async function installLaunchAgent(): Promise<void> {
   await mkdir(PLIST_DIR, { recursive: true });
   await mkdir(resolve(ROUNDHOUSE_DIR, "logs"), { recursive: true });
 
-  const plist = generatePlist(opts);
+  const plist = generatePlist();
   await writeFile(PLIST_PATH, plist, { mode: 0o644 });
 
   // Unload first if already loaded (ignore errors)

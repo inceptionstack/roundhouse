@@ -1151,7 +1151,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
 
     // Step 9: Install and start service
     logger.step(9, 9, "service.install", "Installing and starting service");
-    if (!opts.systemd) {
+    if (!opts.systemd && platform() !== "darwin") {
       logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
     } else {
       await stepInstallSystemd(opts);
