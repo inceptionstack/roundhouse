@@ -178,7 +178,7 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 
 | Field | Description |
 |-------|-------------|
-| `agent.type` | Agent backend: `"pi"` (more coming) |
+| `agent.type` | Agent backend: `"pi"`, `"kiro"` |
 | `agent.cwd` | Working directory for the agent |
 | `agent.sessionDir` | Override session storage path |
 | `chat.botUsername` | Bot display name for Chat SDK |
@@ -492,7 +492,7 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/agents/base-adapter.ts` | Abstract base class — adapter interface contract |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
-| `test/` | Unit tests (vitest, 75 passing) |
+| `test/` | Unit + integration tests (vitest, 311 passing) |
 
 ## CI/CD
 

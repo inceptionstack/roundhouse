@@ -13,7 +13,7 @@ import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "./
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
 import { sendTelegramToMany } from "./notify/telegram";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
-import { ROUNDHOUSE_DIR } from "./config";
+import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
 import { isBuiltinJob } from "./cron/helpers";
 import { formatSchedule, formatRunCounts, jobEnabledIcon } from "./cron/format";
@@ -65,10 +65,6 @@ import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __gatewayDir = dirname(fileURLToPath(import.meta.url));
-const ROUNDHOUSE_VERSION: string = (() => {
-  try { return JSON.parse(readFileSync(join(__gatewayDir, "..", "package.json"), "utf8")).version; }
-  catch { return "unknown"; }
-})();
 
 function telegramChatIdFromThreadId(threadId: unknown): number | null {
   if (typeof threadId !== "string") return null;

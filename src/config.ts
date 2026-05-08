@@ -8,7 +8,20 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { readFile, access } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { GatewayConfig } from "./types";
+
+// ── Version ──────────────────────────────────────────
+
+const __configDir = dirname(fileURLToPath(import.meta.url));
+
+/** Roundhouse package version (read from package.json at startup) */
+export const ROUNDHOUSE_VERSION: string = (() => {
+  try { return JSON.parse(readFileSync(join(__configDir, "..", "package.json"), "utf8")).version; }
+  catch { return "unknown"; }
+})();
 
 // ── Path constants ───────────────────────────────────
 
