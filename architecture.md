@@ -258,37 +258,99 @@ The gateway and agent adapters don't change — only the router.
 ## Module dependency graph
 
 ```
-index.ts
-  ├── config.ts (loadConfig, applyEnvOverrides)
-  ├── agents/registry.ts
-  │     └── agents/pi.ts
-  │           └── util.ts (threadIdToDir)
-  ├── router.ts
-  ├── gateway.ts
-  │     └── util.ts (splitMessage, isAllowed, threadIdToDir, generateAttachmentId)
-  │     └── voice/stt-service.ts
-  │           └── voice/providers/whisper.ts
-  │           └── voice/types.ts
-  └── types.ts (shared interfaces, pure types only)
-
-cli/cli.ts
-  ├── config.ts (DEFAULT_CONFIG, CONFIG_PATH, loadConfig, etc.)
-  ├── agents/registry.ts (getAgentSdkPackage)
-  ├── cli/env-file.ts (parseEnvFile, serializeEnvFile, envQuote)
-  ├── cli/systemd.ts (resolveExecStart, generateUnit, writeServiceUnit, systemctl, etc.)
-  ├── cli/launchd.ts (generatePlist, installLaunchAgent, uninstallLaunchAgent, isLaunchAgentRunning)
-  ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
-  ├── cli/cron.ts → cron/store.ts, cron/runner.ts, cron/helpers.ts
-  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/launchd.ts, cli/setup-telegram.ts, bundle.ts
-
-gateway.ts also imports:
-  → commands/update.ts → bundle.ts (bundle provisioning)
-  → cli/doctor/runner.ts for /doctor command
-  → cron/scheduler.ts → cron/runner.ts → cron/store.ts
-  → cron/helpers.ts, cron/format.ts
-  → notify/telegram.ts
+src/
+├── index.ts                         # Entry: loads config → creates agent → starts gateway
+│   ├── config.ts                    # loadConfig, applyEnvOverrides, path constants
+│   ├── router.ts                    # SingleAgentRouter (future: Multi/Fallback/UserChoice)
+│   ├── types.ts                     # AgentAdapter, AgentMessage, AgentStreamEvent interfaces
+│   └── agents/
+│       ├── registry.ts              # Agent factory lookup, adapter definitions
+│       ├── base-adapter.ts          # BaseAdapter abstract class (shared defaults)
+│       ├── index.ts                 # Barrel re-export
+│       ├── pi/
+│       │   ├── pi-adapter.ts        # Pi factory: sessions, prompt/stream, lifecycle
+│       │   └── message-format.ts    # Pure: formatMessage, extractCustomMessage
+│       └── kiro/
+│           ├── kiro-adapter.ts      # Kiro class: ACP protocol, tool dispatch
+│           ├── session.ts           # Session lifecycle
+│           ├── tool-names.ts        # Tool name mapping
+│           └── acp/                 # Agent Communication Protocol client
+│               ├── client.ts
+│               ├── process.ts
+│               ├── types.ts
+│               └── index.ts
+│
+├── gateway.ts                       # Gateway class: chat SDK wiring, handleAgentTurn
+│   ├── gateway/
+│   │   ├── commands.ts              # 9 Telegram command handlers (/new, /stop, /status, etc.)
+│   │   ├── streaming.ts            # Agent event → Telegram message stream mapper
+│   │   ├── attachments.ts          # File save, validation, size limits
+│   │   ├── helpers.ts              # Pure utils: splitMessage, isAllowed, threadIdToDir
+│   │   └── index.ts                # Barrel re-export
+│   ├── commands/update.ts           # /update handler → bundle provisioning
+│   ├── cron/scheduler.ts            # Tick loop, catch-up, job dispatch
+│   ├── memory/                      # Session memory hooks (flush, compact, inject)
+│   ├── notify/telegram.ts           # Startup/error notifications
+│   └── voice/
+│       ├── stt-service.ts           # STT orchestration (provider chain)
+│       └── providers/whisper.ts     # Whisper CLI provider
+│
+├── cli/
+│   ├── cli.ts                       # CLI dispatcher: start/stop/status/logs/doctor/cron/setup
+│   ├── agent-command.ts             # `roundhouse agent` — one-shot prompt pipeline
+│   ├── service-manager.ts           # ServiceManager interface + Launchd/Systemd impls
+│   ├── shell.ts                     # Shell execution utilities
+│   ├── cron.ts                      # Thin dispatcher → cron-commands.ts
+│   ├── cron-commands.ts             # 10 cron command handlers (add/list/show/trigger/...)
+│   ├── detect.ts                    # Agent environment detection
+│   ├── env-file.ts                  # .env parser/serializer
+│   ├── systemd.ts                   # systemd unit generation, systemctl wrappers
+│   ├── launchd.ts                   # macOS plist generation, launchctl wrappers
+│   ├── setup.ts                     # Setup dispatcher (300 lines): cmdSetup, cmdPair, help
+│   ├── setup/
+│   │   ├── steps.ts                 # 11 step functions (preflight → postflight)
+│   │   ├── flows.ts                 # Interactive + headless orchestrators
+│   │   ├── runtime.ts               # Logger factories, agent resolution
+│   │   ├── args.ts                  # Argument parser
+│   │   ├── helpers.ts               # Atomic writes, exec wrappers
+│   │   ├── types.ts                 # SetupOptions, StepLog interface
+│   │   └── index.ts                 # Barrel export
+│   ├── setup-telegram.ts            # Telegram API: validate token, pair, register commands
+│   ├── setup-prompts.ts             # TTY prompt helpers
+│   ├── setup-logger.ts              # JSON/text logger for headless diagnostics
+│   ├── qr.ts                        # QR code generation for pairing links
+│   └── doctor/                      # Health checks (8 check modules + runner)
+│
+├── cron/                            # Cron job engine
+│   ├── store.ts                     # Job CRUD, run history persistence
+│   ├── runner.ts                    # Execute job → agent prompt → record result
+│   ├── scheduler.ts                 # Tick loop with catch-up
+│   ├── schedule.ts, durations.ts    # Parsing: cron expressions, intervals
+│   ├── template.ts                  # Variable substitution in prompts
+│   ├── format.ts, helpers.ts        # Display formatting, validation
+│   ├── constants.ts, types.ts       # Shared constants and interfaces
+│
+├── memory/                          # Roundhouse-managed session memory
+│   ├── lifecycle.ts                 # Flush/compact orchestration
+│   ├── policy.ts                    # Pressure detection, token thresholds
+│   ├── prompts.ts                   # LLM prompts for summarization
+│   ├── files.ts                     # Memory file I/O
+│   ├── bootstrap.ts, inject.ts      # Session bootstrapping, context injection
+│   ├── state.ts, types.ts           # State tracking, interfaces
+│
+├── telegram-format.ts               # Markdown → Telegram HTML converter
+├── telegram-html.ts                 # HTML entity utilities
+├── telegram-progress.ts             # Typing indicator + progress edits
+├── bundle.ts                        # Skill/extension bundle provisioning
+├── pairing.ts                       # Nonce-based Telegram pairing protocol
+├── commands.ts                      # Bot command definitions
+└── util.ts                          # Runtime helpers (crypto, path)
 ```
 
-No circular dependencies. `types.ts` and `config.ts` are pure leaf modules.
-`util.ts` is a leaf module with runtime helpers (`node:crypto` for attachment IDs).
-`bundle.ts` is a pure leaf module (only `node:*` imports) consumed by `cli/setup.ts` and `commands/update.ts`.
+**Dependency rules:**
+- No circular dependencies
+- `types.ts`, `config.ts`, `util.ts` are pure leaf modules
+- `bundle.ts` is a leaf (only `node:*` imports)
+- Gateway modules (`gateway/*.ts`) import from `../types`, `../config`, `../util`, `../memory/*`, `../telegram-*`
+- CLI modules never import from `gateway.ts` (separation of concerns)
+- Agent adapters depend on their SDK + `../../types`, `../../config`, `../../util`
