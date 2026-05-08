@@ -58,6 +58,7 @@ import {
   writePendingPairing,
   type PendingPairing,
 } from "../pairing";
+import { detectEnvironment, formatDetectionResults } from "./detect";
 
 // ── Types ────────────────────────────────────────────
 
@@ -477,18 +478,22 @@ async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): 
   }
 
   // Agent packages (driven by agent definition)
-  for (const pkg of agent.packages) {
-    const label = pkg.name ?? pkg.packageName;
-    const installed = pkg.binary ? whichSync(pkg.binary) : false;
-    if (installed && !opts.force) {
-      ok(`${label} (already installed)`);
-    } else {
-      log(`   Installing ${label}...`);
-      const args = pkg.install === "global"
-        ? ["install", "-g", pkg.packageName]
-        : ["install", pkg.packageName];
-      execOrFail("npm", args, `${label} install`);
-      ok(label);
+  if ((opts as any)._skipAgentInstall) {
+    ok("Agent already configured — skipping package install");
+  } else {
+    for (const pkg of agent.packages) {
+      const label = pkg.name ?? pkg.packageName;
+      const installed = pkg.binary ? whichSync(pkg.binary) : false;
+      if (installed && !opts.force) {
+        ok(`${label} (already installed)`);
+      } else {
+        log(`   Installing ${label}...`);
+        const args = pkg.install === "global"
+          ? ["install", "-g", pkg.packageName]
+          : ["install", pkg.packageName];
+        execOrFail("npm", args, `${label} install`);
+        ok(label);
+      }
     }
   }
 
@@ -925,6 +930,23 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
   try {
     // Step 1: Preflight
     await stepPreflight(opts, agent);
+
+    // Detect existing agent installations
+    const env = detectEnvironment();
+    if (env.agents.length > 0) {
+      log("");
+      log("  🔍 Agent detection:");
+      for (const line of formatDetectionResults(env)) {
+        ok(line);
+      }
+      // If agent already configured, skip package install later
+      if (env.recommended && !opts.force) {
+        const detected = env.agents.find(a => a.type === env.recommended);
+        if (detected?.configured) {
+          (opts as any)._skipAgentInstall = true;
+        }
+      }
+    }
 
     // Step 2: Get bot token (prompt if not provided)
     if (!opts.botToken) {
