@@ -601,7 +601,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       // Read agent version
       let version = "unknown";
       try {
-        const piPkgPath = join(__piAdapterDir, "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
+        const piPkgPath = join(__piAdapterDir, "..", "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
         version = JSON.parse(readFileSync(piPkgPath, "utf8")).version;
       } catch {}
 
