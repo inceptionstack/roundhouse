@@ -9,7 +9,7 @@ import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
-import { createProgressMessage } from "../telegram-progress";
+import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
 
 // ── Types ────────────────────────────────────────────

@@ -10,7 +10,7 @@ import {
   readPendingPairing,
   writePendingPairing,
   type PendingPairing,
-} from "../../pairing";
+} from "../../transports/telegram/pairing";
 import { detectEnvironment, formatDetectionResults } from "../detect";
 import { fileExists, ROUNDHOUSE_DIR, CONFIG_PATH, ENV_FILE_PATH as ENV_PATH } from "../../config";
 import { pairTelegram } from "../setup-telegram";

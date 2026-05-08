@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { readFile, writeFile, mkdir, unlink, realpath, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { BOT_COMMANDS } from "../../commands";
+import { BOT_COMMANDS } from "../../transports/telegram/bot-commands";
 import { provisionBundle, type ProvisionLog } from "../../bundle";
 import {
   ROUNDHOUSE_DIR,

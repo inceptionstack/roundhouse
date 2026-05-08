@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "../src/telegram-html";
+import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "../src/transports/telegram/html";
 
 function createMockThread(chatId = "12345") {
   const calls: Array<{ method: string; payload: any }> = [];

@@ -8,7 +8,7 @@
 import { readFile, writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { ROUNDHOUSE_DIR } from "./config";
+import { ROUNDHOUSE_DIR } from "../../config";
 
 export interface PendingPairing {
   version: 1;

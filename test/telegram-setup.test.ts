@@ -19,26 +19,26 @@ describe("pairing", () => {
   });
 
   it("createPairingNonce generates rh- prefixed hex", async () => {
-    const { createPairingNonce } = await import("../src/pairing");
+    const { createPairingNonce } = await import("../src/transports/telegram/pairing");
     const nonce = createPairingNonce();
     expect(nonce).toMatch(/^rh-[0-9a-f]{16}$/);
   });
 
   it("createPairingNonce generates unique values", async () => {
-    const { createPairingNonce } = await import("../src/pairing");
+    const { createPairingNonce } = await import("../src/transports/telegram/pairing");
     const a = createPairingNonce();
     const b = createPairingNonce();
     expect(a).not.toBe(b);
   });
 
   it("createPairingLink builds correct deep link", async () => {
-    const { createPairingLink } = await import("../src/pairing");
+    const { createPairingLink } = await import("../src/transports/telegram/pairing");
     const link = createPairingLink("my_bot", "rh-abc123");
     expect(link).toBe("https://t.me/my_bot?start=rh-abc123");
   });
 
   it("isStartForNonce matches /start nonce", async () => {
-    const { isStartForNonce } = await import("../src/pairing");
+    const { isStartForNonce } = await import("../src/transports/telegram/pairing");
     expect(isStartForNonce("/start rh-abc123", "rh-abc123")).toBe(true);
     expect(isStartForNonce("rh-abc123", "rh-abc123")).toBe(true);
     expect(isStartForNonce("/start rh-wrong", "rh-abc123")).toBe(false);
@@ -47,7 +47,7 @@ describe("pairing", () => {
   });
 
   it("isStartForNonce handles whitespace", async () => {
-    const { isStartForNonce } = await import("../src/pairing");
+    const { isStartForNonce } = await import("../src/transports/telegram/pairing");
     expect(isStartForNonce("  /start rh-abc123  ", "rh-abc123")).toBe(true);
     expect(isStartForNonce("  rh-abc123  ", "rh-abc123")).toBe(true);
   });
