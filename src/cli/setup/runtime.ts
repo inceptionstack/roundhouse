@@ -7,7 +7,7 @@ import {
   type AgentDefinition,
   type AgentSetupContext,
 } from "../../agents/registry";
-import { type SetupLogger } from "../setup-logger";
+import { type SetupLogger } from "./logger";
 
 export function resolveAgentForSetup(opts: SetupOptions, logger: StepLog): AgentDefinition {
   const agent = { ...getAgentDefinition(opts.agent) };

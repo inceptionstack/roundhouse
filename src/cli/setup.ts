@@ -27,7 +27,7 @@ import {
 import {
   validateBotToken,
   pairTelegram,
-} from "./setup-telegram";
+} from "./setup/telegram";
 import {
   stepPreflight,
   stepValidateToken,

@@ -55,7 +55,7 @@ describe("pairing", () => {
 
 describe("setup-logger", () => {
   it("createTextLogger has all methods", async () => {
-    const { createTextLogger } = await import("../src/cli/setup-logger");
+    const { createTextLogger } = await import("../src/cli/setup/logger");
     const logger = createTextLogger();
     expect(typeof logger.step).toBe("function");
     expect(typeof logger.info).toBe("function");
@@ -66,7 +66,7 @@ describe("setup-logger", () => {
   });
 
   it("createJsonLogger emits valid JSON", async () => {
-    const { createJsonLogger } = await import("../src/cli/setup-logger");
+    const { createJsonLogger } = await import("../src/cli/setup/logger");
     const logger = createJsonLogger();
     const lines: string[] = [];
     const origLog = console.log;
@@ -91,7 +91,7 @@ describe("setup-logger", () => {
   });
 
   it("JSON logger redacts tokens", async () => {
-    const { createJsonLogger } = await import("../src/cli/setup-logger");
+    const { createJsonLogger } = await import("../src/cli/setup/logger");
     const logger = createJsonLogger();
     const lines: string[] = [];
     const origLog = console.log;

@@ -33,7 +33,7 @@ import {
   sendMessage,
   type BotInfo,
   type PairResult,
-} from "../setup-telegram";
+} from "./telegram";
 
 export async function stepPreflight(logger: StepLog, opts: SetupOptions, agent: AgentDefinition): Promise<void> {
   logger.step("①", "Preflight checks...");
