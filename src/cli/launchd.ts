@@ -12,12 +12,11 @@ import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { whichSync } from "./systemd";
 import { ROUNDHOUSE_DIR } from "../config";
+const __dirname = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
 
 const LABEL = "com.inceptionstack.roundhouse";
 const PLIST_DIR = resolve(homedir(), "Library", "LaunchAgents");
 export const PLIST_PATH = resolve(PLIST_DIR, `${LABEL}.plist`);
-
-
 /**
  * Generate a LaunchAgent plist for roundhouse.
  */
@@ -36,8 +35,6 @@ export function generatePlist(): string {
   }
 
   const logDir = resolve(ROUNDHOUSE_DIR, "logs");
-
-
   let envSection = "";
   const envVars: Record<string, string> = {
     HOME: homedir(),
@@ -145,4 +142,3 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-const __dirname = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
