@@ -13,6 +13,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo } from "../../types.js";
+import { ROUNDHOUSE_VERSION } from "../../config.js";
 import { BaseAdapter } from "../base-adapter.js";
 import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
@@ -188,7 +189,7 @@ class KiroAdapter extends BaseAdapter {
 
     await this.mainProcess.client.call<InitializeResult>("initialize", {
       protocolVersion: "1.0",
-      clientInfo: { name: "roundhouse", version: "0.4.3" },
+      clientInfo: { name: "roundhouse", version: ROUNDHOUSE_VERSION },
     });
 
     if (!this.reaperInterval) {
