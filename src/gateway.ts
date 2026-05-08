@@ -408,95 +408,103 @@ export class Gateway {
     threadLocks.set(agentThreadId, lockPromise);
     if (prevLock) await prevLock;
 
-    console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
-
-    // Enrich audio attachments with transcripts (STT)
-    if (this.sttService && agentMessage.attachments?.length) {
-      try {
-        await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
-        if (!agentMessage.text) {
-          const transcripts = agentMessage.attachments
-            .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
-            .map((a) => a.transcript!.text);
-          if (transcripts.length > 0) {
-            agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
-          } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
-            agentMessage.text = "Voice message attached, but automatic transcription failed.";
-          }
-        }
-      } catch (err) {
-        console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
-      }
-    }
-
-    // Let the agent adapter apply platform-specific message transforms
-    if (agent.prepareMessage) {
-      agentMessage = agent.prepareMessage(agentThreadId, agentMessage, {
-        platform: "telegram",
-        hasAttachments: !!(agentMessage.attachments?.length),
-      });
-    }
-
-    // Memory: pre-turn injection (Full mode only)
-    const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
-    const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
-    let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
+    let stopTyping: (() => void) | null = null;
     try {
-      memoryPrepared = await prepareMemoryForTurn(agentThreadId, agentMessage, agent, memoryRoot, this.config.memory);
-      agentMessage = memoryPrepared.message;
-    } catch (err) {
-      console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
-    }
+      console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
-    const stopTyping = startTypingLoop(thread);
-
-    try {
-      let turnUsedTools = false;
-      if (agent.promptStream) {
-        const ac = new AbortController();
-        abortControllers.set(agentThreadId, ac);
+      // Enrich audio attachments with transcripts (STT)
+      if (this.sttService && agentMessage.attachments?.length) {
         try {
-          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
-          turnUsedTools = streamResult.usedTools;
-        } finally {
-          abortControllers.delete(agentThreadId);
-        }
-      } else {
-        const reply = await agent.prompt(agentThreadId, agentMessage);
-        turnUsedTools = true;
-        if (reply.text) {
-          await this.postWithFallback(thread, reply.text);
+          await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
+          if (!agentMessage.text) {
+            const transcripts = agentMessage.attachments
+              .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
+              .map((a) => a.transcript!.text);
+            if (transcripts.length > 0) {
+              agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
+            } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
+              agentMessage.text = "Voice message attached, but automatic transcription failed.";
+            }
+          }
+        } catch (err) {
+          console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
         }
       }
 
-      // Memory: post-turn finalize + pressure check
+      // Let the agent adapter apply platform-specific message transforms
+      if (agent.prepareMessage) {
+        try {
+          agentMessage = agent.prepareMessage(agentThreadId, agentMessage, {
+            platform: "telegram",
+            hasAttachments: !!(agentMessage.attachments?.length),
+          });
+        } catch (err) {
+          console.error(`[roundhouse] prepareMessage error:`, (err as Error).message);
+        }
+      }
+
+      // Memory: pre-turn injection (Full mode only)
+      const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
+      const memoryRoot = this.config.memory?.rootDir ?? agentCwd;
+      let memoryPrepared: Awaited<ReturnType<typeof prepareMemoryForTurn>> | undefined;
       try {
-        if (memoryPrepared) memoryPrepared.turnUsedTools = turnUsedTools;
-        const pressure = await finalizeMemoryForTurn(
-          agentThreadId,
-          memoryPrepared ?? { message: agentMessage, beforeDigest: null, injected: false },
-          agent, memoryRoot, this.config.memory,
-        );
-        const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
-        if (effectivePressure !== "none") {
+        memoryPrepared = await prepareMemoryForTurn(agentThreadId, agentMessage, agent, memoryRoot, this.config.memory);
+        agentMessage = memoryPrepared.message;
+      } catch (err) {
+        console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
+      }
+
+      stopTyping = startTypingLoop(thread);
+
+      try {
+        let turnUsedTools = false;
+        if (agent.promptStream) {
+          const ac = new AbortController();
+          abortControllers.set(agentThreadId, ac);
           try {
-            await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
-          } catch (err) {
-            console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
+            const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+            turnUsedTools = streamResult.usedTools;
+          } finally {
+            abortControllers.delete(agentThreadId);
+          }
+        } else {
+          const reply = await agent.prompt(agentThreadId, agentMessage);
+          turnUsedTools = true;
+          if (reply.text) {
+            await this.postWithFallback(thread, reply.text);
           }
         }
+
+        // Memory: post-turn finalize + pressure check
+        try {
+          if (memoryPrepared) memoryPrepared.turnUsedTools = turnUsedTools;
+          const pressure = await finalizeMemoryForTurn(
+            agentThreadId,
+            memoryPrepared ?? { message: agentMessage, beforeDigest: null, injected: false },
+            agent, memoryRoot, this.config.memory,
+          );
+          const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
+          if (effectivePressure !== "none") {
+            try {
+              await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
+            } catch (err) {
+              console.error(`[roundhouse] context pressure handler error:`, (err as Error).message);
+            }
+          }
+        } catch (err) {
+          console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
+        }
       } catch (err) {
-        console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const safeMsg = errMsg.split('\n')[0].slice(0, 200);
+        console.error(`[roundhouse] agent error:`, err);
+        try {
+          await thread.post(`⚠️ Error: ${safeMsg}`);
+        } catch {}
+      } finally {
+        if (stopTyping) stopTyping();
       }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const safeMsg = errMsg.split('\n')[0].slice(0, 200);
-      console.error(`[roundhouse] agent error:`, err);
-      try {
-        await thread.post(`⚠️ Error: ${safeMsg}`);
-      } catch {}
     } finally {
-      stopTyping();
       releaseLock!();
       if (threadLocks.get(agentThreadId) === lockPromise) {
         threadLocks.delete(agentThreadId);

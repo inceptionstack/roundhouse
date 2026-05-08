@@ -1,9 +1,11 @@
 /**
  * gateway/index.ts — Barrel export for gateway sub-modules
  *
- * Re-exports the Gateway class from the main gateway file.
- * Sub-modules (helpers, attachments, streaming) are imported
- * directly by gateway.ts — this barrel is for external consumers.
+ * Re-exports helpers, attachments, streaming, and commands for
+ * external consumers. The Gateway class itself lives at src/gateway.ts
+ * and is imported directly (not through this barrel).
  */
 
-export { Gateway } from "./gateway";
+export { isCommand, isCommandWithArgs, resolveAgentThreadId, getSystemResources, toolIcon } from "./helpers";
+export { saveAttachments } from "./attachments";
+export { handleStreaming } from "./streaming";

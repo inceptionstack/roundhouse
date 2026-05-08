@@ -22,7 +22,6 @@ import { getAgentSdkPackage } from "../agents/registry";
 import { threadIdToDir } from "../util";
 import { parseEnvFile, unquoteEnvValue } from "./env-file";
 import { getServiceManager } from "./service-manager";
-import { getServiceManager } from "./service-manager";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
