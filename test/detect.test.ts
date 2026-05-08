@@ -57,7 +57,7 @@ describe("detectEnvironment", () => {
   });
 
   it("detects kiro when binary exists", () => {
-    vi.mocked(whichSync).mockImplementation((cmd) => cmd === "kiro" ? "/usr/bin/kiro" : null);
+    vi.mocked(whichSync).mockImplementation((cmd) => cmd === "kiro-cli" ? "/usr/bin/kiro" : null);
     const env = detectEnvironment();
     expect(env.agents).toHaveLength(1);
     expect(env.agents[0].type).toBe("kiro");
@@ -75,7 +75,7 @@ describe("detectEnvironment", () => {
   it("recommends pi when multiple agents configured", () => {
     vi.mocked(whichSync).mockImplementation((cmd) => {
       if (cmd === "pi") return "/usr/bin/pi";
-      if (cmd === "kiro") return "/usr/bin/kiro";
+      if (cmd === "kiro-cli") return "/usr/bin/kiro";
       return null;
     });
     vi.mocked(existsSync).mockReturnValue(true);

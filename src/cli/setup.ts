@@ -84,6 +84,8 @@ interface SetupOptions {
   qr: "auto" | "always" | "never";
   /** Agent type (default: pi) */
   agent: string;
+  /** Set by detection: skip agent package install if already configured */
+  _skipAgentInstall?: boolean;
 }
 
 type StepStatus = "ok" | "warn" | "skip" | "fail";
@@ -478,7 +480,7 @@ async function stepInstallPackages(opts: SetupOptions, agent: AgentDefinition): 
   }
 
   // Agent packages (driven by agent definition)
-  if ((opts as any)._skipAgentInstall) {
+  if (opts._skipAgentInstall) {
     ok("Agent already configured — skipping package install");
   } else {
     for (const pkg of agent.packages) {
@@ -939,11 +941,11 @@ async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
       for (const line of formatDetectionResults(env)) {
         ok(line);
       }
-      // If agent already configured, skip package install later
-      if (env.recommended && !opts.force) {
-        const detected = env.agents.find(a => a.type === env.recommended);
-        if (detected?.configured) {
-          (opts as any)._skipAgentInstall = true;
+      // If the selected agent is already configured, skip package install
+      if (!opts.force) {
+        const selected = env.agents.find(a => a.type === opts.agent);
+        if (selected?.configured) {
+          opts._skipAgentInstall = true;
         }
       }
     }

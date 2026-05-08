@@ -55,17 +55,19 @@ function detectPi(): DetectedAgent | null {
 }
 
 function detectKiro(): DetectedAgent | null {
-  const binary = whichSync("kiro");
+  const binary = whichSync("kiro-cli");
   if (!binary) return null;
 
   let version: string | null = null;
   try {
     
-    version = execFileSync("kiro", ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
+    version = execFileSync("kiro-cli", ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
   } catch {}
 
-  // Kiro doesn't have a central config file like Pi — just check binary presence
-  return { type: "kiro", binary, version, configured: true, details: {} };
+  // Check for kiro config directory
+  const configDir = resolve(homedir(), ".kiro");
+  const configured = existsSync(configDir);
+  return { type: "kiro", binary, version, configured, details: {} };
 }
 
 function detectOpenClaw(): DetectedAgent | null {
