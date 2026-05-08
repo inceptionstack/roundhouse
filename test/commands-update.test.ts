@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { UpdateProgress, UpdateResult } from "../src/commands/update";
+import type { UpdateProgress, UpdateResult } from "../src/cli/update";
 
 describe("commands/update", () => {
   describe("UpdateProgress interface", () => {

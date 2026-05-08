@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { performUpdate } from "../commands/update";
+import { performUpdate } from "./update";
 
 import {
   CONFIG_PATH,

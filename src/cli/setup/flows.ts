@@ -1,8 +1,8 @@
 import { platform } from "node:os";
 import { execFileSync } from "node:child_process";
 import { type SetupOptions } from "./types";
-import { promptText, promptMasked } from "../setup-prompts";
-import { createJsonLogger, type SetupDiagnostics, printDiagnosticError } from "../setup-logger";
+import { promptText, promptMasked } from "./prompts";
+import { createJsonLogger, type SetupDiagnostics, printDiagnosticError } from "./logger";
 import { printQr } from "../qr";
 import {
   createPairingNonce,
@@ -10,10 +10,10 @@ import {
   readPendingPairing,
   writePendingPairing,
   type PendingPairing,
-} from "../../pairing";
+} from "../../transports/telegram/pairing";
 import { detectEnvironment, formatDetectionResults } from "../detect";
 import { fileExists, ROUNDHOUSE_DIR, CONFIG_PATH, ENV_FILE_PATH as ENV_PATH } from "../../config";
-import { pairTelegram } from "../setup-telegram";
+import { pairTelegram } from "./telegram";
 import {
   stepPreflight,
   stepValidateToken,

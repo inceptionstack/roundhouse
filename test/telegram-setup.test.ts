@@ -19,26 +19,26 @@ describe("pairing", () => {
   });
 
   it("createPairingNonce generates rh- prefixed hex", async () => {
-    const { createPairingNonce } = await import("../src/pairing");
+    const { createPairingNonce } = await import("../src/transports/telegram/pairing");
     const nonce = createPairingNonce();
     expect(nonce).toMatch(/^rh-[0-9a-f]{16}$/);
   });
 
   it("createPairingNonce generates unique values", async () => {
-    const { createPairingNonce } = await import("../src/pairing");
+    const { createPairingNonce } = await import("../src/transports/telegram/pairing");
     const a = createPairingNonce();
     const b = createPairingNonce();
     expect(a).not.toBe(b);
   });
 
   it("createPairingLink builds correct deep link", async () => {
-    const { createPairingLink } = await import("../src/pairing");
+    const { createPairingLink } = await import("../src/transports/telegram/pairing");
     const link = createPairingLink("my_bot", "rh-abc123");
     expect(link).toBe("https://t.me/my_bot?start=rh-abc123");
   });
 
   it("isStartForNonce matches /start nonce", async () => {
-    const { isStartForNonce } = await import("../src/pairing");
+    const { isStartForNonce } = await import("../src/transports/telegram/pairing");
     expect(isStartForNonce("/start rh-abc123", "rh-abc123")).toBe(true);
     expect(isStartForNonce("rh-abc123", "rh-abc123")).toBe(true);
     expect(isStartForNonce("/start rh-wrong", "rh-abc123")).toBe(false);
@@ -47,7 +47,7 @@ describe("pairing", () => {
   });
 
   it("isStartForNonce handles whitespace", async () => {
-    const { isStartForNonce } = await import("../src/pairing");
+    const { isStartForNonce } = await import("../src/transports/telegram/pairing");
     expect(isStartForNonce("  /start rh-abc123  ", "rh-abc123")).toBe(true);
     expect(isStartForNonce("  rh-abc123  ", "rh-abc123")).toBe(true);
   });
@@ -55,7 +55,7 @@ describe("pairing", () => {
 
 describe("setup-logger", () => {
   it("createTextLogger has all methods", async () => {
-    const { createTextLogger } = await import("../src/cli/setup-logger");
+    const { createTextLogger } = await import("../src/cli/setup/logger");
     const logger = createTextLogger();
     expect(typeof logger.step).toBe("function");
     expect(typeof logger.info).toBe("function");
@@ -66,7 +66,7 @@ describe("setup-logger", () => {
   });
 
   it("createJsonLogger emits valid JSON", async () => {
-    const { createJsonLogger } = await import("../src/cli/setup-logger");
+    const { createJsonLogger } = await import("../src/cli/setup/logger");
     const logger = createJsonLogger();
     const lines: string[] = [];
     const origLog = console.log;
@@ -91,7 +91,7 @@ describe("setup-logger", () => {
   });
 
   it("JSON logger redacts tokens", async () => {
-    const { createJsonLogger } = await import("../src/cli/setup-logger");
+    const { createJsonLogger } = await import("../src/cli/setup/logger");
     const logger = createJsonLogger();
     const lines: string[] = [];
     const origLog = console.log;

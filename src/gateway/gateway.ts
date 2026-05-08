@@ -9,22 +9,22 @@ import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
 import { splitMessage, isAllowed, startTypingLoop } from "./util";
-import { isTelegramThread, postTelegramHtml } from "./telegram-html";
+import { isTelegramThread, postTelegramHtml } from "../transports/telegram/html";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
-import { sendTelegramToMany } from "./notify/telegram";
+import { sendTelegramToMany } from "../transports/telegram/notify";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
-import { BOT_COMMANDS } from "./commands";
+import { BOT_COMMANDS } from "../transports/telegram/bot-commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel, CompactResult } from "./memory/types";
-import { readPendingPairing, completePendingPairing, isStartForNonce } from "./pairing";
-import { createProgressMessage } from "./telegram-progress";
-import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./gateway/helpers";
-import { saveAttachments as _saveAttachments, type AttachmentResult } from "./gateway/attachments";
-import { handleStreaming as _handleStream, type StreamResult } from "./gateway/streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./gateway/commands";
+import { readPendingPairing, completePendingPairing, isStartForNonce } from "../transports/telegram/pairing";
+import { createProgressMessage } from "../transports/telegram/progress";
+import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./helpers";
+import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
+import { handleStreaming as _handleStream, type StreamResult } from "./streaming";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */

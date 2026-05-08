@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { readFile, writeFile, mkdir, unlink, realpath, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { BOT_COMMANDS } from "../../commands";
-import { provisionBundle, type ProvisionLog } from "../../bundle";
+import { BOT_COMMANDS } from "../../transports/telegram/bot-commands";
+import { provisionBundle, type ProvisionLog } from "../../provisioning/bundle";
 import {
   ROUNDHOUSE_DIR,
   CONFIG_PATH,
@@ -33,7 +33,7 @@ import {
   sendMessage,
   type BotInfo,
   type PairResult,
-} from "../setup-telegram";
+} from "./telegram";
 
 export async function stepPreflight(logger: StepLog, opts: SetupOptions, agent: AgentDefinition): Promise<void> {
   logger.step("①", "Preflight checks...");

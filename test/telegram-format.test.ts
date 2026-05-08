@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markdownToTelegramHtml, truncateHtmlSafe } from "../src/telegram-format";
+import { markdownToTelegramHtml, truncateHtmlSafe } from "../src/transports/telegram/format";
 
 describe("markdownToTelegramHtml", () => {
   it("escapes HTML entities", () => {

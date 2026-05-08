@@ -9,7 +9,7 @@ import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
-import { createProgressMessage } from "../telegram-progress";
+import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
 
 // ── Types ────────────────────────────────────────────
@@ -70,7 +70,7 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
   console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
   const progress = await createProgressMessage(thread, "📦 Checking for updates...");
   try {
-    const { performUpdate } = await import("../commands/update");
+    const { performUpdate } = await import("../cli/update");
     const result = await performUpdate(progress);
     if (result.action === "already-latest") {
       await progress.update(`✅ Already on latest (v${result.currentVersion})`);

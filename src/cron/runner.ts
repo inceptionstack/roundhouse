@@ -6,7 +6,7 @@
  */
 
 import { getAgentFactory } from "../agents/registry";
-import { sendTelegramToMany } from "../notify/telegram";
+import { sendTelegramToMany } from "../transports/telegram/notify";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";
 import type { CronJobConfig, CronRunRecord } from "./types";

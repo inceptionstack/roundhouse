@@ -8,8 +8,8 @@
  * typing indicators, command handling, authorization, message history.
  */
 
-import { markdownToTelegramHtml, truncateHtmlSafe } from "./telegram-format";
-import { splitMessage } from "./util";
+import { markdownToTelegramHtml, truncateHtmlSafe } from "./format";
+import { splitMessage } from "../../util";
 
 /** Max Telegram message length */
 const TELEGRAM_LIMIT = 4096;

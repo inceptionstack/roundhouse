@@ -10,7 +10,7 @@
 
 import type { AgentStreamEvent } from "../types";
 import { READ_ONLY_TOOLS } from "../memory/types";
-import { isTelegramThread, handleTelegramHtmlStream } from "../telegram-html";
+import { isTelegramThread, handleTelegramHtmlStream } from "../transports/telegram/html";
 import { DEBUG_STREAM } from "../util";
 import { toolIcon } from "./helpers";
 

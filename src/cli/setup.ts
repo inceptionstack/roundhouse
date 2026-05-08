@@ -10,7 +10,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { BOT_COMMANDS } from "../commands";
+import { BOT_COMMANDS } from "../transports/telegram/bot-commands";
 import { atomicWriteJson, execSafe } from "./setup/helpers";
 import { type SetupOptions } from "./setup/types";
 import { parseSetupArgs } from "./setup/args";
@@ -27,7 +27,7 @@ import {
 import {
   validateBotToken,
   pairTelegram,
-} from "./setup-telegram";
+} from "./setup/telegram";
 import {
   stepPreflight,
   stepValidateToken,
