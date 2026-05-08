@@ -1,8 +1,8 @@
 /**
- * cli/setup-prompts.ts — Interactive prompts using only Node built-in readline.
+ * cli/setup/prompts.ts — Interactive prompts using only Node built-in readline.
  * No external dependencies.
  */
-import { createInterface, Interface } from "node:readline";
+import { createInterface } from "node:readline";
 
 /**
  * Prompt the user for text input with optional default.
@@ -75,4 +75,25 @@ export async function promptConfirm(
   const answer = await promptText(`${question} ${hint}`);
   if (!answer) return !!options?.defaultYes;
   return answer.toLowerCase().startsWith("y");
+}
+
+/**
+ * Prompt user to pick from a numbered list of choices.
+ * Returns the index of the selected item (0-based).
+ */
+export async function promptChoice(
+  items: { label: string; hint?: string }[],
+  options?: { defaultIndex?: number },
+): Promise<number> {
+  if (items.length === 0) throw new Error("promptChoice: items must not be empty");
+  const def = Math.min(Math.max(0, options?.defaultIndex ?? 0), items.length - 1);
+  for (let i = 0; i < items.length; i++) {
+    const marker = i === def ? "*" : " ";
+    const hint = items[i].hint ? ` (${items[i].hint})` : "";
+    console.log(`   ${marker} ${i + 1}. ${items[i].label}${hint}`);
+  }
+  const answer = await promptText(`  Select`, { defaultValue: String(def + 1) });
+  const num = parseInt(answer || String(def + 1), 10);
+  if (isNaN(num) || num < 1 || num > items.length) return def;
+  return num - 1;
 }
