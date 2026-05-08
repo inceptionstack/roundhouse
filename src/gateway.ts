@@ -429,10 +429,12 @@ export class Gateway {
       }
     }
 
-    // Append Telegram formatting hint (after STT may have set agentMessage.text)
-    const TELEGRAM_HINT = "\n\n[Format your final answer for Telegram: concise, use markdown sparingly, avoid long code blocks.]";
-    if (agentMessage.text) {
-      agentMessage.text += TELEGRAM_HINT;
+    // Let the agent adapter apply platform-specific message transforms
+    if (agent.prepareMessage) {
+      agentMessage = agent.prepareMessage(agentThreadId, agentMessage, {
+        platform: "telegram",
+        hasAttachments: !!(agentMessage.attachments?.length),
+      });
     }
 
     // Memory: pre-turn injection (Full mode only)

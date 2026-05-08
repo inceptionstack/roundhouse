@@ -26,7 +26,7 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent } from "../../types";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
 import { SESSIONS_DIR } from "../../config";
 import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
@@ -620,6 +620,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         memoryTools: memoryCapabilities?.memoryTools ?? [],
         extensions: memoryCapabilities?.extensions ?? [],
       };
+    },
+
+    prepareMessage(_threadId: string, message: AgentMessage, context: MessageContext): AgentMessage {
+      if (context.platform === "telegram" && message.text) {
+        return { ...message, text: message.text + "\n\n[Format your final answer for Telegram: concise, use markdown sparingly, avoid long code blocks.]" };
+      }
+      return message;
     },
   };
 
