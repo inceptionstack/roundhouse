@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { whichSync } from "./systemd";
+import { whichSync } from "./shell";
 import { ROUNDHOUSE_DIR } from "../config";
 const __dirname = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
 
