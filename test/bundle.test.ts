@@ -12,7 +12,7 @@ import {
   SKILLS_DIR,
   SKILLS_REPO,
   type ProvisionLog,
-} from "../src/bundle";
+} from "../src/provisioning/bundle";
 
 // Mock child_process to control `which` checks and block real installs
 vi.mock("node:child_process", async (importOriginal) => {

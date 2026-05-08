@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, unlink, realpath, stat } from "node:fs/prom
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { BOT_COMMANDS } from "../../transports/telegram/bot-commands";
-import { provisionBundle, type ProvisionLog } from "../../bundle";
+import { provisionBundle, type ProvisionLog } from "../../provisioning/bundle";
 import {
   ROUNDHOUSE_DIR,
   CONFIG_PATH,

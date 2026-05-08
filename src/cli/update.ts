@@ -8,7 +8,7 @@
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { provisionBundle } from "../bundle";
+import { provisionBundle } from "../provisioning/bundle";
 
 export interface UpdateProgress {
   update(text: string): Promise<void>;
