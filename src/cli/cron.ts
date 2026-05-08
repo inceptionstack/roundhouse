@@ -46,7 +46,7 @@ export async function cmdCron(args: string[]): Promise<void> {
   const store = new CronStore();
   await store.ensureDirs();
 
-  const handler = sub ? COMMANDS[sub] : undefined;
+  const handler = sub && Object.hasOwn(COMMANDS, sub) ? COMMANDS[sub] : undefined;
   if (handler) {
     await handler(store, positional, flags);
   } else {
