@@ -448,11 +448,26 @@ async function stepValidateToken(opts: SetupOptions): Promise<BotInfo> {
 async function stepStopGateway(): Promise<void> {
   step("④", "Checking for running gateway...");
 
-  if (platform() !== "linux") {
-    ok("Not Linux — skipping service check");
+  if (platform() === "darwin") {
+    try {
+      const { isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
+      if (isLaunchAgentRunning()) {
+        log("   Stopping existing LaunchAgent...");
+        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
+        ok("LaunchAgent stopped");
+      } else {
+        ok("No running gateway");
+      }
+    } catch {
+      ok("No running gateway");
+    }
     return;
   }
 
+  if (platform() !== "linux") {
+    ok("Skipped (not Linux or macOS)");
+    return;
+  }
   if (isServiceActive()) {
     log("   Stopping existing gateway...");
     try {
