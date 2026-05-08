@@ -276,9 +276,10 @@ cli/cli.ts
   ├── agents/registry.ts (getAgentSdkPackage)
   ├── cli/env-file.ts (parseEnvFile, serializeEnvFile, envQuote)
   ├── cli/systemd.ts (resolveExecStart, generateUnit, writeServiceUnit, systemctl, etc.)
+  ├── cli/launchd.ts (generatePlist, installLaunchAgent, uninstallLaunchAgent, isLaunchAgentRunning)
   ├── cli/doctor.ts → cli/doctor/runner.ts → cli/doctor/checks/*
   ├── cli/cron.ts → cron/store.ts, cron/runner.ts, cron/helpers.ts
-  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/setup-telegram.ts, bundle.ts
+  └── cli/setup.ts → cli/env-file.ts, cli/systemd.ts, cli/launchd.ts, cli/setup-telegram.ts, bundle.ts
 
 gateway.ts also imports:
   → commands/update.ts → bundle.ts (bundle provisioning)

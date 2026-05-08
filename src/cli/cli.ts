@@ -5,6 +5,7 @@
  */
 
 import { resolve, dirname } from "node:path";
+import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
 import { execSync, execFileSync, spawn } from "node:child_process";
@@ -54,6 +55,28 @@ function run(cmd: string, opts?: { silent?: boolean }): string {
 // ── Commands ────────────────────────────────────────
 
 async function cmdStart() {
+  // macOS: check launchd agent
+  if (process.platform === "darwin") {
+    const { isLaunchAgentInstalled, isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      if (isLaunchAgentRunning()) {
+        console.log("Roundhouse is already running (LaunchAgent).");
+        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+        console.log("  Stop: roundhouse stop");
+        return;
+      }
+      // Load it
+      try {
+        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
+        console.log("LaunchAgent started.");
+        console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+        return;
+      } catch {
+        // Fall through to foreground
+      }
+    }
+  }
+
   if (isServiceInstalled()) {
     if (isServiceActive()) {
       console.log("Roundhouse is already running.");
@@ -147,6 +170,16 @@ async function cmdInstall() {
   console.log("  and installs the systemd service — all in one command.\n");
 }
 async function cmdUninstall() {
+  if (process.platform === "darwin") {
+    const { uninstallLaunchAgent, isLaunchAgentInstalled } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      await uninstallLaunchAgent();
+      console.log("  ✅ LaunchAgent removed. Config preserved at:", CONFIG_PATH);
+    } else {
+      console.log("  No LaunchAgent installed.");
+    }
+    return;
+  }
 
   console.log("[roundhouse] Removing systemd daemon...");
   try { systemctl("stop"); } catch {}
@@ -167,7 +200,21 @@ async function cmdUpdate() {
 
   console.log(`[roundhouse] Updated to v${result.latestVersion}`);
 
-  if (process.platform === "darwin" || !isServiceInstalled()) {
+  if (process.platform === "darwin") {
+    // Try to restart launchd agent
+    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      try {
+        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
+        execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
+        console.log("\n  ✅ Updated and restarted (LaunchAgent).");
+      } catch {
+        console.log("\n  ✅ Update complete. Restart with: roundhouse start");
+      }
+    } else {
+      console.log("\n  ✅ Update complete. Restart with: roundhouse start");
+    }
+  } else if (!isServiceInstalled()) {
     console.log("\n  ✅ Update complete. Restart with: roundhouse start");
   } else {
     console.log("\n[roundhouse] Restarting daemon...");
@@ -180,6 +227,23 @@ async function cmdUpdate() {
 }
 
 async function cmdStatus() {
+  // macOS: check launchd
+  if (process.platform === "darwin") {
+    const { isLaunchAgentInstalled, isLaunchAgentRunning } = await import("./launchd.ts");
+    if (isLaunchAgentRunning()) {
+      console.log("\n  ✅ Roundhouse is running (LaunchAgent).\n");
+      console.log("  Logs: ~/.roundhouse/logs/roundhouse.log");
+      console.log("  Stop: roundhouse stop\n");
+    } else if (isLaunchAgentInstalled()) {
+      console.log("\n  ⚠️  LaunchAgent installed but not running.\n");
+      console.log("  Start with: roundhouse start\n");
+    } else {
+      console.log("\n  ❌ Roundhouse is not running.\n");
+      console.log("  Start with: roundhouse start\n");
+    }
+    return;
+  }
+
   if (!isServiceActive()) {
     console.log("\n  ❌ Roundhouse is not running.\n");
     console.log("  Start with: roundhouse start\n");
@@ -268,15 +332,47 @@ async function cmdStatus() {
   console.log();
 }
 
-function cmdLogs() {
+async function cmdLogs() {
+  if (process.platform === "darwin") {
+    const logPath = resolve(homedir(), ".roundhouse", "logs", "roundhouse.log");
+    const child = spawn("tail", ["-f", "-n", "100", logPath], { stdio: "inherit" });
+    child.on("error", () => console.log("Could not read logs. Check ~/.roundhouse/logs/"));
+    return;
+  }
   const child = spawn("journalctl", ["-u", SERVICE_NAME, "-f", "--no-pager", "-n", "100"], {
     stdio: "inherit",
   });
   child.on("error", () => console.log("Could not read logs. Is the daemon installed?"));
 }
 
-function cmdStop() { systemctl("stop", "Daemon stopped."); }
-function cmdRestart() { systemctl("restart", "Daemon restarted."); }
+async function cmdStop() {
+  if (process.platform === "darwin") {
+    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      try { execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" }); } catch (e: any) { if (!e.message?.includes("Could not find")) console.warn("  (unload warning:", e.message?.split("\n")[0], ")"); }
+      console.log("LaunchAgent stopped.");
+    } else {
+      console.log("No LaunchAgent installed. Nothing to stop.");
+    }
+    return;
+  }
+  systemctl("stop", "Daemon stopped.");
+}
+
+async function cmdRestart() {
+  if (process.platform === "darwin") {
+    const { isLaunchAgentInstalled, PLIST_PATH } = await import("./launchd.ts");
+    if (isLaunchAgentInstalled()) {
+      try { execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" }); } catch {}
+      execFileSync("launchctl", ["load", PLIST_PATH], { stdio: "pipe" });
+      console.log("LaunchAgent restarted.");
+    } else {
+      console.log("No LaunchAgent installed. Run: roundhouse setup --telegram");
+    }
+    return;
+  }
+  systemctl("restart", "Daemon restarted.");
+}
 
 async function cmdConfig() {
   console.log(`Config path: ${CONFIG_PATH}\n`);

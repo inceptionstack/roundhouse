@@ -10,7 +10,7 @@ Multiple chat inputs (Telegram, Slack, Discord via [Vercel Chat SDK](https://cha
 ```bash
 npm install -g @inceptionstack/roundhouse
 roundhouse setup --telegram
-roundhouse start  # macOS (foreground) — Linux auto-starts via systemd
+roundhouse start  # Auto-starts via LaunchAgent (macOS) or systemd (Linux)
 ```
 
 ## Architecture
@@ -483,6 +483,7 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/cli/cli.ts` | CLI: start, run, install, tui, update, logs, etc. |
 | `src/cli/env-file.ts` | Shared env file parsing, serialization, and quoting |
 | `src/cli/systemd.ts` | Shared systemd service management (unit generation, install, status) |
+| `src/cli/launchd.ts` | macOS LaunchAgent management (plist generation, install, status) |
 | `src/cli/doctor.ts` | CLI doctor command |
 | `src/cli/doctor/runner.ts` | Shared doctor runner (CLI + gateway) |
 | `src/cli/doctor/checks/` | Individual health check modules |

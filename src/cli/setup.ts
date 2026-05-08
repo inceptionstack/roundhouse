@@ -448,11 +448,26 @@ async function stepValidateToken(opts: SetupOptions): Promise<BotInfo> {
 async function stepStopGateway(): Promise<void> {
   step("④", "Checking for running gateway...");
 
-  if (platform() !== "linux") {
-    ok("Not Linux — skipping service check");
+  if (platform() === "darwin") {
+    try {
+      const { isLaunchAgentRunning, PLIST_PATH } = await import("./launchd.ts");
+      if (isLaunchAgentRunning()) {
+        log("   Stopping existing LaunchAgent...");
+        execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
+        ok("LaunchAgent stopped");
+      } else {
+        ok("No running gateway");
+      }
+    } catch {
+      ok("No running gateway");
+    }
     return;
   }
 
+  if (platform() !== "linux") {
+    ok("Skipped (not Linux or macOS)");
+    return;
+  }
   if (isServiceActive()) {
     log("   Stopping existing gateway...");
     try {
@@ -835,16 +850,30 @@ async function stepRegisterCommands(opts: SetupOptions): Promise<void> {
 }
 
 async function stepInstallSystemd(opts: SetupOptions): Promise<void> {
-  step("⑩b", "Installing systemd service...");
+  step("⑩b", "Installing service...");
+
+  // macOS: install launchd agent
+  if (platform() === "darwin") {
+    try {
+      const { installLaunchAgent } = await import("./launchd.ts");
+      await installLaunchAgent();
+      ok("LaunchAgent installed and loaded");
+      log("   Logs: ~/.roundhouse/logs/roundhouse.log");
+    } catch (err: any) {
+      warn(`LaunchAgent install failed: ${err.message}`);
+      log("   Run manually: roundhouse start");
+    }
+    return;
+  }
+
 
   if (!opts.systemd) {
     ok("Skipped (--no-systemd)");
     log("   Run manually: roundhouse start");
     return;
   }
-
   if (platform() !== "linux") {
-    warn(`Systemd not available (${platform()})`);
+    warn(`Service install not supported on ${platform()}`);
     log("   Run manually: roundhouse start");
     return;
   }
@@ -1135,25 +1164,40 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
     await stepRegisterCommands(opts);
     logger.ok("Bot commands registered");
 
+    let serviceInstalled = false;
     // Step 9: Install and start service
     logger.step(9, 9, "service.install", "Installing and starting service");
-    if (!opts.systemd) {
+    if (!opts.systemd && platform() !== "darwin") {
       logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
     } else {
       await stepInstallSystemd(opts);
-      logger.ok("Service installed and started");
 
-      // Verify service is active
-      try {
-        const { execFileSync } = await import("node:child_process");
-        const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
-        if (state === "active") {
-          logger.ok("Service is active");
-        } else {
-          logger.warn("service.state", `Service state: ${state}`);
+      // Verify service is active and set serviceInstalled based on reality
+      if (platform() === "darwin") {
+        try {
+          const { isLaunchAgentRunning } = await import("./launchd.ts");
+          if (isLaunchAgentRunning()) {
+            logger.ok("LaunchAgent is running");
+            serviceInstalled = true;
+          } else {
+            logger.warn("service.state", "LaunchAgent loaded but not yet running");
+          }
+        } catch {
+          logger.warn("service.state", "Could not verify LaunchAgent state");
         }
-      } catch {
-        logger.warn("service.state", "Could not verify service state");
+      } else {
+        try {
+          const { execFileSync } = await import("node:child_process");
+          const state = execFileSync("systemctl", ["is-active", "roundhouse"], { encoding: "utf8" }).trim();
+          if (state === "active") {
+            logger.ok("Service is active");
+            serviceInstalled = true;
+          } else {
+            logger.warn("service.state", `Service state: ${state}`);
+          }
+        } catch {
+          logger.warn("service.state", "Could not verify service state");
+        }
       }
     }
 
@@ -1162,7 +1206,7 @@ async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
       botUsername: botInfo.username,
       pairingLink,
       pairingStatus: "pending",
-      serviceInstalled: opts.systemd,
+      serviceInstalled,
     });
     log("");
     log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
