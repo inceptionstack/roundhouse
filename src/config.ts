@@ -151,66 +151,80 @@ export async function resolveEnvFilePath(): Promise<string> {
 }
 
 export async function loadConfig(): Promise<GatewayConfig> {
-  let config: GatewayConfig | undefined;
+  // Resolver chain: first successful resolution wins (Fowler: Replace Nested Conditional with Guard Clauses)
+  const resolvers: Array<() => Promise<GatewayConfig | null>> = [
+    resolveFromEnvVar,
+    resolveFromFlag,
+    resolveFromCanonicalOrLegacy,
+    resolveFromCwd,
+  ];
 
-  // Check for ROUNDHOUSE_CONFIG env var (set by CLI/daemon — must be valid)
+  for (const resolver of resolvers) {
+    const config = await resolver();
+    if (config) return applyEnvOverrides(config);
+  }
+
+  console.log("[roundhouse] using default config + env vars");
+  return applyEnvOverrides(DEFAULT_CONFIG);
+}
+
+// ── Config Resolvers (each returns null if not applicable) ─────
+
+async function resolveFromEnvVar(): Promise<GatewayConfig | null> {
   const envConfig = process.env.ROUNDHOUSE_CONFIG;
-  if (envConfig) {
-    try {
-      const raw = await readFile(resolve(envConfig), "utf8");
-      console.log(`[roundhouse] loaded config from ${envConfig}`);
-      config = JSON.parse(raw) as GatewayConfig;
-    } catch (err: any) {
-      console.error(`[roundhouse] failed to load config from ROUNDHOUSE_CONFIG=${envConfig}: ${err.message}`);
+  if (!envConfig) return null;
+
+  try {
+    const raw = await readFile(resolve(envConfig), "utf8");
+    console.log(`[roundhouse] loaded config from ${envConfig}`);
+    return JSON.parse(raw) as GatewayConfig;
+  } catch (err: any) {
+    console.error(`[roundhouse] failed to load config from ROUNDHOUSE_CONFIG=${envConfig}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function resolveFromFlag(): Promise<GatewayConfig | null> {
+  const configIdx = process.argv.indexOf("--config");
+  if (configIdx === -1 || !process.argv[configIdx + 1]) return null;
+
+  const configPath = resolve(process.argv[configIdx + 1]);
+  try {
+    const raw = await readFile(configPath, "utf8");
+    console.log(`[roundhouse] loaded config from ${configPath}`);
+    return JSON.parse(raw) as GatewayConfig;
+  } catch (err: any) {
+    console.error(`[roundhouse] failed to load config from ${configPath}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function resolveFromCanonicalOrLegacy(): Promise<GatewayConfig | null> {
+  const resolved = await resolveConfigPath();
+  try {
+    const raw = await readFile(resolved.path, "utf8");
+    console.log(`[roundhouse] loaded config from ${resolved.path}`);
+    return JSON.parse(raw) as GatewayConfig;
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      console.error(`[roundhouse] failed to parse config at ${resolved.path}: ${err.message}`);
       process.exit(1);
     }
+    return null;
   }
+}
 
-  // Check for --config flag
-  if (!config) {
-    const configIdx = process.argv.indexOf("--config");
-    if (configIdx !== -1 && process.argv[configIdx + 1]) {
-      const configPath = resolve(process.argv[configIdx + 1]);
-      try {
-        const raw = await readFile(configPath, "utf8");
-        console.log(`[roundhouse] loaded config from ${configPath}`);
-        config = JSON.parse(raw) as GatewayConfig;
-      } catch (err: any) {
-        console.error(`[roundhouse] failed to load config from ${configPath}: ${err.message}`);
-        process.exit(1);
-      }
+async function resolveFromCwd(): Promise<GatewayConfig | null> {
+  const cwdPath = resolve(process.cwd(), "gateway.config.json");
+  try {
+    const raw = await readFile(cwdPath, "utf8");
+    console.warn(`[roundhouse] ⚠️  loaded gateway.config.json from cwd (${cwdPath}) — consider using ~/.roundhouse/gateway.config.json instead`);
+    return JSON.parse(raw) as GatewayConfig;
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      console.error(`[roundhouse] failed to parse config at ./gateway.config.json: ${err.message}`);
+      process.exit(1);
     }
+    return null;
   }
-
-  // Try canonical path, then legacy, then cwd
-  if (!config) {
-    const resolved = await resolveConfigPath();
-    try {
-      const raw = await readFile(resolved.path, "utf8");
-      console.log(`[roundhouse] loaded config from ${resolved.path}`);
-      config = JSON.parse(raw) as GatewayConfig;
-    } catch (err: any) {
-      // File not found → try cwd. Parse error on existing file → fail fast.
-      if (err.code !== "ENOENT") {
-        console.error(`[roundhouse] failed to parse config at ${resolved.path}: ${err.message}`);
-        process.exit(1);
-      }
-      // Try cwd (with security warning)
-      try {
-        const cwdPath = resolve(process.cwd(), "gateway.config.json");
-        const raw = await readFile(cwdPath, "utf8");
-        console.warn(`[roundhouse] ⚠️  loaded gateway.config.json from cwd (${cwdPath}) — consider using ~/.roundhouse/gateway.config.json instead`);
-        config = JSON.parse(raw) as GatewayConfig;
-      } catch (cwdErr: any) {
-        if (cwdErr.code !== "ENOENT") {
-          console.error(`[roundhouse] failed to parse config at ./gateway.config.json: ${cwdErr.message}`);
-          process.exit(1);
-        }
-        console.log("[roundhouse] using default config + env vars");
-        config = DEFAULT_CONFIG;
-      }
-    }
-  }
-
-  return applyEnvOverrides(config);
 }
