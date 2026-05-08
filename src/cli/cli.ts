@@ -74,12 +74,20 @@ async function cmdStart() {
 
   // No systemd service — fall back to foreground
   console.log("No systemd service found. Running in foreground (use Ctrl+C to stop)...");
-  console.log("  Tip: run 'roundhouse install' to set up the systemd daemon.\n");
+  if (process.platform !== "darwin") {
+    console.log("  Tip: run 'roundhouse install' to set up the systemd daemon.\n");
+  } else {
+    console.log("");
+  }
   await cmdRun();
 }
 
 async function cmdRun() {
   process.env.ROUNDHOUSE_CONFIG = CONFIG_PATH;
+
+  // Load .env file so secrets (TELEGRAM_BOT_TOKEN, etc.) are available
+  await loadEnvFile();
+
   const indexPath = resolve(__dirname, "..", "index.ts");
   const jsPath = resolve(__dirname, "..", "dist", "index.js");
 
@@ -94,7 +102,35 @@ async function cmdRun() {
   }
 }
 
+/**
+ * Load the roundhouse .env file into process.env.
+ * Does NOT override existing env vars (explicit env takes precedence).
+ */
+async function loadEnvFile(): Promise<void> {
+  const envPath = await resolveEnvFilePath();
+  if (!(await fileExists(envPath))) return;
+  try {
+    const entries = parseEnvFile(await readFile(envPath, "utf8"));
+    for (const [key, value] of entries) {
+      if (!process.env[key]) {
+        process.env[key] = value;
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[roundhouse] warning: failed to load ${envPath}: ${e.message}`);
+  }
+}
+
 async function cmdInstall() {
+  if (process.platform === "darwin") {
+    console.log("[roundhouse] macOS detected — systemd is not available.\n");
+    console.log("  On macOS, use 'roundhouse start' to run in foreground,");
+    console.log("  or set up a launchd plist manually.\n");
+    console.log("  Tip: run 'roundhouse setup --telegram' to configure first.");
+    process.exitCode = 1;
+    return;
+  }
+
   console.log("[roundhouse] Installing as systemd daemon...\n");
 
   await mkdir(CONFIG_DIR, { recursive: true });
