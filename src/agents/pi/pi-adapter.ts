@@ -205,6 +205,23 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       } else {
         console.log(`[pi-agent] no memory extension detected — roundhouse memory will manage`);
       }
+
+      // Warn about pi extensions that bridge a chat platform directly.
+      // They hijack agent_start/message_update/agent_end and short-circuit
+      // Roundhouse's streaming pipeline — Telegram shows "typing" forever.
+      const conflicting = extNames.filter((n) => /pi-telegram(\b|[\/\\])/i.test(n));
+      if (conflicting.length > 0) {
+        const lines = [
+          "",
+          "\u26a0\ufe0f  CONFLICT: detected pi extension(s) that bridge a chat platform directly:",
+          ...conflicting.map((n) => `   - ${n}`),
+          "   Roundhouse already drives Telegram. Loading a bridge extension inside",
+          "   the pi session causes lost replies (typing indicator without text).",
+          "   Remove the extension from ~/.pi/agent/extensions or pi config and restart.",
+          "",
+        ];
+        for (const line of lines) console.warn(line);
+      }
     }
 
     return entry;
@@ -353,6 +370,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                   streamEvent = { type: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
                 } else if (event.type === "turn_end") {
                   streamEvent = { type: "turn_end" };
+                } else if (event.type === "message_end") {
+                  // Pi records provider failures (auth, throttling, etc.) on the
+                  // assistant message instead of throwing — surface them.
+                  const msg = (event as any).message;
+                  if (msg?.role === "assistant" && msg.stopReason === "error" && msg.errorMessage) {
+                    streamEvent = { type: "model_error", message: msg.errorMessage };
+                  }
                 }
               }
 

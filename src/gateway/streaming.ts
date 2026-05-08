@@ -116,6 +116,8 @@ export async function handleStreaming(
   };
 
   let hasTextInCurrentTurn = false;
+  let hasContentThisTurn = false;
+  let modelErrorPosted = false;
   let eventCount = 0;
   let drainingNotified = false;
 
@@ -125,8 +127,9 @@ export async function handleStreaming(
       break;
     }
 
+    eventCount++;
+
     if (DEBUG_STREAM) {
-      eventCount++;
       const preview = event.type === "text_delta" ? `"${event.text.slice(0, 30)}"`
         : event.type === "custom_message" ? `${event.customType}:${event.content.slice(0, 30)}`
         : event.type === "tool_start" || event.type === "tool_end" ? event.toolName
@@ -139,12 +142,14 @@ export async function handleStreaming(
         ensureStream();
         currentPush!(event.text);
         hasTextInCurrentTurn = true;
+        hasContentThisTurn = true;
         break;
       }
 
       case "tool_start": {
         activeTools.set(event.toolCallId, event.toolName);
         if (!READ_ONLY_TOOLS.has(event.toolName)) usedFileModifyingTools = true;
+        hasContentThisTurn = true;
         if (verbose) {
           try { await thread.post(`${toolIcon(event.toolName)} Running \`${event.toolName}\`…`); } catch {}
         }
@@ -161,7 +166,19 @@ export async function handleStreaming(
           await flushCurrentStream();
           hasTextInCurrentTurn = false;
         }
+        hasContentThisTurn = true;
         await postWithFallback(thread, event.content);
+        break;
+      }
+
+      case "model_error": {
+        await flushCurrentStream();
+        hasTextInCurrentTurn = false;
+        hasContentThisTurn = true;
+        modelErrorPosted = true;
+        const safeMsg = event.message.split("\n")[0].slice(0, 400);
+        console.warn(`[roundhouse] model error: ${safeMsg}`);
+        try { await thread.post(`\u26a0\ufe0f Agent error: ${safeMsg}`); } catch {}
         break;
       }
 
@@ -205,6 +222,13 @@ export async function handleStreaming(
 
   if (currentPromise) {
     await flushCurrentStream();
+  }
+
+  // Safety net: if the entire turn produced no visible content and no error
+  // was already reported, notify the user so they don't stare at "typing" forever.
+  if (!hasContentThisTurn && !modelErrorPosted) {
+    console.warn(`[roundhouse] agent returned no content this turn (${eventCount} events received)`);
+    try { await thread.post("\u26a0\ufe0f Agent returned no response. Check roundhouse logs."); } catch {}
   }
 
   return { usedTools: usedFileModifyingTools };
