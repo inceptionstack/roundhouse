@@ -10,7 +10,7 @@ import { hostname, loadavg, totalmem, freemem, cpus } from "node:os";
 // ── Command Matching ─────────────────────────────────
 
 /**
- * Match a Telegram command, handling optional @botname suffix.
+ * Match a bot command, handling optional @botname suffix.
  */
 export function isCommand(text: string, cmd: string, botUsername: string): boolean {
   if (text === cmd) return true;

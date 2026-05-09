@@ -1,5 +1,5 @@
 /**
- * gateway/commands.ts — Telegram command handlers
+ * gateway/commands.ts — Chat command handlers
  *
  * Each handler is a standalone async function that receives a CommandContext.
  * Extracted from Gateway.start() to reduce method size and enable unit testing.

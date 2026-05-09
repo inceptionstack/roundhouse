@@ -282,10 +282,10 @@ src/
 │
 ├── gateway.ts                       # Gateway class: chat SDK wiring, handleAgentTurn
 │   ├── gateway/
-│   │   ├── commands.ts              # 9 Telegram command handlers (/new, /stop, /status, etc.)
+│   │   ├── commands.ts              # 9 command handlers (/new, /stop, /status, etc.)
 │   │   ├── streaming.ts            # Agent event → Telegram message stream mapper
 │   │   ├── attachments.ts          # File save, validation, size limits
-│   │   ├── helpers.ts              # Pure utils: splitMessage, isAllowed, threadIdToDir
+│   │   ├── helpers.ts              # isCommand, resolveAgentThreadId, getSystemResources, toolIcon
 │   │   └── index.ts                # Barrel re-export
 │   ├── cron/scheduler.ts            # Tick loop, catch-up, job dispatch
 │   ├── memory/                      # Session memory hooks (flush, compact, inject)
@@ -370,4 +370,5 @@ skills/                              # Bundled skills (shipped in package)
 - `gateway/streaming.ts` imports `transports/telegram/html.ts` directly (deferred — streaming is tightly coupled to Telegram HTML wire format)
 - `cron/runner.ts` imports `transports/telegram/notify` directly (deferred — will route through adapter when multi-transport lands)
 - CLI modules never import from `gateway/` (separation of concerns)
+- CLI setup modules (`cli/setup/*.ts`) import from `transports/telegram/` directly (by design — setup is inherently transport-specific)
 - Agent adapters depend on their SDK + `../../types`, `../../config`, `../../util`
