@@ -128,9 +128,10 @@ playwright-cli close                         # close browser
 
 **Other commands:**
 ```bash
-playwright-cli network                # inspect network requests
-playwright-cli cookies                # list cookies
-playwright-cli evaluate "document.title"  # run JS in page
+playwright-cli requests               # list network requests
+playwright-cli request <index>        # show request details
+playwright-cli cookie-list            # list cookies
+playwright-cli eval "document.title"   # run JS in page
 playwright-cli pdf                    # save page as PDF
 ```
 
