@@ -12,7 +12,7 @@ import { BOT_COMMANDS } from "./bot-commands";
 
 const TELEGRAM_FORMAT_HINT = "[Format your final answer to be telegram-friendly.]";
 
-export class TelegramTransportAdapter implements TransportAdapter {
+export class TelegramAdapter implements TransportAdapter {
   readonly name = "telegram";
 
   enrichPrompt(text: string): string {

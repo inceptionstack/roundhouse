@@ -22,7 +22,7 @@ import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThrea
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream, type StreamResult } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
-import { TelegramTransportAdapter } from "../transports/telegram/adapter";
+import { TelegramAdapter } from "../transports/telegram/telegram-adapter";
 import type { TransportAdapter } from "../transports/types";
 
 /** Match a Telegram command, handling optional @botname suffix */
@@ -90,7 +90,7 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
-    this.transport = new TelegramTransportAdapter();
+    this.transport = new TelegramAdapter();
     _botUsername = config.chat.botUsername || "";
   }
 
