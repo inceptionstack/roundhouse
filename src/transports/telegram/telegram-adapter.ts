@@ -5,10 +5,11 @@
  * utility modules (format, html, progress, notify, bot-commands).
  */
 
-import type { TransportAdapter, ChatThread } from "../types";
+import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult } from "../types";
 import { isTelegramThread, postTelegramHtml } from "./html";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
+import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
 
 const TELEGRAM_FORMAT_HINT = "[Format your final answer to be telegram-friendly.]";
 
@@ -21,7 +22,7 @@ export class TelegramAdapter implements TransportAdapter {
 
   async postMessage(thread: ChatThread, text: string): Promise<void> {
     if (!isTelegramThread(thread as any)) {
-      throw new Error("TelegramTransportAdapter.postMessage called with non-Telegram thread");
+      throw new Error("TelegramAdapter.postMessage called with non-Telegram thread");
     }
     await postTelegramHtml(thread as any, text);
   }
@@ -55,5 +56,56 @@ export class TelegramAdapter implements TransportAdapter {
       return;
     }
     await sendTelegramToMany(chatIds, text);
+  }
+
+  async isPairingPending(): Promise<boolean> {
+    const pending = await readPendingPairing();
+    return pending?.status === "pending";
+  }
+
+  async handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null> {
+    const text = (message.text ?? "").trim();
+    if (!text) return null;
+
+    const pending = await readPendingPairing();
+    if (!pending || pending.status !== "pending" || !isStartForNonce(text, pending.nonce)) {
+      return null;
+    }
+
+    // Verify author is allowed
+    const authorName = (message.author?.name ?? "").toLowerCase();
+    const originalName = message.author?.name ?? "";
+    const allowed = pending.allowedUsers.map(u => u.toLowerCase());
+    if (!authorName || !allowed.includes(authorName)) {
+      console.log(`[roundhouse] Pairing nonce from unauthorized user @${originalName}`);
+      return null;
+    }
+
+    // Extract Telegram-specific IDs
+    const msg = message as any;
+    const chatId = typeof msg.chatId === "number"
+      ? msg.chatId
+      : typeof thread.id === "string" && thread.id.startsWith("telegram:")
+        ? parseInt(thread.id.split(":")[1], 10)
+        : undefined;
+
+    const rawUserId = msg.author?.userId ?? msg.author?.id ?? msg.raw?.from?.id;
+    const userId = typeof rawUserId === "number"
+      ? rawUserId
+      : typeof rawUserId === "string"
+        ? parseInt(rawUserId, 10)
+        : undefined;
+
+    if (chatId == null || Number.isNaN(chatId) || userId == null || Number.isNaN(userId)) {
+      console.error(`[roundhouse] Pairing nonce matched but could not extract IDs: chatId=${chatId} userId=${userId}`);
+      await clearPendingPairing();
+      await thread.post("⚠️ Pairing failed — could not capture your Telegram IDs. Run: roundhouse setup --telegram");
+      return null;
+    }
+
+    // Mark pairing complete in transport state
+    await completePendingPairing({ chatId, userId, username: originalName });
+
+    return { threadId: chatId, userId, username: originalName };
   }
 }

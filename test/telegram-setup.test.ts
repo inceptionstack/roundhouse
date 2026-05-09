@@ -279,3 +279,116 @@ describe("promptChoice", () => {
     expect(typeof mod.promptChoice).toBe("function");
   });
 });
+
+describe("TelegramAdapter.handlePairing", () => {
+  let tempDir: string;
+  let adapter: any;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(resolve(tmpdir(), "roundhouse-adapter-test-"));
+    process.env.ROUNDHOUSE_DIR = tempDir;
+    const { TelegramAdapter } = await import("../src/transports/telegram/telegram-adapter");
+    adapter = new TelegramAdapter();
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+    process.env.ROUNDHOUSE_DIR = origDir;
+  });
+
+  it("isPairingPending returns false when no pairing file exists", async () => {
+    const pending = await adapter.isPairingPending();
+    expect(pending).toBe(false);
+  });
+
+  it("handlePairing returns null when no pairing file exists", async () => {
+    const thread = { post: async () => {} };
+    const message = { text: "/start rh-test", author: { name: "user" } };
+    const result = await adapter.handlePairing(thread, message);
+    expect(result).toBe(null);
+  });
+
+  it("handlePairing returns null when text doesn't match nonce", async () => {
+    const { writePendingPairing, createPairingNonce } = await import("../src/transports/telegram/pairing");
+    const nonce = createPairingNonce();
+    await writePendingPairing({
+      version: 1,
+      nonce,
+      botUsername: "test_bot",
+      allowedUsers: ["user"],
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    });
+
+    const thread = { post: async () => {} };
+    const message = { text: "/start rh-wrong", author: { name: "user" } };
+    const result = await adapter.handlePairing(thread, message);
+    expect(result).toBe(null);
+  });
+
+  it("handlePairing returns null when user not in allowedUsers", async () => {
+    const { writePendingPairing, createPairingNonce } = await import("../src/transports/telegram/pairing");
+    const nonce = createPairingNonce();
+    await writePendingPairing({
+      version: 1,
+      nonce,
+      botUsername: "test_bot",
+      allowedUsers: ["admin"],
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    });
+
+    const thread = { post: async () => {} };
+    const message = { text: `/start ${nonce}`, author: { name: "user" } };
+    const result = await adapter.handlePairing(thread, message);
+    expect(result).toBe(null);
+  });
+
+  it("handlePairing returns PairingResult on success", async () => {
+    const { writePendingPairing, createPairingNonce } = await import("../src/transports/telegram/pairing");
+    const nonce = createPairingNonce();
+    await writePendingPairing({
+      version: 1,
+      nonce,
+      botUsername: "test_bot",
+      allowedUsers: ["alice"],
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    });
+
+    const thread = { id: "telegram:123456", post: async () => {} };
+    const message = {
+      text: `/start ${nonce}`,
+      author: { name: "alice", userId: 789 },
+      chatId: 123456,
+    };
+    const result = await adapter.handlePairing(thread, message);
+
+    expect(result).not.toBe(null);
+    expect(result!.threadId).toBe(123456);
+    expect(result!.userId).toBe(789);
+    expect(result!.username).toBe("alice");
+  });
+
+  it("handlePairing preserves original username case", async () => {
+    const { writePendingPairing, createPairingNonce } = await import("../src/transports/telegram/pairing");
+    const nonce = createPairingNonce();
+    await writePendingPairing({
+      version: 1,
+      nonce,
+      botUsername: "test_bot",
+      allowedUsers: ["Alice"],
+      createdAt: new Date().toISOString(),
+      status: "pending",
+    });
+
+    const thread = { id: "telegram:123", post: async () => {} };
+    const message = {
+      text: `/start ${nonce}`,
+      author: { name: "Alice", userId: 456 },
+      chatId: 123,
+    };
+    const result = await adapter.handlePairing(thread, message);
+    expect(result!.username).toBe("Alice");
+  });
+});
