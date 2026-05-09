@@ -23,6 +23,7 @@ import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThrea
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
+import { handleModel } from "./model-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
@@ -261,6 +262,12 @@ export class Gateway {
       // Handle /status command
       if (isCommand(userText.trim(), "/status")) {
         await handleStatus(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
+        return;
+      }
+
+      // Handle /model command
+      if (isCommandWithArgs(userText.trim(), "/model") || isCommand(userText.trim(), "/model")) {
+        await handleModel({ thread, text: userText.trim(), postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
 
