@@ -2,6 +2,10 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [Unreleased]
+
+_No unreleased changes._
+
 ## [0.5.6] — 2026-05-09
 
 ### Added
@@ -36,10 +40,6 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 ### Changed
 - **Module reorganization** (PR #36) — gateway/, transports/telegram/, cli/setup/, provisioning/
 - 376 tests passing
-
-## [Unreleased]
-
-_No unreleased changes._
 
 ## [0.5.0–0.5.4] — 2026-05-08
 
