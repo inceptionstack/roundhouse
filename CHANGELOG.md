@@ -2,6 +2,12 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.10] — 2026-05-09
+
+### Fixed
+- **Cron notifications actually delivered** — replaced IPC socket loopback with direct callback injection from gateway
+- `shouldNotify` onlyOn filter now applies to all notification routes (was only explicit Telegram)
+
 ## [0.5.9] — 2026-05-09
 
 ### Added
