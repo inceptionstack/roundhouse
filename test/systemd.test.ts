@@ -17,6 +17,8 @@ describe("generateUnit", () => {
     expect(unit).toContain("User=testuser");
     expect(unit).toContain("ExecStart=/usr/bin/node /usr/bin/roundhouse run");
     expect(unit).toContain("Restart=on-failure");
+    expect(unit).toContain("TimeoutStopSec=15");
+    expect(unit).toContain("KillMode=mixed");
     expect(unit).toContain("WantedBy=multi-user.target");
   });
 

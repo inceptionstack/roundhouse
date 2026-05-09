@@ -357,7 +357,8 @@ src/
 **Repo-root directories (outside `src/`):**
 ```
 skills/                              # Bundled skills (shipped in package)
-└── roundhouse-cron/SKILL.md         # Cron job skill for pi
+├── roundhouse-cron/SKILL.md         # Cron job skill for pi
+└── pr-merge-discipline/SKILL.md    # PR merge workflow skill
 ```
 
 **Dependency rules:**

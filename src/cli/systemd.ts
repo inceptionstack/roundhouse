@@ -127,6 +127,8 @@ WorkingDirectory=${home}
 ExecStart=${opts.execStart}
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
+KillMode=mixed
 EnvironmentFile=-${envFilePath}
 Environment=ROUNDHOUSE_CONFIG=${CONFIG_PATH}
 Environment=NODE_ENV=production
