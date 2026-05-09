@@ -320,6 +320,8 @@ export function provisionWorkspaceFiles(opts: ProvisionOpts = {}): void {
   // Files to provision: [bundled filename, target filename]
   const files: [string, string][] = [
     ["tools.md", "tools.md"],
+    ["soul.md", "soul.md"],
+    ["user.md", "user.md"],
   ];
 
   try {

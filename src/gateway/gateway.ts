@@ -30,6 +30,7 @@ import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { injectToolsSection } from "./tools-inject";
+import { injectPersonaSection } from "./persona-inject";
 
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
@@ -408,6 +409,7 @@ export class Gateway {
 
       // Inject tools section (after STT enrichment so voice-only messages get it too)
       if (agentMessage.text) {
+        agentMessage.text = injectPersonaSection(agentMessage.text);
         agentMessage.text = injectToolsSection(agentMessage.text);
       }
 
