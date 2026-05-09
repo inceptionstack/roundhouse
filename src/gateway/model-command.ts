@@ -14,14 +14,26 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 /** Known model aliases → Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
-  "opus": { provider: "amazon-bedrock", model: "us.anthropic.claude-opus-4-6", label: "Claude Opus 4.6" },
+  // Anthropic Claude
   "opus-4.7": { provider: "amazon-bedrock", model: "us.anthropic.claude-opus-4-7", label: "Claude Opus 4.7" },
+  "opus": { provider: "amazon-bedrock", model: "us.anthropic.claude-opus-4-6", label: "Claude Opus 4.6" },
   "sonnet": { provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   "haiku": { provider: "amazon-bedrock", model: "us.anthropic.claude-haiku-4-5", label: "Claude Haiku 4.5" },
+  // DeepSeek
+  "deepseek": { provider: "amazon-bedrock", model: "us.deepseek.r1-v1:0", label: "DeepSeek R1" },
+  // Meta Llama
+  "llama": { provider: "amazon-bedrock", model: "us.meta.llama4-maverick-17b-instruct-v1:0", label: "Llama 4 Maverick" },
+  // Amazon Nova
+  "nova-pro": { provider: "amazon-bedrock", model: "us.amazon.nova-pro-v1:0", label: "Amazon Nova Pro" },
+  // Mistral
+  "mistral": { provider: "amazon-bedrock", model: "us.mistral.mistral-large-2411-v1:0", label: "Mistral Large" },
 };
 
-/** Models shown in the inline keyboard (short aliases only) */
-const KEYBOARD_MODELS = ["opus-4.7", "opus", "sonnet", "haiku"] as const;
+/** Models shown in the inline keyboard (max 8, ordered by preference) */
+const KEYBOARD_MODELS = [
+  "opus-4.7", "opus", "sonnet", "haiku",
+  "deepseek", "llama", "nova-pro", "mistral",
+] as const;
 
 /** Action ID for model selection callbacks */
 export const MODEL_ACTION_ID = "model_select";
@@ -63,13 +75,18 @@ function encodeCallbackData(actionId: string, value: string): string {
 }
 
 function buildInlineKeyboard(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
-  const rows = KEYBOARD_MODELS.map(alias => {
+  // Layout: 2 buttons per row for compact display
+  const buttons = KEYBOARD_MODELS.map(alias => {
     const info = MODEL_ALIASES[alias];
-    return [{
+    return {
       text: info.label,
       callback_data: encodeCallbackData(MODEL_ACTION_ID, alias),
-    }];
+    };
   });
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
   return { inline_keyboard: rows };
 }
 
