@@ -26,6 +26,7 @@ import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { injectToolsSection } from "./tools-inject";
 
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
@@ -369,6 +370,11 @@ export class Gateway {
         }
       } else {
         await this.enrichWithStt(thread, agentMessage);
+      }
+
+      // Inject tools section (after STT enrichment so voice-only messages get it too)
+      if (agentMessage.text) {
+        agentMessage.text = injectToolsSection(agentMessage.text);
       }
 
       // Let the agent adapter apply platform-specific message transforms
