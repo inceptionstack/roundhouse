@@ -6,7 +6,6 @@
  */
 
 import { getAgentFactory } from "../agents/registry";
-import { sendTelegramToMany } from "../transports/telegram/notify";
 import { sendIpc } from "../ipc";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";
@@ -20,7 +19,8 @@ export class CronRunner {
   constructor(
     private store: CronStore,
     private agentConfig?: GatewayConfig["agent"],
-    private notifyFn?: (text: string) => Promise<void>,
+    private defaultChatIds?: number[],
+    private notifyFn?: (chatIds: number[], text: string) => Promise<void>,
   ) {}
 
   async runJob(
@@ -145,16 +145,21 @@ export class CronRunner {
       body = `${header}\nError: ${record.error.slice(0, NOTIFY_MAX_ERROR_CHARS)}`;
     }
 
+    const notify = this.notifyFn;
+
     // Route 1: Explicit Telegram chat IDs configured on the job
     if (tg?.chatIds?.length) {
-      await sendTelegramToMany(tg.chatIds, body);
-      return;
+      if (notify) {
+        await notify(tg.chatIds, body);
+        return;
+      }
     }
 
     // Route 2: Direct callback from gateway (no loopback socket)
-    if (this.notifyFn) {
+    const defaultChatIds = this.defaultChatIds ?? [];
+    if (notify && defaultChatIds.length > 0) {
       try {
-        await this.notifyFn(body);
+        await notify(defaultChatIds, body);
       } catch (err) {
         console.warn(`[cron] ${job.id} notify callback failed:`, (err as Error).message);
       }
