@@ -26,34 +26,28 @@ export interface UpdateResult {
   error?: string;
 }
 
-/**
- * Check for updates, install if newer, provision bundle, patch settings.
- * Returns the result — caller decides how to present it and whether to restart.
- */
-export async function performUpdate(progress: UpdateProgress): Promise<UpdateResult> {
-  // Get current version
-  const pkg = await import("../../package.json", { with: { type: "json" } });
-  const currentVersion = pkg.default?.version ?? "unknown";
-
-  // Check latest version on npm
-  let latestVersion: string;
-  try {
-    latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
-      timeout: 30_000,
-      encoding: "utf8",
-    }).trim();
-  } catch (e) {
-    // Update extensions anyway, but flag that version check failed
-    latestVersion = "";
-    console.warn("[roundhouse] npm view failed:", e instanceof Error ? e.message : e);
-  }
-
-  // Always update extensions (even if roundhouse is already latest)
-  if (!latestVersion) {
-    await progress.update(`⚠️ Version check failed — updating extensions only`);
-  }
+export async function updateExtensions(progress: UpdateProgress): Promise<void> {
   for (const extensionPackage of GLOBAL_PI_EXTENSION_PACKAGES) {
-    await progress.update(`📦 Updating extension: ${extensionPackage}...`);
+    try {
+      // Check if already at latest
+      const installed = execSync(`npm list -g ${extensionPackage} --json 2>/dev/null`, {
+        timeout: 10_000,
+        encoding: "utf8",
+      });
+      const installedVersion = JSON.parse(installed)?.dependencies?.[extensionPackage]?.version ?? "";
+      const latestExtVersion = execSync(`npm view ${extensionPackage} version 2>/dev/null`, {
+        timeout: 10_000,
+        encoding: "utf8",
+      }).trim();
+
+      if (installedVersion && installedVersion === latestExtVersion) {
+        await progress.update(`✅ ${extensionPackage} already at v${installedVersion}`);
+        continue;
+      }
+      await progress.update(`📦 Updating ${extensionPackage} v${installedVersion || "?"} → v${latestExtVersion}...`);
+    } catch {
+      await progress.update(`📦 Updating extension: ${extensionPackage}...`);
+    }
 
     try {
       execSync(`npm install -g ${extensionPackage}@latest 2>&1`, {
@@ -67,14 +61,13 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
       await progress.update(`⚠️ Failed to update ${extensionPackage}: ${msg.slice(0, 150)}`);
     }
   }
+}
 
-  if (!latestVersion) {
-    return { action: "error", currentVersion, error: "Version check failed (extensions updated)" };
-  }
-  if (latestVersion === currentVersion) {
-    return { action: "already-latest", currentVersion };
-  }
-
+export async function updateSelf(
+  progress: UpdateProgress,
+  currentVersion: string,
+  latestVersion: string,
+): Promise<string | undefined> {
   await progress.update(`📦 Updating v${currentVersion} → v${latestVersion}...`);
 
   try {
@@ -82,20 +75,15 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
       timeout: 120_000,
       encoding: "utf8",
     });
+    return undefined;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.warn("[roundhouse] self-update failed:", msg);
-    return { action: "error", currentVersion, error: `Self-update failed: ${msg}` };
+    return `Self-update failed: ${msg}`;
   }
+}
 
-  // Provision bundle (skills sync + CLI tools + config)
-  try {
-    provisionBundle();
-  } catch (e) {
-    console.warn("[roundhouse] bundle provisioning failed:", e instanceof Error ? e.message : e);
-  }
-
-  // Ensure settings.json includes roundhouse package (for pre-bundle upgrades)
+export function patchPiSettings(): void {
   try {
     const settingsPath = `${homedir()}/.pi/agent/settings.json`;
     const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
@@ -106,6 +94,52 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
     }
   } catch { /* settings.json may not exist yet — fine, setup will create it */ }
+}
+
+/**
+ * Check for updates, install if newer, provision bundle, patch settings.
+ * Returns the result — caller decides how to present it and whether to restart.
+ */
+export async function performUpdate(progress: UpdateProgress): Promise<UpdateResult> {
+  const pkg = await import("../../package.json", { with: { type: "json" } });
+  const currentVersion = pkg.default?.version ?? "unknown";
+
+  let latestVersion: string;
+  try {
+    latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
+      timeout: 30_000,
+      encoding: "utf8",
+    }).trim();
+  } catch (e) {
+    // Update extensions anyway, but flag that version check failed
+    latestVersion = "";
+    console.warn("[roundhouse] npm view failed:", e instanceof Error ? e.message : e);
+  }
+
+  if (!latestVersion) {
+    await progress.update(`⚠️ Version check failed — updating extensions only`);
+  }
+  await updateExtensions(progress);
+
+  if (!latestVersion) {
+    return { action: "error", currentVersion, error: "Version check failed (extensions updated)" };
+  }
+  if (latestVersion === currentVersion) {
+    return { action: "already-latest", currentVersion };
+  }
+
+  const updateError = await updateSelf(progress, currentVersion, latestVersion);
+  if (updateError) {
+    return { action: "error", currentVersion, error: updateError };
+  }
+
+  try {
+    provisionBundle();
+  } catch (e) {
+    console.warn("[roundhouse] bundle provisioning failed:", e instanceof Error ? e.message : e);
+  }
+
+  patchPiSettings();
 
   return { action: "updated", currentVersion, latestVersion };
 }

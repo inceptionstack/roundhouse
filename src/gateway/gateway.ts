@@ -13,7 +13,7 @@ import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
-import { IpcServer, type IpcRequest } from "../ipc";
+import { IpcServer, createIpcHandler } from "../ipc";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
@@ -325,9 +325,8 @@ export class Gateway {
     this.cronScheduler = new CronSchedulerService({
       agentConfig: this.config.agent,
       notifyChatIds: this.config.chat.notifyChatIds,
-      notifyFn: async (text: string) => {
-        const chatIds = this.config.chat.notifyChatIds;
-        if (chatIds?.length && this.transport) {
+      notifyFn: async (chatIds: number[], text: string) => {
+        if (chatIds.length && this.transport) {
           await this.transport.notify(chatIds, text);
         }
       },
@@ -339,34 +338,7 @@ export class Gateway {
     }
 
     // Start IPC server for CLI → gateway communication
-    this.ipcServer = new IpcServer(async (req: IpcRequest) => {
-      if (req.type === "ping") return { ok: true };
-      if (req.type === "notify") {
-        const allChatIds = this.config.chat.notifyChatIds ?? [];
-        if (allChatIds.length === 0) return { ok: false, error: "No notifyChatIds configured" };
-
-        // Session routing:
-        //   "main" = first notifyChatId (primary user chat)
-        //   numeric string = that specific chat ID
-        //   anything else / undefined = broadcast to all notifyChatIds
-        let targetIds: number[];
-        if (req.session === "main") {
-          targetIds = [allChatIds[0]];
-        } else if (req.session && /^-?\d+$/.test(req.session)) {
-          targetIds = [Number(req.session)];
-        } else {
-          targetIds = allChatIds; // broadcast to all
-        }
-
-        try {
-          await this.transport.notify(targetIds, req.text);
-          return { ok: true };
-        } catch (e: any) {
-          return { ok: false, error: e.message };
-        }
-      }
-      return { ok: false, error: "Unknown request type" };
-    });
+    this.ipcServer = new IpcServer(createIpcHandler(this.transport, () => this.config));
     try {
       await this.ipcServer.start();
     } catch (err) {
