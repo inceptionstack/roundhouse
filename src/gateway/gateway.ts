@@ -23,7 +23,7 @@ import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThrea
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
-import { handleModel } from "./model-command";
+import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
@@ -325,6 +325,11 @@ export class Gateway {
 
     this.chat.onSubscribedMessage(async (thread, message) => {
       await handleOrAbort(thread, message);
+    });
+
+    // ── Handle inline keyboard callbacks ───
+    this.chat.onAction(MODEL_ACTION_ID, async (event: any) => {
+      await handleModelAction({ value: event.value, thread: event.thread });
     });
 
     await this.chat.initialize();
