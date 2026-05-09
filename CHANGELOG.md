@@ -5,6 +5,9 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 ## [Unreleased] (post-0.3.18)
 
 ### Added
+- **Bundled skill: pr-merge-discipline** — always check PR comments before merging
+- **Typing indicator during STT** — Telegram shows "typing" while voice messages are transcribed
+- **systemd: TimeoutStopSec=15 + KillMode=mixed** — hung STT subprocesses no longer block shutdown for 90s
 - **Shared "main" session** — all direct messages route to a single `main` agent thread
   - Telegram DMs, CLI TUI, CLI agent, future Slack/Discord all share one conversation
   - Sessions stored in `~/.roundhouse/sessions/main/`
