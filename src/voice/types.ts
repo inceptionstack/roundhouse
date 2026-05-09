@@ -35,7 +35,7 @@ export interface AttachmentTranscript {
   language?: string;
   confidence?: number;
   approximate: true;
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "skipped";
   error?: string;
   durationMs?: number;
 }
@@ -45,14 +45,12 @@ export interface AttachmentTranscript {
 export interface SttProviderConfig {
   type: string;
   timeoutMs?: number;
-  autoInstall?: boolean;
   [key: string]: unknown;
 }
 
 export interface SttConfig {
   enabled: boolean;
   mode: "on" | "off";
-  autoInstall?: boolean;
   chain: string[];
   autoTranscribe: {
     voiceMessages: boolean;

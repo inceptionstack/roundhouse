@@ -192,7 +192,6 @@ gateway.config.json
     └── stt
         ├── enabled: true
         ├── mode: "on" | "off"
-        ├── autoInstall: false   # auto-install whisper via pip3
         ├── chain: ["whisper"]    # Provider chain (try in order)
         ├── autoTranscribe
         │   ├── voiceMessages: true

@@ -19,7 +19,6 @@ export class SttService {
   private config: SttConfig;
   private initPromise: Promise<void> | null = null;
   private activeStt: Promise<void> = Promise.resolve(); // global concurrency: 1 at a time
-  private installNoticeSent = false;
 
   constructor(config: SttConfig) {
     this.config = config;
@@ -52,12 +51,7 @@ export class SttService {
       }
 
       try {
-        // Pass autoInstall from service-level config into provider config
-        const mergedProviderConfig = {
-          ...providerConfig,
-          autoInstall: providerConfig.autoInstall ?? this.config.autoInstall ?? false,
-        };
-        this.providers.push(factory(mergedProviderConfig));
+        this.providers.push(factory(providerConfig));
         console.log(`[stt] loaded provider: ${providerName} (${type})`);
       } catch (err) {
         console.warn(`[stt] failed to create provider "${providerName}":`, (err as Error).message);
@@ -95,6 +89,34 @@ export class SttService {
         }
       }
     }
+  }
+
+  /**
+   * Check which STT dependencies are missing.
+   * Returns empty array if everything is installed, or names like ["whisper", "ffmpeg"].
+   * Note: returns assumed deps when no providers loaded (safe fallback for default config).
+   */
+  async getMissingDeps(): Promise<string[]> {
+    try {
+      await this.ensureInitialized();
+    } catch {
+      return ["whisper", "ffmpeg"]; // Can't initialize = assume all missing
+    }
+
+    if (this.providers.length === 0) {
+      // No providers loaded — most likely whisper not installed (default config uses whisper).
+      // Config typos are logged during doInit(); agent install prompt is a safe fallback.
+      return ["whisper", "ffmpeg"];
+    }
+
+    // Returns deps from first provider that supports getMissingDeps (single-provider today)
+    for (const provider of this.providers) {
+      const installable = provider as InstallableWhisperProvider;
+      if (installable.getMissingDeps && typeof installable.getMissingDeps === "function") {
+        return installable.getMissingDeps();
+      }
+    }
+    return [];
   }
 
   /** Should this attachment be auto-transcribed? */
@@ -141,7 +163,7 @@ export class SttService {
         const duration = await getAudioDuration(attachment.localPath);
         if (duration !== null && duration > maxDuration) {
           console.log(`[stt] skipping ${attachment.name}: duration ${duration.toFixed(1)}s exceeds ${maxDuration}s limit`);
-          return null;
+          return { text: "", provider: "none", approximate: true as const, status: "skipped" as const, error: `Duration ${duration.toFixed(0)}s exceeds ${maxDuration}s limit` };
         }
       } catch {}
     }
@@ -169,18 +191,12 @@ export class SttService {
       for (const provider of this.providers) {
         if (!provider.canTranscribe(input)) continue;
 
-        // Ensure provider is installed (with one-time user notification)
+        // Ensure provider is installed
         const installable = provider as InstallableWhisperProvider;
         if (installable.ensureInstalled && typeof installable.ensureInstalled === "function") {
           try {
             const isReady = await installable.ensureInstalled();
-            if (!isReady) {
-              if (!this.installNoticeSent && notify) {
-                this.installNoticeSent = true;
-                try { await notify("⚠️ Voice transcription not available. Whisper could not be installed automatically."); } catch {}
-              }
-              continue;
-            }
+            if (!isReady) continue;
           } catch {
             continue;
           }
@@ -239,6 +255,9 @@ export async function enrichAttachmentsWithTranscripts(
       const transcript = await sttService.tryTranscribe(att, undefined, notify);
       if (transcript) {
         att.transcript = transcript;
+      } else if (att.mediaType === "audio" && sttService.shouldTranscribe(att)) {
+        // Mark as failed so gateway can detect and act
+        att.transcript = { text: "", provider: "none", approximate: true, status: "failed", error: "No STT provider available" };
       }
     } catch (err) {
       console.error(`[stt] unexpected error transcribing ${att.name}:`, (err as Error).message);
@@ -267,7 +286,6 @@ async function getAudioDuration(filePath: string): Promise<number | null> {
 export const DEFAULT_STT_CONFIG: SttConfig = {
   enabled: true,
   mode: "on",
-  autoInstall: true,
   chain: ["whisper"],
   autoTranscribe: {
     voiceMessages: true,

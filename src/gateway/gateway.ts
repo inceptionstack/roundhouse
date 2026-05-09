@@ -166,7 +166,7 @@ export class Gateway {
     };
     if (sttConfig.enabled && sttConfig.mode !== "off") {
       this.sttService = new SttService(sttConfig);
-      console.log(`[roundhouse] STT enabled (chain: ${sttConfig.chain.join(" -> ")}, autoInstall: ${sttConfig.autoInstall ?? false})`);
+      console.log(`[roundhouse] STT enabled (chain: ${sttConfig.chain.join(" -> ")})`);
       // Prepare providers in background (install + warm model if needed)
       void this.sttService.prepareInBackground();
     }
@@ -455,24 +455,78 @@ export class Gateway {
   /**
    * Enrich audio attachments with speech-to-text transcripts.
    * Updates agentMessage.text for voice-only messages.
+   * If STT deps are missing, injects an install-prompt for the agent.
    */
   private async enrichWithStt(thread: any, agentMessage: AgentMessage): Promise<void> {
     if (!this.sttService || !agentMessage.attachments?.length) return;
     try {
       await enrichAttachmentsWithTranscripts(agentMessage.attachments, this.sttService, (text) => thread.post(text));
+
+      // Check if any audio attachments failed transcription
+      const hasFailedAudio = agentMessage.attachments.some(
+        (a) => a.mediaType === "audio" && a.transcript?.status === "failed",
+      );
+
       if (!agentMessage.text) {
         const transcripts = agentMessage.attachments
           .filter((a) => a.transcript?.status === "completed" && a.transcript.text)
           .map((a) => a.transcript!.text);
         if (transcripts.length > 0) {
           agentMessage.text = `Voice message transcript: ${transcripts.join(" ")}`;
-        } else if (agentMessage.attachments.some((a) => a.mediaType === "audio")) {
-          agentMessage.text = "Voice message attached, but automatic transcription failed.";
+        } else if (hasFailedAudio) {
+          // STT failed — check if deps are missing and inject agent prompt
+          const missing = await this.sttService.getMissingDeps();
+          if (missing.length > 0) {
+            await thread.post(`🎤 Voice transcription not available yet (missing: ${missing.join(", ")}). Asking agent to install...`);
+            agentMessage.text = this.buildSttInstallPrompt(missing, agentMessage.attachments);
+          } else {
+            agentMessage.text = "Voice message attached, but automatic transcription failed.";
+          }
+        }
+      } else if (hasFailedAudio) {
+        // User sent text + audio, but audio transcription failed
+        const missing = await this.sttService.getMissingDeps();
+        if (missing.length > 0) {
+          await thread.post(`🎤 Voice transcription not available yet (missing: ${missing.join(", ")}). Asking agent to install...`);
+          agentMessage.text += "\n\n" + this.buildSttInstallPrompt(missing, agentMessage.attachments);
+        } else {
+          agentMessage.text += "\n\n(Note: a voice message was also attached but automatic transcription failed.)";
         }
       }
     } catch (err) {
       console.error(`[roundhouse] STT enrichment error:`, (err as Error).message);
     }
+  }
+
+  /**
+   * Build a prompt instructing the agent to install missing STT dependencies.
+   */
+  private buildSttInstallPrompt(missing: string[], attachments: any[]): string {
+    const audioFile = attachments.find((a: any) => a.mediaType === "audio");
+    const audioPath = audioFile?.localPath ?? "(audio file path from attachment)";
+
+    const parts: string[] = [
+      "The user sent a voice message but speech-to-text transcription failed because dependencies are missing.",
+      "",
+      `Missing: ${missing.join(", ")}`,
+      "",
+      "Please install the missing dependencies:",
+    ];
+
+    if (missing.includes("ffmpeg")) {
+      parts.push("- ffmpeg: Install to ~/.local/bin/ffmpeg (try: curl static binary from johnvansickle.com for Linux, or `brew install ffmpeg` on macOS)");
+    }
+    if (missing.includes("whisper")) {
+      parts.push("- whisper: Install via `pip3 install --user openai-whisper` or `uv tool install openai-whisper`");
+    }
+
+    parts.push("");
+    parts.push("After installing, verify with `whisper --help` and `ffmpeg -version`, then transcribe the voice message:");
+    parts.push(`  whisper ${JSON.stringify(audioPath)} --model small --language en --output_format txt --output_dir /tmp`);
+    parts.push("");
+    parts.push("Send the transcription text back to the user. If installation fails, let the user know what went wrong.");
+
+    return parts.join("\n");
   }
 
   /**

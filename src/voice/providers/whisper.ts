@@ -2,7 +2,7 @@
  * voice/providers/whisper.ts — Local Whisper STT provider
  *
  * Runs the whisper CLI via child_process. Auto-detects language.
- * Can auto-install whisper via pip3 and warm the model on first use.
+ * Reports missing dependencies so the agent can install them.
  */
 
 import { execFile } from "node:child_process";
@@ -21,6 +21,12 @@ const WHISPER_PATHS = [
   "/usr/bin/whisper",
 ];
 
+const FFMPEG_PATHS = [
+  join(homedir(), ".local", "bin", "ffmpeg"),
+  "/usr/local/bin/ffmpeg",
+  "/usr/bin/ffmpeg",
+];
+
 let cachedBinaryPath: string | null | undefined; // undefined = not checked yet
 
 async function findWhisperBinary(): Promise<string | null> {
@@ -33,207 +39,22 @@ async function findWhisperBinary(): Promise<string | null> {
       return p;
     } catch {}
   }
-  cachedBinaryPath = null;
+  // Don't cache null — allows detection after agent installs whisper
   return null;
 }
 
-/** Reset cached path so next findWhisperBinary() re-scans */
-function invalidateCache(): void {
-  cachedBinaryPath = undefined;
-}
-
-// ── Auto-install ─────────────────────────────────────
-
-let pipAvailable: boolean | undefined;
-
-async function checkPip(): Promise<boolean> {
-  if (pipAvailable !== undefined) return pipAvailable;
-  return new Promise<boolean>((resolve) => {
-    execFile("pip3", ["--version"], { timeout: 5000 }, (err) => {
-      pipAvailable = !err;
-      resolve(pipAvailable);
-    });
-  });
-}
-
-/**
- * Install whisper via pip3 --user. Returns the binary path or null on failure.
- */
-async function installWhisperWithPip(): Promise<string | null> {
-  if (!(await checkPip())) {
-    console.warn("[stt/whisper] pip3 not available — cannot auto-install whisper");
-    return null;
-  }
-
-  console.log("[stt/whisper] installing openai-whisper via pip3...");
-  return new Promise<string | null>((resolve) => {
-    execFile(
-      "pip3",
-      ["install", "--user", "openai-whisper"],
-      {
-        timeout: 300_000, // 5 min for install
-        maxBuffer: 10 * 1024 * 1024, // 10MB for pip output
-        env: { ...process.env },
-      },
-      async (err, stdout, stderr) => {
-        if (err) {
-          console.error("[stt/whisper] pip3 install failed:", err.message);
-          if (stderr) console.error("[stt/whisper] stderr:", stderr.slice(0, 500));
-          resolve(null);
-          return;
-        }
-        console.log("[stt/whisper] pip3 install succeeded");
-
-        // Re-discover binary
-        invalidateCache();
-        const binary = await findWhisperBinary();
-        if (!binary) {
-          console.error("[stt/whisper] installed but binary not found in expected paths");
-          resolve(null);
-          return;
-        }
-
-        // Validate with --help
-        execFile(binary, ["--help"], { timeout: 10_000 }, (helpErr) => {
-          if (helpErr) {
-            console.error("[stt/whisper] binary found but --help failed:", helpErr.message);
-            resolve(null);
-          } else {
-            console.log(`[stt/whisper] validated binary at ${binary}`);
-            resolve(binary);
-          }
-        });
-      },
-    );
-  });
-}
-
-/**
- * Install whisper via uv tool install (fallback when pip3 unavailable).
- */
-async function installWhisperWithUv(): Promise<string | null> {
-  const uvPaths = [
-    join(homedir(), ".local", "bin", "uv"),
-    "/usr/local/bin/uv",
-    "/usr/bin/uv",
-  ];
-  let uvBin: string | null = null;
-  for (const p of uvPaths) {
-    try { await access(p, constants.X_OK); uvBin = p; break; } catch {}
-  }
-  if (!uvBin) {
-    console.warn("[stt/whisper] uv not available — cannot auto-install whisper");
-    return null;
-  }
-
-  console.log("[stt/whisper] installing openai-whisper via uv tool install...");
-  return new Promise<string | null>((resolve) => {
-    execFile(
-      uvBin!,
-      ["tool", "install", "openai-whisper"],
-      {
-        timeout: 300_000,
-        maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, HOME: homedir() },
-      },
-      async (err, _stdout, stderr) => {
-        if (err) {
-          console.error("[stt/whisper] uv tool install failed:", err.message);
-          if (stderr) console.error("[stt/whisper] stderr:", stderr.slice(0, 500));
-          resolve(null);
-          return;
-        }
-        console.log("[stt/whisper] uv tool install succeeded");
-        invalidateCache();
-        const binary = await findWhisperBinary();
-        if (!binary) {
-          console.error("[stt/whisper] uv tool install succeeded but binary not found in expected paths");
-          resolve(null);
-          return;
-        }
-        // Validate binary
-        execFile(binary, ["--help"], { timeout: 10_000 }, (helpErr) => {
-          if (helpErr) {
-            console.error("[stt/whisper] uv-installed binary --help failed:", helpErr.message);
-            resolve(null);
-          } else {
-            resolve(binary);
-          }
-        });
-      },
-    );
-  });
-}
-
-/**
- * Ensure ffmpeg is available (required by whisper). Install static binary if missing.
- */
-let ffmpegPromise: Promise<boolean> | null = null;
-let ffmpegFailed = false;
-
-async function ensureFfmpeg(): Promise<boolean> {
-  const ffmpegPaths = [
-    join(homedir(), ".local", "bin", "ffmpeg"),
-    "/usr/local/bin/ffmpeg",
-    "/usr/bin/ffmpeg",
-  ];
-  for (const p of ffmpegPaths) {
-    try { await access(p, constants.X_OK); return true; } catch {}
-  }
-
-  if (ffmpegFailed) return false;
-  if (ffmpegPromise) return ffmpegPromise;
-
-  ffmpegPromise = (async () => {
-    const arch = process.arch === "arm64" ? "arm64" : "amd64";
-    const url = `https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${arch}-static.tar.xz`;
-    const destDir = join(homedir(), ".local", "bin");
-    const dest = join(destDir, "ffmpeg");
-    const tmpDir = join("/tmp", `ffmpeg-install-${randomBytes(4).toString("hex")}`);
-    console.log(`[stt/whisper] installing static ffmpeg (${arch})...`);
-
+async function findFfmpeg(): Promise<string | null> {
+  for (const p of FFMPEG_PATHS) {
     try {
-      mkdirSync(destDir, { recursive: true });
-      mkdirSync(tmpDir, { recursive: true });
-
-      // Download and extract
-      const ok = await new Promise<boolean>((resolve) => {
-        execFile("bash", ["-c", `curl -fsSL '${url}' | tar xJ -C '${tmpDir}' --wildcards '*/ffmpeg' 2>/dev/null || curl -fsSL '${url}' | tar xJ -C '${tmpDir}'`],
-          { timeout: 120_000 },
-          (err) => resolve(!err),
-        );
-      });
-      if (!ok) { ffmpegFailed = true; return false; }
-
-      // Find the extracted ffmpeg binary
-      const found = await new Promise<string>((resolve) => {
-        execFile("find", [tmpDir, "-name", "ffmpeg", "-type", "f"], { timeout: 5000 }, (err, stdout) => {
-          resolve(err ? "" : stdout.toString().trim().split("\n")[0]);
-        });
-      });
-      if (!found || !found.startsWith(tmpDir + "/")) { ffmpegFailed = true; return false; }
-
-      // Move to dest
-      const { rename, chmod, copyFile } = await import("node:fs/promises");
-      await rename(found, dest).catch(async () => {
-        // Cross-device: copy then remove (unlink is best-effort)
-        await copyFile(found, dest);
-        try { const { unlink } = await import("node:fs/promises"); await unlink(found); } catch {}
-      });
-      await chmod(dest, 0o755);
-      console.log("[stt/whisper] ffmpeg installed successfully");
-      return true;
-    } catch (err: any) {
-      console.error("[stt/whisper] ffmpeg install failed:", err.message);
-      ffmpegFailed = true;
-      return false;
-    } finally {
-      try { await rm(tmpDir, { recursive: true }); } catch {}
-    }
-  })().finally(() => { ffmpegPromise = null; });
-
-  return ffmpegPromise;
+      await access(p, constants.X_OK);
+      return p;
+    } catch {}
+  }
+  return null;
 }
+
+
+// ── Model warmup ─────────────────────────────────────
 
 /**
  * Warm the whisper model by running a tiny transcription.
@@ -298,19 +119,15 @@ async function warmWhisperModel(binary: string, model: string): Promise<boolean>
 
 // ── Provider ─────────────────────────────────────────
 
-/** Extended provider with install capability */
+/** Extended provider that reports missing dependencies */
 export interface InstallableWhisperProvider extends SttProvider {
   ensureInstalled(): Promise<boolean>;
+  getMissingDeps(): Promise<string[]>;
 }
-
-// Singleton promises to prevent concurrent installs
-let installPromise: Promise<string | null> | null = null;
-let installFailed = false; // sticky failure to prevent retry spam
 
 export function createWhisperProvider(config: SttProviderConfig): InstallableWhisperProvider {
   const model = (config.model as string) ?? "small";
   const timeoutMs = config.timeoutMs ?? 30000;
-  const autoInstall = config.autoInstall === true; // explicit opt-in only
   let modelWarmed = false;
   let warmFailed = false; // sticky failure to prevent warmup retry spam
   let warmPromise: Promise<boolean> | null = null;
@@ -318,40 +135,14 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
   const WHISPER_LANGS = new Set(["af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","yue","zh"]);
 
   async function getBinary(): Promise<string | null> {
-    // Check if already available
     const existing = await findWhisperBinary();
-    if (existing) {
-      // Ensure ffmpeg is available too (only auto-install if enabled)
-      if (autoInstall) {
-        const hasFfmpeg = await ensureFfmpeg();
-        if (!hasFfmpeg) {
-          console.warn("[stt/whisper] whisper found but ffmpeg unavailable");
-          return null;
-        }
-      }
-      return existing;
-    }
+    if (!existing) return null;
 
-    // Try auto-install
-    if (!autoInstall) return null;
-    if (installFailed) return null; // sticky failure — don't retry every message
+    // Also need ffmpeg
+    const ffmpeg = await findFfmpeg();
+    if (!ffmpeg) return null;
 
-    // Singleton: join existing install or start new one
-    if (!installPromise) {
-      installPromise = (async () => {
-        // Try pip3 first, then uv
-        let result = await installWhisperWithPip();
-        if (!result) result = await installWhisperWithUv();
-        if (!result) { installFailed = true; return null; }
-        // Also ensure ffmpeg
-        const hasFfmpeg = await ensureFfmpeg();
-        if (!hasFfmpeg) { installFailed = true; return null; }
-        return result;
-      })().finally(() => {
-        installPromise = null;
-      });
-    }
-    return installPromise;
+    return existing;
   }
 
   return {
@@ -359,6 +150,15 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
 
     canTranscribe(input: SttInput): boolean {
       return input.mime.startsWith("audio/");
+    },
+
+    async getMissingDeps(): Promise<string[]> {
+      const missing: string[] = [];
+      const whisper = await findWhisperBinary();
+      if (!whisper) missing.push("whisper");
+      const ffmpeg = await findFfmpeg();
+      if (!ffmpeg) missing.push("ffmpeg");
+      return missing;
     },
 
     async ensureInstalled(): Promise<boolean> {
@@ -379,7 +179,7 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
               }
             } catch {}
 
-            // Run warmup — catch everything so it never rejects
+            // Run warmup
             try {
               const ok = await warmWhisperModel(binary, model);
               if (!ok) warmFailed = true;
@@ -401,7 +201,7 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
     async transcribe(input: SttInput): Promise<TranscriptionResult> {
       const binary = await getBinary();
       if (!binary) {
-        throw new Error("whisper not available and auto-install failed");
+        throw new Error("whisper or ffmpeg not available");
       }
 
       const outputDir = join(homedir(), ".roundhouse", "whisper-tmp", randomBytes(6).toString("hex"));
