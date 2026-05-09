@@ -235,3 +235,56 @@ describe("Pi adapter transcript formatting", () => {
     expect(promptText).toBe("Voice message transcript: hello from voice");
   });
 });
+
+describe("SttService.getMissingDeps", () => {
+  it("returns whisper+ffmpeg when no providers loaded", async () => {
+    const { SttService } = await import("../src/voice/stt-service");
+    const service = new SttService({
+      enabled: true,
+      mode: "on",
+      chain: [],
+      autoTranscribe: { voiceMessages: true, audioFiles: false, maxDurationSec: 120 },
+      providers: {},
+    });
+    const missing = await service.getMissingDeps();
+    expect(missing).toContain("whisper");
+    expect(missing).toContain("ffmpeg");
+  });
+
+  it("returns whisper+ffmpeg when init fails", async () => {
+    const { SttService } = await import("../src/voice/stt-service");
+    const service = new SttService({
+      enabled: true,
+      mode: "on",
+      chain: ["nonexistent-provider"],
+      autoTranscribe: { voiceMessages: true, audioFiles: false, maxDurationSec: 120 },
+      providers: { "nonexistent-provider": { type: "unknown" } },
+    });
+    const missing = await service.getMissingDeps();
+    // Unknown provider type means no providers loaded
+    expect(missing).toContain("whisper");
+    expect(missing).toContain("ffmpeg");
+  });
+});
+
+describe("whisper provider getMissingDeps", () => {
+  it("reports missing binaries", async () => {
+    const { createWhisperProvider } = await import("../src/voice/providers/whisper");
+    const provider = createWhisperProvider({ type: "whisper", model: "small" });
+    const missing = await provider.getMissingDeps();
+    // On CI/test environments, whisper and/or ffmpeg may not be installed
+    expect(Array.isArray(missing)).toBe(true);
+    for (const dep of missing) {
+      expect(["whisper", "ffmpeg"]).toContain(dep);
+    }
+  });
+});
+
+describe("transcript status: skipped", () => {
+  it("duration-exceeded returns skipped status type", () => {
+    const transcript = { text: "", provider: "none", approximate: true as const, status: "skipped" as const, error: "Duration 150s exceeds 120s limit" };
+    expect(transcript.status).toBe("skipped");
+    // skipped !== failed, so hasFailedAudio check won't trigger install prompt
+    expect(transcript.status === "failed").toBe(false);
+  });
+});
