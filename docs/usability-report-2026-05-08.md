@@ -49,16 +49,10 @@
 
 ---
 
-### 6. ⚠️ Whisper/STT auto-install during first message
+### 6. ✅ Whisper/STT auto-install during first message (RESOLVED)
 **Symptom:** First user message triggers `pip3 install openai-whisper` in the background  
 **Root cause:** STT enabled by default; whisper binary not pre-installed  
-**Impact:** Delayed response on first message; `--help` failure logged  
-
-**Planned fixes:**
-- [ ] Move STT dependency install to `roundhouse setup` (postflight check)
-- [ ] If whisper not available at startup, log once and disable STT gracefully
-- [ ] Default to `--no-voice` on macOS (whisper install is heavy via pip)
-- [ ] Suppress `--help` check noise if binary works for actual transcription
+**Resolution:** Replaced auto-install with agent prompt injection (PR #45). Agent installs deps autonomously when prompted.
 
 ---
 
@@ -145,7 +139,7 @@
 | 3 | Extension conflict | Medium | ✅ Done (PR #16) | — |
 | 4 | Pairing UX (not timeout—already 5min) | Medium | Open | Low |
 | 5 | npm deprecation spam | Medium | Open | Medium |
-| 6 | Whisper auto-install | Low | Open | Low |
+| 6 | Whisper auto-install | Low | Resolved | PR #45 |
 | 7 | Setup step numbering | Low | Open | Low |
 | 8 | Getting started flow | Medium | Open | Medium |
 | 9 | TAVILY_API_KEY guidance | Low | Open | Low |
@@ -172,4 +166,4 @@
 ### Longer-term
 9. **Migrate pi SDK** (item 5): switch to `@earendil-works/pi-coding-agent`
 10. **OpenClaw adapter** (item 10): HTTP/SSE proxy to localhost gateway
-11. **STT setup-time install** (item 6): whisper check in postflight, default off on macOS
+11. ~~**STT setup-time install** (item 6)~~: resolved via agent prompt injection (PR #45)
