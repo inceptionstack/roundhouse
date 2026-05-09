@@ -6,7 +6,7 @@
  *   roundhouse message --session main "Hello"
  */
 
-import { sendIpc } from "../ipc/client";
+import { sendIpc } from "../ipc";
 
 export async function cmdMessage(args: string[]): Promise<void> {
   let session: string | undefined;

@@ -1,12 +1,15 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { IpcServer } from "../src/ipc/server";
-import { sendIpc } from "../src/ipc/client";
+import { IpcServer, sendIpc } from "../src/ipc";
 import { unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 // Isolated temp socket — never touches the real ~/.roundhouse/gateway.sock
 const TEST_SOCKET = resolve(tmpdir(), `roundhouse-ipc-test-${process.pid}.sock`);
+
+// NOTE: These tests verify the IPC protocol layer (socket, messages, session field passing).
+// Gateway-level session routing logic (numeric → specific chatId, "main" → notifyChatIds[0], undefined → broadcast)
+// is tested implicitly via integration tests but not unit-tested here.
 
 describe("IPC", () => {
   let server: IpcServer | null = null;

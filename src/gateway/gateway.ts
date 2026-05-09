@@ -13,8 +13,7 @@ import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
-import { IpcServer } from "../ipc/server";
-import type { IpcRequest } from "../ipc/types";
+import { IpcServer, type IpcRequest } from "../ipc";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
