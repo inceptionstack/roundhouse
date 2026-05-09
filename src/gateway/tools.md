@@ -2,6 +2,14 @@
 
 Available tools that can be invoked via shell commands during agent turns.
 
+## Workspace Directory
+
+**All new files, scratch work, downloads, and artifacts you create go under `~/.roundhouse/workspace/`.**
+Do NOT create files directly in `~/` or pollute the home directory. Use subdirectories as needed:
+- `~/.roundhouse/workspace/` — default working directory for any task output
+- `~/.roundhouse/workspace/later.md` — ideas saved via `/later`
+- `~/.roundhouse/workspace/<project>/` — project-specific files if needed
+
 ## roundhouse cron add
 
 Schedule recurring or one-shot jobs. The user may ask you to "remind me", "check every X", "do Y later", or "schedule Z".

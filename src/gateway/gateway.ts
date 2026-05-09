@@ -24,6 +24,7 @@ import { saveAttachments as _saveAttachments, type AttachmentResult } from "./at
 import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel } from "./model-command";
+import { handleLater } from "./later-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
@@ -268,6 +269,12 @@ export class Gateway {
       // Handle /model command
       if (isCommandWithArgs(userText.trim(), "/model") || isCommand(userText.trim(), "/model")) {
         await handleModel({ thread, text: userText.trim(), postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
+        return;
+      }
+
+      // Handle /later command
+      if (isCommandWithArgs(userText.trim(), "/later") || isCommand(userText.trim(), "/later")) {
+        await handleLater({ thread, text: userText.trim(), postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
 
