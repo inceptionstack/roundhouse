@@ -53,7 +53,29 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
     await progress.update(`⚠️ Version check failed — updating extensions only`);
   }
   for (const extensionPackage of GLOBAL_PI_EXTENSION_PACKAGES) {
-    await progress.update(`📦 Updating extension: ${extensionPackage}...`);
+    try {
+      // Check if already at latest
+      const installed = execSync(`npm list -g ${extensionPackage} --json 2>/dev/null`, {
+        timeout: 10_000,
+        encoding: "utf8",
+      });
+      const installedVersion = JSON.parse(installed)?.dependencies?.[extensionPackage]?.version ?? "";
+
+      const latestExtVersion = execSync(`npm view ${extensionPackage} version 2>/dev/null`, {
+        timeout: 10_000,
+        encoding: "utf8",
+      }).trim();
+
+      if (installedVersion && installedVersion === latestExtVersion) {
+        await progress.update(`✅ ${extensionPackage} already at v${installedVersion}`);
+        continue;
+      }
+
+      await progress.update(`📦 Updating ${extensionPackage} v${installedVersion || "?"} → v${latestExtVersion}...`);
+    } catch {
+      // Version check failed — proceed with install anyway
+      await progress.update(`📦 Updating extension: ${extensionPackage}...`);
+    }
 
     try {
       execSync(`npm install -g ${extensionPackage}@latest 2>&1`, {
