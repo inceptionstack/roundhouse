@@ -7,21 +7,21 @@
 
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
-import { splitMessage, isAllowed, startTypingLoop } from "./util";
-import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
-import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
-import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
-import { CronSchedulerService } from "./cron/scheduler";
-import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
-import { maxPressure } from "./memory/policy";
-import type { PressureLevel } from "./memory/types";
+import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "../types";
+import { splitMessage, isAllowed, startTypingLoop } from "../util";
+import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "../voice/stt-service";
+import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doctor/runner";
+import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
+import { CronSchedulerService } from "../cron/scheduler";
+import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
+import { maxPressure } from "../memory/policy";
+import type { PressureLevel } from "../memory/types";
 // TODO: move progress into TransportAdapter when multi-transport lands
 import { createProgressMessage } from "../transports/telegram/progress";
-import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./helpers";
+import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
@@ -30,7 +30,7 @@ import { join } from "node:path";
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
 
-/** Match a Telegram command, handling optional @botname suffix */
+/** Match a bot command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
   return _isCmd(text, cmd, _botUsername);
 }
@@ -66,11 +66,6 @@ async function buildChatAdapters(
 
   return adapters;
 }
-
-function toolIcon(name: string): string {
-  return _toolIcon(name);
-}
-
 
 async function saveAttachments(threadId: string, attachments: any[]): Promise<AttachmentResult> {
   return _saveAttachments(threadId, attachments);
