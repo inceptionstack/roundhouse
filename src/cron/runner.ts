@@ -6,8 +6,8 @@
  */
 
 import { getAgentFactory } from "../agents/registry";
-// TODO: route through TransportAdapter.notify() when multi-transport lands
 import { sendTelegramToMany } from "../transports/telegram/notify";
+import { sendIpc } from "../ipc";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";
 import type { CronJobConfig, CronRunRecord } from "./types";
@@ -127,11 +127,6 @@ export class CronRunner {
   }
 
   private async notify(job: CronJobConfig, record: CronRunRecord): Promise<void> {
-    const tg = job.notify?.telegram;
-    if (!tg?.chatIds?.length) return;
-
-    if (!shouldNotify(tg.onlyOn, record.status)) return;
-
     const icon = runStatusIcon(record.status);
     const dur = `${(record.durationMs / 1000).toFixed(1)}s`;
     const header = `${icon} Cron: ${job.id}\nStatus: ${record.status} (${dur})`;
@@ -145,6 +140,20 @@ export class CronRunner {
       body = `${header}\nError: ${record.error.slice(0, NOTIFY_MAX_ERROR_CHARS)}`;
     }
 
-    await sendTelegramToMany(tg.chatIds, body);
+    // Route 1: Explicit Telegram chat IDs configured on the job
+    const tg = job.notify?.telegram;
+    if (tg?.chatIds?.length) {
+      if (!shouldNotify(tg.onlyOn, record.status)) return;
+      await sendTelegramToMany(tg.chatIds, body);
+      return;
+    }
+
+    // Route 2: Broadcast via IPC to all active transports (default)
+    try {
+      await sendIpc({ type: "notify", text: body });
+    } catch {
+      // Gateway not running or IPC unavailable — log and continue
+      console.warn(`[cron] ${job.id} IPC notify failed (gateway not running?)`);
+    }
   }
 }
