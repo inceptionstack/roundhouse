@@ -226,6 +226,7 @@ export function provisionBundle(opts: ProvisionOpts = {}): void {
   provisionMcporterConfig(opts);
   provisionExtensionFiles(opts);
   provisionExtensions(opts);
+  provisionWorkspaceFiles(opts);
 }
 
 /**
@@ -304,5 +305,35 @@ export function provisionExtensions(opts: ProvisionOpts = {}): void {
     }
   } catch (err: any) {
     log.warn(`extensions provisioning failed: ${err.message}`);
+  }
+}
+
+/**
+ * Copy workspace files (tools.md, etc.) to ~/.roundhouse/ if not already present.
+ * Never overwrites — user's customized version always wins.
+ */
+export function provisionWorkspaceFiles(opts: ProvisionOpts = {}): void {
+  const { force = false, log = consoleLog } = opts;
+  const roundhouseDir = resolve(homedir(), ".roundhouse");
+  const bundledDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "gateway");
+
+  // Files to provision: [bundled filename, target filename]
+  const files: [string, string][] = [
+    ["tools.md", "tools.md"],
+  ];
+
+  try {
+    mkdirSync(roundhouseDir, { recursive: true });
+
+    for (const [src, dest] of files) {
+      const srcPath = resolve(bundledDir, src);
+      const destPath = resolve(roundhouseDir, dest);
+      if (!existsSync(srcPath)) continue;
+      if (existsSync(destPath) && !force) continue; // never overwrite unless forced
+      copyFileSync(srcPath, destPath);
+      log.ok(`${dest} provisioned to ~/.roundhouse/`);
+    }
+  } catch (err: any) {
+    log.warn(`workspace files provisioning failed: ${err.message}`);
   }
 }
