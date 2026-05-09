@@ -88,10 +88,19 @@ export class CronSchedulerService {
 
   async listJobs(): Promise<Array<{ job: CronJobConfig; state: CronJobState }>> {
     await this.reload();
-    return this.jobs.map((job) => ({
-      job,
-      state: this.states.get(job.id) ?? emptyState(job.id),
-    }));
+    return this.jobs
+      .filter((job) => {
+        // Hide completed one-shot jobs (already fired, won't run again)
+        if (job.schedule.type === "once") {
+          const state = this.states.get(job.id);
+          if (state && state.totalRuns > 0) return false;
+        }
+        return true;
+      })
+      .map((job) => ({
+        job,
+        state: this.states.get(job.id) ?? emptyState(job.id),
+      }));
   }
 
   async trigger(jobId: string): Promise<void> {

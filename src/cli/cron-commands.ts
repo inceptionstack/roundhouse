@@ -105,9 +105,23 @@ export async function cronAdd(store: CronStore, positional: string[], flags: Rec
 }
 
 export async function cronList(store: CronStore, _positional: string[], flags: Record<string, string>): Promise<void> {
-  const jobs = await store.listJobs();
+  let jobs = await store.listJobs();
+
+  // Hide completed one-shot jobs unless --all flag is set
+  if (!flags.all) {
+    const filtered: typeof jobs = [];
+    for (const j of jobs) {
+      if (j.schedule.type === "once") {
+        const state = await store.getState(j.id);
+        if (state.totalRuns > 0) continue;
+      }
+      filtered.push(j);
+    }
+    jobs = filtered;
+  }
+
   if (jobs.length === 0) {
-    console.log("No cron jobs configured.");
+    console.log("No active cron jobs.");
     return;
   }
   if (flags.json) {
