@@ -15,14 +15,20 @@ export interface ChatThread {
 /** Minimal incoming message interface */
 export interface IncomingMessage {
   text?: string;
-  author?: { name?: string; id?: string };
+  author?: { userName?: string; name?: string; userId?: string | number; id?: string };
+  chatId?: number;
+  raw?: { from?: { id?: number } };
   [key: string]: unknown;
 }
 
-/** Progress/typing indicator handle */
-export interface ProgressHandle {
-  update(text: string): Promise<void>;
-  stop(): void;
+/** Result of a successful transport pairing */
+export interface PairingResult {
+  /** Thread/channel ID for notifications */
+  threadId: number;
+  /** User ID for allowlist */
+  userId: number;
+  /** Display name */
+  username: string;
 }
 
 /**
@@ -49,4 +55,17 @@ export interface TransportAdapter {
 
   /** Send notifications to configured recipients */
   notify(chatIds: number[], text: string): Promise<void>;
+
+  /**
+   * Check if a pairing flow is pending.
+   * Gateway uses this to decide whether to attempt pairing on incoming messages.
+   */
+  isPairingPending(): Promise<boolean>;
+
+  /**
+   * Try to handle an incoming message as a pairing attempt.
+   * Returns PairingResult on success, null if not a pairing message.
+   * Transport manages its own state (nonce files, OAuth tokens, etc.)
+   */
+  handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null>;
 }

@@ -6,6 +6,7 @@
  */
 
 import { getAgentFactory } from "../agents/registry";
+// TODO: route through TransportAdapter.notify() when multi-transport lands
 import { sendTelegramToMany } from "../transports/telegram/notify";
 import { CronStore, generateRunId } from "./store";
 import { buildTemplateContext, renderTemplate } from "./template";

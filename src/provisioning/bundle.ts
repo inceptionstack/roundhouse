@@ -183,11 +183,43 @@ export function provisionMcporterConfig(opts: ProvisionOpts = {}): void {
 }
 
 /**
+ * Sync bundled skills that ship with roundhouse (additive, overwrites on each provision).
+ */
+export function syncBundledSkills(opts: ProvisionOpts = {}): void {
+  const log = opts.log ?? consoleLog;
+  // Resolves to <package-root>/skills/ (two levels up from src/provisioning/)
+  const bundledDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+  if (!existsSync(bundledDir)) return;
+
+  const entries = readdirSync(bundledDir, { withFileTypes: true })
+    .filter(e => e.isDirectory() && !e.name.startsWith("."));
+  if (entries.length === 0) return;
+
+  mkdirSync(SKILLS_DIR, { recursive: true });
+  let count = 0;
+  for (const entry of entries) {
+    const src = resolve(bundledDir, entry.name);
+    const dest = resolve(SKILLS_DIR, entry.name);
+    if (!dest.startsWith(SKILLS_DIR + "/")) continue;
+    try {
+      execFileSync("rm", ["-rf", dest], { stdio: "pipe", timeout: 10_000 });
+      execFileSync("cp", ["-r", src, dest], { stdio: "pipe", timeout: 30_000 });
+      count++;
+    } catch (e: any) {
+      log.warn(`Failed to copy bundled skill '${entry.name}': ${e.message}`);
+    }
+  }
+  if (count > 0) log.ok(`${count} bundled skill(s) synced`);
+}
+
+/**
  * Provision all bundle dependencies (skills + CLI tools + config + extensions).
  * Non-fatal — logs warnings on failure but never throws.
  */
 export function provisionBundle(opts: ProvisionOpts = {}): void {
   syncSkillsFromRepo(opts);
+  // Must run after syncSkillsFromRepo so bundled skills take precedence on name collision
+  syncBundledSkills(opts);
   provisionMcporter(opts);
   provisionPlaywright(opts);
   provisionUvx(opts);
