@@ -249,7 +249,7 @@ describe("agent registry", () => {
     expect(def.name).toBe("Pi");
     expect(def.available).toBe(true);
     expect(def.packages.length).toBeGreaterThan(0);
-    expect(def.packages[0].packageName).toBe("@mariozechner/pi-coding-agent");
+    expect(def.packages[0].packageName).toBe("@earendil-works/pi-coding-agent");
   });
 
   it("getAgentDefinition throws for unknown type", async () => {
@@ -269,7 +269,7 @@ describe("agent registry", () => {
 
   it("getAgentSdkPackage returns pi package name", async () => {
     const { getAgentSdkPackage } = await import("../src/agents/registry");
-    expect(getAgentSdkPackage("pi")).toBe("@mariozechner/pi-coding-agent");
+    expect(getAgentSdkPackage("pi")).toBe("@earendil-works/pi-coding-agent");
   });
 });
 
