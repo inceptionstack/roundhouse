@@ -18,17 +18,18 @@ export interface SetupOptions {
   systemd: boolean;
   voice: boolean;
   psst: boolean;
-  nonInteractive: boolean;
   force: boolean;
   dryRun: boolean;
   /** Telegram-focused setup flow */
   telegram: boolean;
-  /** Fully headless automation (no TTY prompts) */
-  headless: boolean;
+  /** Non-interactive mode (no TTY prompts) */
+  nonInteractive: boolean;
   /** QR code display mode */
   qr: "auto" | "always" | "never";
   /** Agent type (default: pi) */
   agent: string;
+  /** Whether --agent was explicitly passed on CLI */
+  _agentExplicit?: boolean;
   /** Set by detection: skip agent package install if already configured */
   _skipAgentInstall?: boolean;
 }

@@ -1,7 +1,7 @@
 # Multi-Agent Onboarding Design
 
 > Date: 2026-05-08  
-> Status: Planning  
+> Status: Phase 1-2 Complete  
 > Relates to: usability-report-2026-05-08.md (item #8: getting started flow)
 
 ---
@@ -24,13 +24,22 @@ Currently, `roundhouse setup --telegram` assumes Pi and always installs it. This
 
 ## Detection Logic
 
+> **Note:** The implementation uses a richer interface than originally planned:
+> `{ agents: DetectedAgent[], recommended: string | null }` — see `src/cli/detect.ts`.
+
 ```typescript
+// Actual implementation (src/cli/detect.ts)
+interface DetectedAgent {
+  type: "pi" | "kiro" | "openclaw";
+  binary: string | null;
+  version: string | null;
+  configured: boolean;
+  details: Record<string, string>;
+}
+
 interface DetectedEnvironment {
-  hasPi: boolean;        // `which pi` succeeds OR ~/.pi/agent/settings.json exists
-  hasOpenClaw: boolean;  // `which oc` succeeds OR ~/.openclaw/openclaw.json exists
-  hasKiro: boolean;      // `which kiro-cli` succeeds OR ~/.kiro/ exists
-  piConfigured: boolean; // settings.json has defaultProvider set
-  ocRunning: boolean;    // oc gateway health check responds
+  agents: DetectedAgent[];
+  recommended: "pi" | "kiro" | "openclaw" | null;
 }
 
 function detectEnvironment(): DetectedEnvironment { ... }
@@ -138,17 +147,17 @@ This requires a new adapter (`src/agents/openclaw/openclaw-adapter.ts`) that:
 
 ## Implementation Plan
 
-### Phase 1: Detection + Smart Defaults (next PR)
-- [ ] Add `detectEnvironment()` to `src/cli/detect.ts`
-- [ ] Integrate into setup wizard (after preflight, before package install)
-- [ ] Skip Pi install if already configured
-- [ ] Skip settings.json write if already configured (unless `--force`)
-- [ ] Show detection results in preflight output
+### Phase 1: Detection + Smart Defaults
+- [x] Add `detectEnvironment()` to `src/cli/detect.ts`
+- [x] Integrate into setup wizard (after preflight, before package install)
+- [x] Skip Pi install if already configured
+- [x] Skip settings.json write if already configured (unless `--force`)
+- [x] Show detection results in preflight output
 
 ### Phase 2: Agent Selection (follow-up)
-- [ ] Interactive prompt when multiple backends detected
-- [ ] `--agent` flag respects detection (warns if selected agent not installed)
-- [ ] Fresh users get a choice menu
+- [x] Interactive prompt when multiple backends detected
+- [x] `--agent` flag validates against registry (errors if agent type unknown)
+- [x] Fresh users get a choice menu
 
 ### Phase 3: OpenClaw Adapter
 - [ ] `src/agents/openclaw/openclaw-adapter.ts` extending BaseAdapter
@@ -157,8 +166,8 @@ This requires a new adapter (`src/agents/openclaw/openclaw-adapter.ts`) that:
 - [ ] Register in registry.ts
 - [ ] Setup: configure gatewayUrl, validate connectivity
 
-### Phase 4: Headless/Automation Support
-- [ ] `ROUNDHOUSE_AGENT=openclaw roundhouse setup --headless ...` works
+### Phase 4: Non-Interactive/Automation Support
+- [ ] `ROUNDHOUSE_AGENT=openclaw roundhouse setup --non-interactive ...` works
 - [ ] Cloud-init/SSM scripts can specify agent type without interaction
 - [ ] lowkey packs updated for all agent types
 

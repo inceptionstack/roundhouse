@@ -180,10 +180,7 @@ class KiroAdapter extends BaseAdapter {
     };
   }
 
-  prepareMessage(_threadId: string, message: AgentMessage, context: MessageContext): AgentMessage {
-    if (context.platform === "telegram" && message.text) {
-      return { ...message, text: message.text + "\n\n[Format your final answer for Telegram: concise, use markdown sparingly, avoid long code blocks.]" };
-    }
+  prepareMessage(_threadId: string, message: AgentMessage, _context: MessageContext): AgentMessage {
     return message;
   }
 

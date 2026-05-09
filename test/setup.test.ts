@@ -71,17 +71,22 @@ describe("parseSetupArgs", () => {
   });
 
   it("parses boolean flags", () => {
-    const opts = parseSetupArgs([
-      "--bot-token", "t", "--user", "a",
-      "--no-systemd", "--no-voice", "--with-psst",
-      "--non-interactive", "--force", "--dry-run",
-    ]);
-    expect(opts.systemd).toBe(false);
-    expect(opts.voice).toBe(false);
-    expect(opts.psst).toBe(true);
-    expect(opts.nonInteractive).toBe(true);
-    expect(opts.force).toBe(true);
-    expect(opts.dryRun).toBe(true);
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      const opts = parseSetupArgs([
+        "--user", "a",
+        "--no-systemd", "--no-voice", "--with-psst",
+        "--non-interactive", "--force", "--dry-run",
+      ]);
+      expect(opts.systemd).toBe(false);
+      expect(opts.voice).toBe(false);
+      expect(opts.psst).toBe(true);
+      expect(opts.nonInteractive).toBe(true);
+      expect(opts.force).toBe(true);
+      expect(opts.dryRun).toBe(true);
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
   });
 
   it("throws on missing token", () => {

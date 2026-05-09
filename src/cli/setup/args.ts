@@ -18,11 +18,10 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     systemd: platform() === "linux",
     voice: platform() === "linux",  // Default off on macOS (whisper install is heavy)
     psst: false,
-    nonInteractive: false,
     force: false,
     dryRun: false,
     telegram: false,
-    headless: false,
+    nonInteractive: false,
     qr: "auto",
     agent: "pi",
   };
@@ -46,9 +45,9 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       case "--no-voice": opts.voice = false; break;
       case "--with-psst": opts.psst = true; break;
       case "--non-interactive": opts.nonInteractive = true; break;
+      case "--headless": opts.nonInteractive = true; break;  // alias
       case "--telegram": opts.telegram = true; break;
-      case "--headless": opts.headless = true; opts.nonInteractive = true; break;
-      case "--agent": opts.agent = next().toLowerCase(); break;
+      case "--agent": opts.agent = next().toLowerCase(); opts._agentExplicit = true; break;
       case "--qr": opts.qr = "always"; break;
       case "--no-qr": opts.qr = "never"; break;
       case "--force": opts.force = true; break;
@@ -64,11 +63,11 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
     opts.botToken = process.env.TELEGRAM_BOT_TOKEN ?? "";
   }
 
-  // Headless: reject --bot-token (argv visible in process listings)
-  if (opts.headless && argv.some((a) => a === "--bot-token")) {
+  // Non-interactive: warn about --bot-token (argv visible in process listings)
+  if (opts.nonInteractive && argv.some((a) => a === "--bot-token")) {
     throw new Error(
-      "--bot-token is not accepted in --headless mode (argv visible in process listings).\n" +
-      "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --headless --user USERNAME",
+      "--bot-token is not accepted in --non-interactive mode (argv visible in process listings).\n" +
+      "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --non-interactive --user USERNAME",
     );
   }
 
@@ -80,7 +79,7 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
   }
 
   // Interactive --telegram defers token/user prompting to the wizard
-  const isInteractiveTelegram = opts.telegram && !opts.headless && !opts.nonInteractive && process.stdin.isTTY;
+  const isInteractiveTelegram = opts.telegram && !opts.nonInteractive && process.stdin.isTTY;
 
   // Validate
   if (!opts.botToken && !opts.dryRun && !isInteractiveTelegram) {

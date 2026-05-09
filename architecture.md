@@ -309,15 +309,15 @@ src/
 │   ├── setup.ts                     # Setup dispatcher (300 lines): cmdSetup, cmdPair, help
 │   ├── setup/
 │   │   ├── steps.ts                 # 11 step functions (preflight → postflight)
-│   │   ├── flows.ts                 # Interactive + headless orchestrators
-│   │   ├── runtime.ts               # Logger factories, agent resolution
+│   │   ├── flows.ts                 # Interactive + non-interactive orchestrators
+│   │   ├── runtime.ts               # Agent resolution, StepLog bridge
 │   │   ├── args.ts                  # Argument parser
 │   │   ├── helpers.ts               # Atomic writes, exec wrappers
 │   │   ├── types.ts                 # SetupOptions, StepLog interface
+│   │   ├── prompts.ts               # TTY prompt helpers (text, masked, choice)
+│   │   ├── logger.ts                # JSON/text logger for non-interactive diagnostics
+│   │   ├── telegram.ts              # Telegram API: validate token, pair, register commands
 │   │   └── index.ts                 # Barrel export
-│   ├── setup-telegram.ts            # Telegram API: validate token, pair, register commands
-│   ├── setup-prompts.ts             # TTY prompt helpers
-│   ├── setup-logger.ts              # JSON/text logger for headless diagnostics
 │   ├── qr.ts                        # QR code generation for pairing links
 │   └── doctor/                      # Health checks (8 check modules + runner)
 │
@@ -338,19 +338,24 @@ src/
 │   ├── bootstrap.ts, inject.ts      # Session bootstrapping, context injection
 │   ├── state.ts, types.ts           # State tracking, interfaces
 │
-├── telegram-format.ts               # Markdown → Telegram HTML converter
-├── telegram-html.ts                 # HTML entity utilities
-├── telegram-progress.ts             # Typing indicator + progress edits
-├── bundle.ts                        # Skill/extension bundle provisioning
-├── pairing.ts                       # Nonce-based Telegram pairing protocol
-├── commands.ts                      # Bot command definitions
+├── transports/telegram/             # Telegram transport layer
+│   ├── format.ts                    # Markdown → Telegram HTML converter
+│   ├── html.ts                      # HTML streaming + entity utilities
+│   ├── progress.ts                  # Typing indicator + progress edits
+│   ├── bot-commands.ts              # Bot command definitions
+│   ├── pairing.ts                   # Nonce-based Telegram pairing protocol
+│   └── notify.ts                    # Send messages to notify chat IDs
+│
+├── provisioning/
+│   └── bundle.ts                    # Skill/extension bundle provisioning
+│
 └── util.ts                          # Runtime helpers (crypto, path)
 ```
 
 **Dependency rules:**
 - No circular dependencies
 - `types.ts`, `config.ts`, `util.ts` are pure leaf modules
-- `bundle.ts` is a leaf (only `node:*` imports)
-- Gateway modules (`gateway/*.ts`) import from `../types`, `../config`, `../util`, `../memory/*`, `../telegram-*`
-- CLI modules never import from `gateway.ts` (separation of concerns)
+- `provisioning/bundle.ts` is a leaf (only `node:*` imports)
+- Gateway modules (`gateway/*.ts`) import from `../types`, `../config`, `../util`, `../memory/*`, `../transports/telegram/*`
+- CLI modules never import from `gateway/` (separation of concerns)
 - Agent adapters depend on their SDK + `../../types`, `../../config`, `../../util`

@@ -1,8 +1,8 @@
 /**
- * cli/setup-logger.ts — Structured logging for setup.
+ * cli/setup/logger.ts — Structured logging for setup.
  *
  * Interactive mode: human-friendly text with step numbers and emoji.
- * Headless mode: JSON lines for SSM/cloud-init/Docker log parsing.
+ * Non-interactive mode: JSON lines for SSM/cloud-init/Docker log parsing.
  */
 
 export interface SetupLogger {
@@ -113,8 +113,8 @@ export interface SetupDiagnostics {
   error: { name: string; message: string; stack?: string };
 }
 
-export function printDiagnosticError(diag: SetupDiagnostics, headless: boolean): void {
-  if (headless) {
+export function printDiagnosticError(diag: SetupDiagnostics, nonInteractive: boolean): void {
+  if (nonInteractive) {
     console.error(JSON.stringify({
       ts: ts(),
       level: "error",

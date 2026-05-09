@@ -1,7 +1,7 @@
 import { platform } from "node:os";
 import { execFileSync } from "node:child_process";
 import { type SetupOptions } from "./types";
-import { promptText, promptMasked } from "./prompts";
+import { promptText, promptMasked, promptChoice } from "./prompts";
 import { createJsonLogger, type SetupDiagnostics, printDiagnosticError } from "./logger";
 import { printQr } from "../qr";
 import {
@@ -12,6 +12,7 @@ import {
   type PendingPairing,
 } from "../../transports/telegram/pairing";
 import { detectEnvironment, formatDetectionResults } from "../detect";
+import { listAvailableAgentTypes } from "../../agents/registry";
 import { fileExists, ROUNDHOUSE_DIR, CONFIG_PATH, ENV_FILE_PATH as ENV_PATH } from "../../config";
 import { pairTelegram } from "./telegram";
 import {
@@ -30,7 +31,7 @@ import { resolveAgentForSetup, textLog, textStepLog, createStepLog } from "./run
 
 export async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
   const logger = textStepLog;
-  const agent = resolveAgentForSetup(opts, logger);
+  let agent = resolveAgentForSetup(opts, logger);
   textLog("\n🔧 Roundhouse Telegram Setup");
   textLog("━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -44,13 +45,36 @@ export async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<v
       for (const line of formatDetectionResults(env)) {
         logger.ok(line);
       }
-      if (!opts.force) {
-        const selected = env.agents.find(a => a.type === opts.agent);
-        if (selected?.configured) {
-          opts._skipAgentInstall = true;
-        }
+    }
+
+    // Agent chooser: only prompt if kiro is available and --agent not explicit
+    if (!opts._agentExplicit && !opts.nonInteractive) {
+      const availableTypes = listAvailableAgentTypes();
+      const kiroDetected = env.agents.some(a => a.type === "kiro" && availableTypes.includes(a.type));
+      if (kiroDetected && availableTypes.length > 1) {
+        const choices = availableTypes.map((t, i) => ({
+          label: t,
+          hint: env.agents.find(a => a.type === t)?.configured ? "configured" : i === 0 ? "default" : undefined,
+        }));
+        textLog("");
+        textLog("  Kiro CLI detected. Choose agent backend:");
+        const idx = await promptChoice(choices, { defaultIndex: 0 });
+        opts.agent = availableTypes[idx];
+        logger.ok(`Using ${opts.agent}`);
+      }
+      // else: no kiro detected, silently use default (pi)
+    }
+
+    // Determine if agent install can be skipped (based on final opts.agent)
+    if (!opts.force) {
+      const selected = env.agents.find(a => a.type === opts.agent);
+      if (selected?.configured) {
+        opts._skipAgentInstall = true;
       }
     }
+
+    // Re-resolve agent definition if chooser changed it
+    agent = resolveAgentForSetup(opts, logger);
 
     if (!opts.botToken) {
       textLog("");
@@ -127,24 +151,33 @@ export async function runInteractiveTelegramSetup(opts: SetupOptions): Promise<v
   }
 }
 
-export async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void> {
+export async function runNonInteractiveTelegramSetup(opts: SetupOptions): Promise<void> {
   const logger = createJsonLogger();
   const stepLogger = createStepLog(logger);
   const agent = resolveAgentForSetup(opts, stepLogger);
 
   try {
     if (!opts.botToken) {
-      logger.error("validation.failed", "TELEGRAM_BOT_TOKEN env var required for --headless");
+      logger.error("validation.failed", "TELEGRAM_BOT_TOKEN env var required for --non-interactive");
       process.exit(2);
     }
     if (opts.users.length === 0) {
-      logger.error("validation.failed", "--user is required for --headless");
+      logger.error("validation.failed", "--user is required for --non-interactive");
       process.exit(2);
     }
 
     logger.step(1, 9, "preflight.start", "Running preflight checks");
     await stepPreflight(stepLogger, opts, agent);
     logger.ok("Preflight passed");
+
+    // Detect existing agent to skip redundant install
+    const env = detectEnvironment();
+    if (!opts.force) {
+      const selected = env.agents.find(a => a.type === opts.agent);
+      if (selected?.configured) {
+        opts._skipAgentInstall = true;
+      }
+    }
 
     logger.step(2, 9, "telegram.validate", "Validating Telegram bot token");
     const botInfo = await stepValidateToken(stepLogger, opts);
@@ -225,7 +258,7 @@ export async function runHeadlessTelegramSetup(opts: SetupOptions): Promise<void
       }
     }
 
-    logger.info("setup.complete", "Headless setup complete", {
+    logger.info("setup.complete", "Non-interactive setup complete", {
       botUsername: botInfo.username,
       pairingLink,
       pairingStatus: "pending",

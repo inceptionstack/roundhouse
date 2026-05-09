@@ -42,7 +42,7 @@ import {
   stepPostflight,
 } from "./setup/steps";
 import { resolveAgentForSetup, textLog, textStepLog } from "./setup/runtime";
-import { runInteractiveTelegramSetup, runHeadlessTelegramSetup } from "./setup/flows";
+import { runInteractiveTelegramSetup, runNonInteractiveTelegramSetup } from "./setup/flows";
 
 // ── Orchestrator ─────────────────────────────────────
 
@@ -63,8 +63,8 @@ export async function cmdSetup(argv: string[]): Promise<void> {
 
   // Route to --telegram flows
   if (opts.telegram) {
-    if (opts.headless) {
-      await runHeadlessTelegramSetup(opts);
+    if (opts.nonInteractive) {
+      await runNonInteractiveTelegramSetup(opts);
     } else {
       await runInteractiveTelegramSetup(opts);
     }
@@ -258,12 +258,12 @@ function printSetupHelp(): void {
   console.log(`
 Usage:
   roundhouse setup --telegram                     Interactive wizard (recommended)
-  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --telegram --headless --user USERNAME          Headless automation (SSM/cloud-init)
+  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --telegram --non-interactive --user USERNAME   Non-interactive automation (SSM/cloud-init)
   TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --user USERNAME                                Legacy (non-wizard) setup
 
 Modes:
-  --telegram                 Telegram-focused setup (wizard or headless)
-  --headless                 Non-interactive automation (implies --non-interactive)
+  --telegram                 Telegram-focused setup (wizard or non-interactive)
+  --non-interactive           Suppress all prompts (for automation/SSM/cloud-init)
                              Requires TELEGRAM_BOT_TOKEN env var and --user
 
 Required (or prompted in interactive --telegram):

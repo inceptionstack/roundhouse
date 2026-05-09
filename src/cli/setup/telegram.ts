@@ -1,11 +1,11 @@
 /**
- * cli/setup-telegram.ts — Telegram API helpers for setup
+ * cli/setup/telegram.ts — Telegram API helpers for setup
  *
  * Zero-dependency Telegram Bot API client using global fetch.
  * Token is never logged — redacted in all error messages.
  */
 
-import { randomBytes } from "node:crypto";
+import { createPairingNonce } from "../../transports/telegram/pairing";
 import { BOT_COMMANDS } from "../../transports/telegram/bot-commands";
 
 // ── Types ────────────────────────────────────────────
@@ -90,7 +90,7 @@ export async function pairTelegram(
   log: (msg: string) => void = console.log,
   opts?: { nonce?: string; showLink?: boolean },
 ): Promise<PairResult | null> {
-  const nonce = opts?.nonce ?? `rh-${randomBytes(8).toString("hex")}`;
+  const nonce = opts?.nonce ?? createPairingNonce();
   const normalizedUsers = allowedUsers.map((u) => u.replace(/^@/, "").toLowerCase());
 
   // Clear stale updates — advance offset past existing

@@ -115,32 +115,31 @@ describe("parseSetupArgs --telegram flags", () => {
     try {
       const opts = parseSetupArgs(["--telegram", "--user", "testuser"]);
       expect(opts.telegram).toBe(true);
-      expect(opts.headless).toBe(false);
+      expect(opts.nonInteractive).toBe(false);
     } finally {
       delete process.env.TELEGRAM_BOT_TOKEN;
     }
   });
 
-  it("--headless implies --non-interactive", async () => {
+  it("--headless is alias for --non-interactive", async () => {
     const { parseSetupArgs } = await import("../src/cli/setup");
     process.env.TELEGRAM_BOT_TOKEN = "fake:token";
     try {
       const opts = parseSetupArgs(["--telegram", "--headless", "--user", "testuser"]);
-      expect(opts.headless).toBe(true);
       expect(opts.nonInteractive).toBe(true);
     } finally {
       delete process.env.TELEGRAM_BOT_TOKEN;
     }
   });
 
-  it("--headless rejects --bot-token", async () => {
+  it("--non-interactive rejects --bot-token", async () => {
     const { parseSetupArgs } = await import("../src/cli/setup");
     expect(() =>
-      parseSetupArgs(["--telegram", "--headless", "--bot-token", "fake:token", "--user", "x"])
-    ).toThrow("--bot-token is not accepted in --headless mode");
+      parseSetupArgs(["--telegram", "--non-interactive", "--bot-token", "fake:token", "--user", "x"])
+    ).toThrow("--bot-token is not accepted");
   });
 
-  it("--headless requires --user", async () => {
+  it("--non-interactive requires --user", async () => {
     const { parseSetupArgs } = await import("../src/cli/setup");
     process.env.TELEGRAM_BOT_TOKEN = "fake:token";
     try {
@@ -200,6 +199,19 @@ describe("parseSetupArgs --agent flag", () => {
     try {
       const opts = parseSetupArgs(["--agent", "pi", "--user", "x"]);
       expect(opts.agent).toBe("pi");
+      expect(opts._agentExplicit).toBe(true);
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+    }
+  });
+
+  it("does not set _agentExplicit when --agent omitted", async () => {
+    const { parseSetupArgs } = await import("../src/cli/setup");
+    process.env.TELEGRAM_BOT_TOKEN = "fake:token";
+    try {
+      const opts = parseSetupArgs(["--user", "x"]);
+      expect(opts.agent).toBe("pi");
+      expect(opts._agentExplicit).toBeUndefined();
     } finally {
       delete process.env.TELEGRAM_BOT_TOKEN;
     }
@@ -258,5 +270,12 @@ describe("agent registry", () => {
   it("getAgentSdkPackage returns pi package name", async () => {
     const { getAgentSdkPackage } = await import("../src/agents/registry");
     expect(getAgentSdkPackage("pi")).toBe("@mariozechner/pi-coding-agent");
+  });
+});
+
+describe("promptChoice", () => {
+  it("is exported and callable", async () => {
+    const mod = await import("../src/cli/setup/prompts");
+    expect(typeof mod.promptChoice).toBe("function");
   });
 });
