@@ -2,6 +2,17 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.9] — 2026-05-09
+
+### Added
+- **Cron IPC broadcast** — cron jobs without explicit `notify.telegram.chatIds` now broadcast results via IPC socket to all active transports
+- Expanded tools.md: mcporter, playwright-cli, codex exec, AWS CLI, memory management docs
+
+### Fixed
+- Completed one-shot jobs hidden from `/crons` and `roundhouse cron list` (use `--all` to see them)
+- playwright-cli command names corrected (requests, cookie-list, eval)
+- mcporter examples use actual configured server names (aws-mcp, aws-documentation)
+
 ## [0.5.8] — 2026-05-09
 
 ### Added
