@@ -155,6 +155,11 @@ async function cmdUpdate() {
     return;
   }
 
+  if (result.action === "error") {
+    console.error(`[roundhouse] Update failed: ${result.error}`);
+    process.exit(1);
+  }
+
   console.log(`[roundhouse] Updated to v${result.latestVersion}`);
 
   const svc = getServiceManager();

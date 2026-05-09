@@ -6,6 +6,20 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 _No unreleased changes._
 
+## [0.5.7] — 2026-05-09
+
+### Added
+- **`<tools>` section injection** — bundled `tools.md` injected into every agent prompt so agent knows it can schedule cron jobs (PR #50)
+- **Extension updates in `/update`** — pi-hard-no and pi-branch-enforcer updated alongside roundhouse (PR #51)
+- User-customizable `~/.roundhouse/tools.md` overrides bundled tools documentation
+- Per-extension progress messages shown to user during update
+
+### Fixed
+- Tools injection runs after STT enrichment so voice-only messages also get tools context
+- XML tag sanitization prevents prompt injection from user-customized tools.md
+- `/update` version-check failure returns distinct error (not misleading "already-latest")
+- Error messages truncated to 200 chars for Telegram safety
+
 ## [0.5.6] — 2026-05-09
 
 ### Added
