@@ -13,6 +13,8 @@ import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
+import { IpcServer } from "../ipc/server";
+import type { IpcRequest } from "../ipc/types";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
@@ -82,6 +84,7 @@ export class Gateway {
   private pairingComplete = false;
   private sttService: SttService | null = null;
   private cronScheduler: CronSchedulerService | null = null;
+  private ipcServer: IpcServer | null = null;
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -328,6 +331,41 @@ export class Gateway {
       await this.cronScheduler.start();
     } catch (err) {
       console.error("[roundhouse] cron scheduler start failed:", (err as Error).message);
+    }
+
+    // Start IPC server for CLI → gateway communication
+    this.ipcServer = new IpcServer(async (req: IpcRequest) => {
+      if (req.type === "ping") return { ok: true };
+      if (req.type === "notify") {
+        const allChatIds = this.config.chat.notifyChatIds ?? [];
+        if (allChatIds.length === 0) return { ok: false, error: "No notifyChatIds configured" };
+
+        // Session routing:
+        //   "main" = first notifyChatId (primary user chat)
+        //   numeric string = that specific chat ID
+        //   anything else / undefined = broadcast to all notifyChatIds
+        let targetIds: number[];
+        if (req.session === "main") {
+          targetIds = [allChatIds[0]];
+        } else if (req.session && /^-?\d+$/.test(req.session)) {
+          targetIds = [Number(req.session)];
+        } else {
+          targetIds = allChatIds; // broadcast to all
+        }
+
+        try {
+          await this.transport.notify(targetIds, req.text);
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: e.message };
+        }
+      }
+      return { ok: false, error: "Unknown request type" };
+    });
+    try {
+      await this.ipcServer.start();
+    } catch (err) {
+      console.error("[roundhouse] IPC server start failed:", (err as Error).message);
     }
 
     // Send startup notification (after cron init so we can include job counts)
@@ -746,6 +784,9 @@ export class Gateway {
   }
 
   async stop() {
+    if (this.ipcServer) {
+      this.ipcServer.stop();
+    }
     if (this.cronScheduler) {
       try { await this.cronScheduler.stop(); } catch (e) { console.warn("[roundhouse] cron stop error:", e); }
     }

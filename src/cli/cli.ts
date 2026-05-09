@@ -370,6 +370,7 @@ Commands:
   doctor [--fix]       Check system health and configuration
                        Options: --fix, --json, --verbose
   cron <command>       Manage scheduled jobs (add, list, trigger, etc.)
+  message "text"       Send a message to active transports via gateway
 
 Config:
   ~/.roundhouse/gateway.config.json
@@ -388,6 +389,7 @@ import { cmdDoctor } from "./doctor";
 import { cmdAgent } from "./agent-command";
 import { cmdCron } from "./cron";
 import { cmdSetup, cmdPair } from "./setup";
+import { cmdMessage } from "./message";
 
 const command = process.argv[2];
 
@@ -407,6 +409,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   tui: cmdTui,
   doctor: () => cmdDoctor(process.argv.slice(3)),
   cron: () => cmdCron(process.argv.slice(3)),
+  message: () => cmdMessage(process.argv.slice(3)),
   agent: cmdAgent,
 };
 
