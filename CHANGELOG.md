@@ -2,6 +2,41 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.6] — 2026-05-09
+
+### Added
+- **STT agent prompt injection** — when whisper/ffmpeg are missing, injects install prompt into agent turn instead of complex auto-install chains (PR #45)
+- **getMissingDeps()** on whisper provider + SttService — reports what’s missing so gateway can act
+- **Duration-exceeded “skipped” status** — audio too long gets status “skipped” (not “failed”), preventing false install prompts
+- **Text+audio handling** — when user sends caption + voice, install prompt appends to existing text
+
+### Changed
+- **Removed `autoInstall` config** — no longer needed; agent handles installation autonomously
+- **Simplified whisper.ts** — removed installWhisperWithPip, installWhisperWithUv, ensureFfmpeg (~150 lines deleted)
+- **User notification** — “Asking agent to install...” (accurate) replaces “Setting up...” (misleading)
+
+### Fixed
+- **systemd: TimeoutStopSec=15 + KillMode=mixed** (PR #43) — hung whisper subprocesses no longer block shutdown for 90s
+- **Stale autoInstall references** in CLI setup wizard, doctor checks, and usability report (PR #46)
+
+## [0.5.5] — 2026-05-09
+
+### Added
+- **TransportAdapter interface** — enrichPrompt, postMessage, registerCommands, ownsThread, notify, isPairingPending, handlePairing (PR #37)
+- **TelegramAdapter** — implements TransportAdapter, pairing logic moved from gateway (PR #39)
+- **Bundled skills** — roundhouse-cron + pr-merge-discipline ship with package
+- **STT typing indicator** — Telegram shows “typing” during voice transcription (PR #42)
+- **PairingResult widened** to `string | number` for future Slack/Discord support (PR #41)
+- **Agent chooser** — interactive numbered menu in setup wizard (PR #37)
+
+### Fixed
+- **Gateway imports** — 9 broken `./` → `../` paths after module reorg (PR #40)
+- **Naming conventions** — adapter.ts → telegram-adapter.ts, TelegramTransportAdapter → TelegramAdapter (PR #38)
+
+### Changed
+- **Module reorganization** (PR #36) — gateway/, transports/telegram/, cli/setup/, provisioning/
+- 376 tests passing
+
 ## [Unreleased] (post-0.3.18)
 
 ### Added
