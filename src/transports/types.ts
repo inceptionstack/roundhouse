@@ -24,9 +24,9 @@ export interface IncomingMessage {
 /** Result of a successful transport pairing */
 export interface PairingResult {
   /** Thread/channel ID for notifications */
-  threadId: number;
+  threadId: string | number;
   /** User ID for allowlist */
-  userId: number;
+  userId: string | number;
   /** Display name */
   username: string;
 }

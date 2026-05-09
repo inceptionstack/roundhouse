@@ -20,9 +20,9 @@ Different transports will need different pairing flows (e.g., Slack OAuth, Disco
 /** Result of a successful pairing — what gateway stores in config */
 interface PairingResult {
   /** Unique thread/channel ID for this user (used for notify) */
-  threadId: number;
+  threadId: string | number;
   /** Unique user ID (used for allowlist) */  
-  userId: number;
+  userId: string | number;
   /** Display name */
   username: string;
 }
@@ -63,7 +63,11 @@ if (!this.pairingComplete && await this.transport.isPairingPending()) {
   const result = await this.transport.handlePairing(thread, message);
   if (!result) return false;
 
-  const { threadId, userId, username } = result;
+  const { threadId: rawThreadId, userId: rawUserId, username } = result;
+  // Coerce to number (config arrays are number[] today)
+  const threadId = typeof rawThreadId === "string" ? Number(rawThreadId) : rawThreadId;
+  const userId = typeof rawUserId === "string" ? Number(rawUserId) : rawUserId;
+  if (!Number.isFinite(threadId) || !Number.isFinite(userId)) return false;
 
   // Update in-memory config
   if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];

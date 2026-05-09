@@ -98,7 +98,16 @@ export class Gateway {
       const result = await this.transport.handlePairing(thread, message);
       if (!result) return false;
 
-      const { threadId, userId, username } = result;
+      const { threadId: rawThreadId, userId: rawUserId, username } = result;
+      // Config arrays are currently number[] — coerce with guard.
+      // When a string-ID transport (Slack/Discord) arrives, widen config types too.
+      const threadId = typeof rawThreadId === "string" ? Number(rawThreadId) : rawThreadId;
+      const userId = typeof rawUserId === "string" ? Number(rawUserId) : rawUserId;
+
+      if (!Number.isFinite(threadId) || !Number.isFinite(userId)) {
+        console.error(`[roundhouse] Pairing returned non-numeric IDs: threadId=${rawThreadId} userId=${rawUserId}`);
+        return false;
+      }
 
       // Update in-memory config
       if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];
