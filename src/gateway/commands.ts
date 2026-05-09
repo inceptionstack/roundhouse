@@ -163,15 +163,37 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
   const nodeVer = process.version;
   const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
 
+  // Check for available update (async, non-blocking)
+  let updateAvailable = "";
+  try {
+    const { exec } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execAsync = promisify(exec);
+    const { stdout } = await execAsync("npm view @inceptionstack/roundhouse version 2>/dev/null", { timeout: 10_000 });
+    const latest = stdout.trim().split("\n").pop()!.trim();
+    if (latest && /^\d+\.\d+\.\d+$/.test(latest) && latest !== ROUNDHOUSE_VERSION) {
+      // Simple semver comparison: split and compare numerically
+      const [lM, lm, lp] = latest.split(".").map(Number);
+      const [cM, cm, cp] = ROUNDHOUSE_VERSION.split(".").map(Number);
+      if (lM > cM || (lM === cM && lm > cm) || (lM === cM && lm === cm && lp > cp)) {
+        updateAvailable = latest;
+      }
+    }
+  } catch { /* network unavailable — skip */ }
+
   const info = agent.getInfo ? agent.getInfo(agentThreadId) : {};
   const agentVersion = info.version ? `v${info.version}` : "";
   const agentLabel = agentVersion ? `\`${agent.name}\` (${agentVersion})` : `\`${agent.name}\``;
+
+  const versionLine = updateAvailable
+    ? `📦 Roundhouse: v${ROUNDHOUSE_VERSION} → ⬆️ v${updateAvailable} available (/update)`
+    : `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`;
 
   const lines = [
     `📊 *Roundhouse Status*`,
     ``,
     `🎫 Session: \`${agentThreadId}\``,
-    `📦 Roundhouse: v${ROUNDHOUSE_VERSION}`,
+    versionLine,
     `🤖 Agent: ${agentLabel}`,
   ];
 
