@@ -1,7 +1,7 @@
 # Transport Adapter Design
 
 > Date: 2026-05-09
-> Status: Partial (enrichPrompt, postMessage, registerCommands, ownsThread, notify done; handlePairing, resolveAuthor, createProgress deferred)
+> Status: Partial (enrichPrompt, postMessage, registerCommands, ownsThread, notify, handlePairing, isPairingPending done; createProgress deferred)
 > Branch: refactor/transport-adapter
 
 ## Goal
@@ -32,11 +32,11 @@ export interface TransportAdapter {
   /** Register bot commands with the platform */
   registerCommands(token: string): Promise<void>;
 
-  /** Handle platform-specific pairing flow. Returns true if message was consumed. */
-  handlePairing(thread: ChatThread, message: IncomingMessage, config: GatewayConfig): Promise<boolean>;
+  /** Handle platform-specific pairing flow. Returns PairingResult or null. */
+  handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null>;
 
-  /** Resolve the author identity from a platform message */
-  resolveAuthor(thread: ChatThread, message: IncomingMessage): { name: string; id: string } | null;
+  /** Check if pairing is pending (fast-path for gateway). */
+  isPairingPending(): Promise<boolean>;
 
   /** Check if a thread belongs to this transport */
   ownsThread(thread: ChatThread): boolean;
@@ -44,28 +44,22 @@ export interface TransportAdapter {
   /** Send notifications to configured chat IDs */
   notify(chatIds: number[], text: string): Promise<void>;
 
-  /** Create a progress/typing indicator */
-  createProgress(thread: ChatThread, token: string): ProgressHandle | null;
-}
-
-export interface ProgressHandle {
-  update(text: string): Promise<void>;
-  stop(): void;
+  // DEFERRED: createProgress() not yet extracted into interface
+  // Progress indicators still imported directly from transports/telegram/progress.ts
 }
 ```
 
 ## Extraction Plan
 
-### What moves from gateway.ts → TelegramTransportAdapter:
+### What moves from gateway.ts → TelegramAdapter:
 
 1. **`enrichPrompt()`** — appends `[Format your final answer to be telegram-friendly.]`
 2. **`postMessage()`** — `isTelegramThread` check + `postTelegramHtml` call (lines 621-623)
 3. **`registerCommands()`** — the `registerBotCommands()` method (lines 640-660)
 4. **`handlePairing()`** — the `handlePendingPairing()` method (lines 96-170)
-5. **`resolveAuthor()`** — author resolution logic from `handleNewMessage` (lines 117-130)
 6. **`ownsThread()`** — `isTelegramThread()` check
 7. **`notify()`** — `sendTelegramToMany()` wrapper
-8. **`createProgress()`** — `createProgressMessage()` wrapper
+8. **`createProgress()`** — DEFERRED (progress still imported directly)
 
 ### What stays in gateway.ts (transport-agnostic):
 
@@ -80,9 +74,9 @@ export interface ProgressHandle {
 
 ```
 src/transports/
-├── types.ts              # TransportAdapter interface + ProgressHandle
+├── types.ts              # TransportAdapter interface + PairingResult
 ├── telegram/
-│   ├── adapter.ts        # TelegramTransportAdapter implements TransportAdapter
+│   ├── telegram-adapter.ts        # TelegramAdapter implements TransportAdapter
 │   ├── format.ts         # (existing) Markdown → HTML
 │   ├── html.ts           # (existing) HTML streaming
 │   ├── progress.ts       # (existing) Typing indicators
@@ -101,7 +95,7 @@ class Gateway {
 
   constructor(config) {
     // For now, always Telegram. Future: resolve from config.
-    this.transport = new TelegramTransportAdapter(config);
+    this.transport = new TelegramAdapter(config);
   }
 
   // Before sending to agent:

@@ -287,10 +287,8 @@ src/
 │   │   ├── attachments.ts          # File save, validation, size limits
 │   │   ├── helpers.ts              # Pure utils: splitMessage, isAllowed, threadIdToDir
 │   │   └── index.ts                # Barrel re-export
-│   ├── commands/update.ts           # /update handler → bundle provisioning
 │   ├── cron/scheduler.ts            # Tick loop, catch-up, job dispatch
 │   ├── memory/                      # Session memory hooks (flush, compact, inject)
-│   ├── notify/telegram.ts           # Startup/error notifications
 │   └── voice/
 │       ├── stt-service.ts           # STT orchestration (provider chain)
 │       └── providers/whisper.ts     # Whisper CLI provider
@@ -338,13 +336,17 @@ src/
 │   ├── bootstrap.ts, inject.ts      # Session bootstrapping, context injection
 │   ├── state.ts, types.ts           # State tracking, interfaces
 │
-├── transports/telegram/             # Telegram transport layer
-│   ├── format.ts                    # Markdown → Telegram HTML converter
-│   ├── html.ts                      # HTML streaming + entity utilities
-│   ├── progress.ts                  # Typing indicator + progress edits
-│   ├── bot-commands.ts              # Bot command definitions
-│   ├── pairing.ts                   # Nonce-based Telegram pairing protocol
-│   └── notify.ts                    # Send messages to notify chat IDs
+├── transports/                      # Transport adapter layer
+│   ├── types.ts                     # TransportAdapter interface + PairingResult
+│   ├── index.ts                     # Barrel export
+│   └── telegram/                    # Telegram implementation
+│       ├── telegram-adapter.ts      # TelegramAdapter (implements TransportAdapter)
+│       ├── format.ts                # Markdown → Telegram HTML converter
+│       ├── html.ts                  # HTML streaming + entity utilities
+│       ├── progress.ts              # Typing indicator + progress edits
+│       ├── bot-commands.ts          # Bot command definitions
+│       ├── pairing.ts               # Nonce-based Telegram pairing protocol
+│       └── notify.ts                # Send messages to notify chat IDs
 │
 ├── provisioning/
 │   └── bundle.ts                    # Skill/extension bundle provisioning
@@ -352,10 +354,20 @@ src/
 └── util.ts                          # Runtime helpers (crypto, path)
 ```
 
+**Repo-root directories (outside `src/`):**
+```
+skills/                              # Bundled skills (shipped in package)
+└── roundhouse-cron/SKILL.md         # Cron job skill for pi
+```
+
 **Dependency rules:**
 - No circular dependencies
 - `types.ts`, `config.ts`, `util.ts` are pure leaf modules
 - `provisioning/bundle.ts` is a leaf (only `node:*` imports)
-- Gateway modules (`gateway/*.ts`) import from `../types`, `../config`, `../util`, `../memory/*`, `../transports/telegram/*`
+- Gateway modules (`gateway/*.ts`) import from `../transports` (via TransportAdapter interface), `../types`, `../config`, `../util`, `../memory/*`
+- Gateway holds a `TransportAdapter` instance — all platform-specific operations go through this interface
+- `transports/telegram/progress.ts` is still imported directly by gateway (deferred from adapter extraction)
+- `gateway/streaming.ts` imports `transports/telegram/html.ts` directly (deferred — streaming is tightly coupled to Telegram HTML wire format)
+- `cron/runner.ts` imports `transports/telegram/notify` directly (deferred — will route through adapter when multi-transport lands)
 - CLI modules never import from `gateway/` (separation of concerns)
 - Agent adapters depend on their SDK + `../../types`, `../../config`, `../../util`

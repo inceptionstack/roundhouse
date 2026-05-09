@@ -1,7 +1,7 @@
 # Transport Pairing Design
 
 > Date: 2026-05-09
-> Branch: refactor/transport-pairing
+> Status: merged to main
 
 ## Problem
 
@@ -20,9 +20,9 @@ Different transports will need different pairing flows (e.g., Slack OAuth, Disco
 /** Result of a successful pairing — what gateway stores in config */
 interface PairingResult {
   /** Unique thread/channel ID for this user (used for notify) */
-  threadId: string | number;
+  threadId: number;
   /** Unique user ID (used for allowlist) */  
-  userId: string | number;
+  userId: number;
   /** Display name */
   username: string;
 }

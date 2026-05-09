@@ -15,19 +15,22 @@ import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
-import type { PressureLevel, CompactResult } from "./memory/types";
+import type { PressureLevel } from "./memory/types";
+// TODO: move progress into TransportAdapter when multi-transport lands
 import { createProgressMessage } from "../transports/telegram/progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes, toolIcon as _toolIcon } from "./helpers";
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
-import { handleStreaming as _handleStream, type StreamResult } from "./streaming";
+import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
-import { TelegramAdapter } from "../transports/telegram/telegram-adapter";
-import type { TransportAdapter } from "../transports/types";
+import { TelegramAdapter } from "../transports";
+import type { TransportAdapter } from "../transports";
+import { hostname } from "node:os";
+import { join } from "node:path";
 
-/** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
 
+/** Match a Telegram command, handling optional @botname suffix */
 function isCommand(text: string, cmd: string): boolean {
   return _isCmd(text, cmd, _botUsername);
 }
@@ -36,12 +39,10 @@ function isCommand(text: string, cmd: string): boolean {
 function isCommandWithArgs(text: string, cmd: string): boolean {
   return _isCmdArgs(text, cmd, _botUsername);
 }
-import { hostname } from "node:os";
 
 function getSystemResources() {
   return _getSysRes();
 }
-import { join } from "node:path";
 
 
 function resolveAgentThreadId(thread: any, message: any): string {

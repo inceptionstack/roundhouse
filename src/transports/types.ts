@@ -15,14 +15,10 @@ export interface ChatThread {
 /** Minimal incoming message interface */
 export interface IncomingMessage {
   text?: string;
-  author?: { name?: string; id?: string };
+  author?: { userName?: string; name?: string; userId?: string | number; id?: string };
+  chatId?: number;
+  raw?: { from?: { id?: number } };
   [key: string]: unknown;
-}
-
-/** Progress/typing indicator handle */
-export interface ProgressHandle {
-  update(text: string): Promise<void>;
-  stop(): void;
 }
 
 /** Result of a successful transport pairing */

@@ -1,5 +1,5 @@
 /**
- * transports/telegram/adapter.ts — Telegram transport adapter
+ * transports/telegram/telegram-adapter.ts — Telegram transport adapter
  *
  * Implements TransportAdapter for Telegram, composing existing
  * utility modules (format, html, progress, notify, bot-commands).
@@ -73,8 +73,8 @@ export class TelegramAdapter implements TransportAdapter {
     }
 
     // Verify author is allowed
-    const authorName = (message.author?.name ?? "").toLowerCase();
-    const originalName = message.author?.name ?? "";
+    const authorName = (message.author?.userName ?? message.author?.name ?? "").toLowerCase();
+    const originalName = message.author?.userName ?? message.author?.name ?? "";
     const allowed = pending.allowedUsers.map(u => u.toLowerCase());
     if (!authorName || !allowed.includes(authorName)) {
       console.log(`[roundhouse] Pairing nonce from unauthorized user @${originalName}`);
@@ -97,7 +97,7 @@ export class TelegramAdapter implements TransportAdapter {
         : undefined;
 
     if (chatId == null || Number.isNaN(chatId) || userId == null || Number.isNaN(userId)) {
-      console.error(`[roundhouse] Pairing nonce matched but could not extract IDs: chatId=${chatId} userId=${userId}`);
+      console.error(`[roundhouse] Pairing nonce matched but could not extract IDs: chatId=${chatId} userId=${userId} (raw: msg.chatId=${message.chatId}, thread.id=${thread.id}, author.userId=${message.author?.userId}, author.id=${message.author?.id}, raw.from.id=${message.raw?.from?.id})`);
       await clearPendingPairing();
       await thread.post("⚠️ Pairing failed — could not capture your Telegram IDs. Run: roundhouse setup --telegram");
       return null;
