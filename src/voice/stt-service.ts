@@ -177,7 +177,7 @@ export class SttService {
             if (!isReady) {
               if (!this.installNoticeSent && notify) {
                 this.installNoticeSent = true;
-                try { await notify("🎤 Voice transcription not available. Whisper install or model download failed."); } catch {}
+                try { await notify("⚠️ Voice transcription not available. Whisper could not be installed automatically."); } catch {}
               }
               continue;
             }
