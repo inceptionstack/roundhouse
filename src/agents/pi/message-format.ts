@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "../../types";
-import type { AgentSessionEvent } from "@mariozechner/pi-coding-agent";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 /**
  * Convert custom message content (string or array of parts) to plain text.

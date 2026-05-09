@@ -24,7 +24,7 @@ import {
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
@@ -66,7 +66,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     //
     // WARNING: _agentEventQueue is a private field of AgentSession (not part
     // of the public pi-coding-agent API). Tested against
-    // @mariozechner/pi-coding-agent version bundled via `latest` in
+    // @earendil-works/pi-coding-agent version bundled via `latest` in
     // package.json at the time of this commit. If upstream renames or changes
     // this field, extension custom messages (e.g. pi-lgtm review bubbles)
     // will stop reaching Telegram. The `if (queue)` check fails silently
@@ -558,7 +558,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       // Read agent version
       let version = "unknown";
       try {
-        const piPkgPath = join(__piAdapterDir, "..", "..", "..", "node_modules", "@mariozechner", "pi-coding-agent", "package.json");
+        const piPkgPath = join(__piAdapterDir, "..", "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "package.json");
         version = JSON.parse(readFileSync(piPkgPath, "utf8")).version;
       } catch {}
 

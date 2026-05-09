@@ -69,12 +69,12 @@ const piDefinition: AgentDefinition = {
   packages: [
     {
       name: "Pi coding agent",
-      packageName: "@mariozechner/pi-coding-agent",
+      packageName: "@earendil-works/pi-coding-agent",
       install: "global",
       binary: "pi",
     },
   ],
-  sdkPackage: "@mariozechner/pi-coding-agent",
+  sdkPackage: "@earendil-works/pi-coding-agent",
   configDefaults: {},
   configDirs: [resolve(homedir(), ".pi", "agent")],
   // configure and installExtension are set by setup.ts since they need

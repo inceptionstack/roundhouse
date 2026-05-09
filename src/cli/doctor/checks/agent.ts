@@ -12,7 +12,7 @@ export const agentChecks: DoctorCheck[] = [
   {
     id: "pi-sdk", category: "agent", name: "Pi SDK",
     async run() {
-      const PI_PKG = join("@mariozechner", "pi-coding-agent", "package.json");
+      const PI_PKG = join("@earendil-works", "pi-coding-agent", "package.json");
       const searchPaths = [
         join(process.cwd(), "node_modules", PI_PKG),
       ];
@@ -31,8 +31,8 @@ export const agentChecks: DoctorCheck[] = [
       }
       return {
           id: "pi-sdk", category: "agent", name: "Pi SDK", status: "fail" as const, summary: "not found",
-          details: ["@mariozechner/pi-coding-agent not installed"],
-          fix: { description: "Install pi SDK", command: "npm install @mariozechner/pi-coding-agent" },
+          details: ["@earendil-works/pi-coding-agent not installed"],
+          fix: { description: "Install pi SDK", command: "npm install -g @earendil-works/pi-coding-agent" },
         };
     },
   },
