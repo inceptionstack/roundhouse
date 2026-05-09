@@ -9,13 +9,10 @@ import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "./types";
 import { splitMessage, isAllowed, startTypingLoop } from "./util";
-import { isTelegramThread, postTelegramHtml } from "../transports/telegram/html";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "./voice/stt-service";
-import { sendTelegramToMany } from "../transports/telegram/notify";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "./cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "./config";
 import { CronSchedulerService } from "./cron/scheduler";
-import { BOT_COMMANDS } from "../transports/telegram/bot-commands";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "./memory/lifecycle";
 import { maxPressure } from "./memory/policy";
 import type { PressureLevel, CompactResult } from "./memory/types";
@@ -25,6 +22,8 @@ import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThrea
 import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream, type StreamResult } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext, type StopContext, type VerboseContext, type DoctorContext, type CronsContext } from "./commands";
+import { TelegramTransportAdapter } from "../transports/telegram/adapter";
+import type { TransportAdapter } from "../transports/types";
 
 /** Match a Telegram command, handling optional @botname suffix */
 /** Bot username for command suffix validation (set during gateway init) */
@@ -83,6 +82,7 @@ export class Gateway {
   private chat!: Chat;
   private router: AgentRouter;
   private config: GatewayConfig;
+  private transport: TransportAdapter;
   private pairingComplete = false;
   private sttService: SttService | null = null;
   private cronScheduler: CronSchedulerService | null = null;
@@ -90,6 +90,7 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
+    this.transport = new TelegramTransportAdapter();
     _botUsername = config.chat.botUsername || "";
   }
 
@@ -392,7 +393,7 @@ export class Gateway {
       if (agent.prepareMessage) {
         try {
           agentMessage = agent.prepareMessage(agentThreadId, agentMessage, {
-            platform: "telegram",
+            platform: this.transport.name,
             hasAttachments: !!(agentMessage.attachments?.length),
           });
         } catch (err) {
@@ -528,10 +529,9 @@ export class Gateway {
       return null;
     }
 
-    // Hint agent to format for Telegram (only if there's actual text)
-    // TODO: gate on platform when multi-transport support is added
+    // Enrich prompt via transport adapter
     if (agentMessage.text) {
-      agentMessage.text += "\n\n[Format your final answer to be telegram-friendly.]";
+      agentMessage.text = this.transport.enrichPrompt(agentMessage.text);
     }
 
     return agentMessage;
@@ -618,9 +618,8 @@ export class Gateway {
 
   /** Post text with markdown, falling back to plain text */
   private async postWithFallback(thread: any, text: string) {
-    // Telegram: send as HTML for proper markdown rendering
-    if (isTelegramThread(thread)) {
-      await postTelegramHtml(thread, text);
+    if (this.transport.ownsThread(thread)) {
+      await this.transport.postMessage(thread, text);
       return;
     }
     for (const chunk of splitMessage(text, 4000)) {
@@ -642,25 +641,9 @@ export class Gateway {
    */
   private async registerBotCommands() {
     if (!this.config.chat.adapters.telegram) return;
-
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) return;
-
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ commands: BOT_COMMANDS }),
-      });
-      if (res.ok) {
-        console.log(`[roundhouse] registered ${BOT_COMMANDS.length} bot commands with Telegram`);
-      } else {
-        const body = await res.text().catch(() => "");
-        console.warn(`[roundhouse] failed to register bot commands (${res.status}): ${body.slice(0, 200)}`);
-      }
-    } catch (err) {
-      console.warn(`[roundhouse] failed to register bot commands:`, (err as Error).message);
-    }
+    await this.transport.registerCommands(token);
   }
 
   /**
@@ -671,11 +654,6 @@ export class Gateway {
   private async notifyStartup(platforms: string) {
     const chatIds = this.config.chat.notifyChatIds;
     if (!chatIds?.length) return;
-
-    if (!process.env.TELEGRAM_BOT_TOKEN) {
-      console.warn("[roundhouse] notifyChatIds configured but TELEGRAM_BOT_TOKEN not set — skipping startup notification");
-      return;
-    }
 
     const bootTime = process.uptime();
     const host = hostname();
@@ -721,7 +699,7 @@ export class Gateway {
         `  Process: ${memMB} MB RSS`,
       ].filter(line => line != null).join("\n");
 
-      await sendTelegramToMany([chatId], perChatText);
+      await this.transport.notify([chatId], perChatText);
     }
   }
 
