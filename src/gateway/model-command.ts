@@ -28,7 +28,7 @@ export const MODEL_ACTION_ID = "model_select";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
-/** Callback data prefix used by @chat-adapter/telegram */
+/** Callback data prefix used by @chat-adapter/telegram (coupled: if adapter changes this, buttons break) */
 const CALLBACK_PREFIX = "chat:";
 
 export interface ModelCommandContext {
@@ -157,23 +157,13 @@ export async function handleModelAction(event: {
   thread: any;
 }): Promise<void> {
   const alias = event.value;
-  if (!alias) return;
+  if (!alias || !MODEL_ALIASES[alias]) return;
 
-  const settings = readSettings();
-  const resolved = MODEL_ALIASES[alias];
-  if (!resolved) return;
+  const postFn = async (_t: any, text: string) => {
+    if (!event.thread) return;
+    try { await event.thread.post({ markdown: text }); }
+    catch { try { await event.thread.post(text); } catch {} }
+  };
 
-  settings.defaultProvider = resolved.provider;
-  settings.defaultModel = resolved.model;
-  writeSettings(settings);
-
-  // Post confirmation to the thread
-  if (event.thread) {
-    try {
-      await event.thread.post({ markdown: `✅ Switched to *${resolved.label}*` });
-    } catch {
-      try { await event.thread.post(`✅ Switched to ${resolved.label}`); } catch {}
-    }
-  }
-  console.log(`[roundhouse] /model (button): switched to ${resolved.provider}/${resolved.model}`);
+  await applyModelSelection(alias, null, event.thread, postFn);
 }
