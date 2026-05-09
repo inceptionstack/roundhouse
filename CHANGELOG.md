@@ -2,12 +2,19 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
-## [Unreleased]
+## [0.5.8] — 2026-05-09
 
 ### Added
 - **IPC unix socket** — `roundhouse message "text"` sends messages to active transports via `~/.roundhouse/gateway.sock`
 - **Session routing** — `--session main` targets primary chat, numeric ID targets specific chat
+- **Provision tools.md** — bundled tools.md auto-copied to `~/.roundhouse/` on setup/update (never overwrites)
 - 13 IPC integration tests
+- IPC barrel exports for consistent import paths
+
+### Security
+- Socket mode 0600 (owner-only access)
+- Stale socket cleanup with liveness probe (500ms timeout)
+- 64KB payload guard, 5s request timeout
 
 ## [0.5.7] — 2026-05-09
 
