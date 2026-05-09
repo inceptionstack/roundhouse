@@ -75,6 +75,8 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
     const result = await performUpdate(progress);
     if (result.action === "already-latest") {
       await progress.update(`✅ Already on latest (v${result.currentVersion})`);
+    } else if (result.action === "error") {
+      await progress.update(`⚠️ ${(result.error ?? "Update failed").slice(0, 200)}`);
     } else if (result.action === "updated") {
       await progress.update(`✅ Updated v${result.currentVersion} → v${result.latestVersion}. Restarting...`);
       console.log(`[roundhouse] updated ${result.currentVersion} -> ${result.latestVersion}, restarting`);
