@@ -37,12 +37,13 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 - **Module reorganization** (PR #36) — gateway/, transports/telegram/, cli/setup/, provisioning/
 - 376 tests passing
 
-## [Unreleased] (post-0.3.18)
+## [Unreleased]
+
+_No unreleased changes._
+
+## [0.5.0–0.5.4] — 2026-05-08
 
 ### Added
-- **Bundled skill: pr-merge-discipline** — always check PR comments before merging
-- **Typing indicator during STT** — Telegram shows "typing" while voice messages are transcribed
-- **systemd: TimeoutStopSec=15 + KillMode=mixed** — hung STT subprocesses no longer block shutdown for 90s
 - **Shared "main" session** — all direct messages route to a single `main` agent thread
   - Telegram DMs, CLI TUI, CLI agent, future Slack/Discord all share one conversation
   - Sessions stored in `~/.roundhouse/sessions/main/`
@@ -50,18 +51,19 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   - `resolveAgentThreadId()` routes DMs → `main`, groups → `group:<chatId>`
 - `roundhouse tui` with no args opens `main` session directly (no scanning/prompting)
 - `roundhouse agent` defaults to `main` thread; `--ephemeral` for one-off behavior
+- **Silent agent failure detection** — model_error event, pi-telegram conflict warning, safety net posts "no response" if turn silent (v0.5.4)
+- **macOS LaunchAgent support** — auto-start, Plist generation (v0.5.2)
+- **Phase 2 refactoring** — cron dispatcher, pi-adapter extraction, setup.ts split (v0.5.3)
 
 ### Fixed
-- **Pairing userId extraction** — reads `author.userId` matching Telegram adapter shape (was reading `.id` → undefined)
+- **Pairing userId extraction** — reads `author.userId` matching Telegram adapter shape
 - **Session reaper race** — tracks `inFlight` counter, skips busy sessions during reap
 - **/compact concurrency** — now acquires per-thread lock like normal prompts
 - **Attachment permissions** — dirs created with 0700, files with 0600
 - **Memory state permissions** — writes with mode 0600, dirs 0700
 - **Cron template cwd** — uses `agentCfg.cwd` instead of `process.cwd()`
-- **Cron TDZ crash** — `agentCfg` was referenced before declaration (moved config load above template render)
+- **Cron TDZ crash** — `agentCfg` was referenced before declaration
 - **cmdRun shell injection** — uses `execFileSync` instead of shell string interpolation
-- Startup warning when no allowlist is configured
-- Security warning when loading config from cwd
 
 ### Removed
 - Legacy `threadIdToDirLegacy()` and all backward-compat fallback code
