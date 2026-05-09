@@ -1,6 +1,6 @@
 {
   "name": "@inceptionstack/roundhouse",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
   "license": "MIT",
