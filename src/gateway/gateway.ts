@@ -325,6 +325,12 @@ export class Gateway {
     this.cronScheduler = new CronSchedulerService({
       agentConfig: this.config.agent,
       notifyChatIds: this.config.chat.notifyChatIds,
+      notifyFn: async (text: string) => {
+        const chatIds = this.config.chat.notifyChatIds;
+        if (chatIds?.length && this.transport) {
+          await this.transport.notify(chatIds, text);
+        }
+      },
     });
     try {
       await this.cronScheduler.start();

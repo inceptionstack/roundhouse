@@ -20,6 +20,7 @@ export class CronRunner {
   constructor(
     private store: CronStore,
     private agentConfig?: GatewayConfig["agent"],
+    private notifyFn?: (text: string) => Promise<void>,
   ) {}
 
   async runJob(
@@ -127,6 +128,10 @@ export class CronRunner {
   }
 
   private async notify(job: CronJobConfig, record: CronRunRecord): Promise<void> {
+    // Apply onlyOn filter if configured (for both routes)
+    const tg = job.notify?.telegram;
+    if (tg?.onlyOn && !shouldNotify(tg.onlyOn, record.status)) return;
+
     const icon = runStatusIcon(record.status);
     const dur = `${(record.durationMs / 1000).toFixed(1)}s`;
     const header = `${icon} Cron: ${job.id}\nStatus: ${record.status} (${dur})`;
@@ -141,18 +146,25 @@ export class CronRunner {
     }
 
     // Route 1: Explicit Telegram chat IDs configured on the job
-    const tg = job.notify?.telegram;
     if (tg?.chatIds?.length) {
-      if (!shouldNotify(tg.onlyOn, record.status)) return;
       await sendTelegramToMany(tg.chatIds, body);
       return;
     }
 
-    // Route 2: Broadcast via IPC to all active transports (default)
+    // Route 2: Direct callback from gateway (no loopback socket)
+    if (this.notifyFn) {
+      try {
+        await this.notifyFn(body);
+      } catch (err) {
+        console.warn(`[cron] ${job.id} notify callback failed:`, (err as Error).message);
+      }
+      return;
+    }
+
+    // Route 3: Fallback to IPC (for CLI-triggered runs outside gateway)
     try {
       await sendIpc({ type: "notify", text: body });
     } catch {
-      // Gateway not running or IPC unavailable — log and continue
       console.warn(`[cron] ${job.id} IPC notify failed (gateway not running?)`);
     }
   }
