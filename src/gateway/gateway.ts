@@ -30,7 +30,7 @@ import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { injectToolsSection } from "./tools-inject";
-import { injectPersonaSection } from "./persona-inject";
+import { injectPersonaSection, loadPersona } from "./persona-inject";
 
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
@@ -327,6 +327,9 @@ export class Gateway {
     this.chat.onSubscribedMessage(async (thread, message) => {
       await handleOrAbort(thread, message);
     });
+
+    // ── Load persona files at startup (cached for process lifetime) ───
+    loadPersona();
 
     // ── Handle inline keyboard callbacks ───
     this.chat.onAction(MODEL_ACTION_ID, async (event: any) => {
