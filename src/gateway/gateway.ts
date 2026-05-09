@@ -528,6 +528,12 @@ export class Gateway {
       return null;
     }
 
+    // Hint agent to format for Telegram (only if there's actual text)
+    // TODO: gate on platform when multi-transport support is added
+    if (agentMessage.text) {
+      agentMessage.text += "\n\n[Format your final answer to be telegram-friendly.]";
+    }
+
     return agentMessage;
   }
 
