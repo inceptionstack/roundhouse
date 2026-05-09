@@ -88,7 +88,7 @@ export async function handleModel(ctx: ModelCommandContext): Promise<void> {
     // Try to send with inline keyboard via telegramFetch
     const adapter = thread?.adapter;
     if (adapter?.telegramFetch) {
-      const chatId = thread?.platformThreadId?.split(":")?.[0] ?? thread?.id?.split(":")?.[0];
+      const chatId = thread?.platformThreadId?.split(":")?.[1] ?? thread?.id?.split(":")?.[1];
       if (chatId) {
         try {
           await adapter.telegramFetch("sendMessage", {
