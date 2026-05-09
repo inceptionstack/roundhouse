@@ -104,9 +104,9 @@ mcporter call <server>.<tool> key=val   # call a tool
 
 **Examples:**
 ```bash
-mcporter call 'aws.sts_GetCallerIdentity()'
-mcporter call aws.s3_ListBuckets
-mcporter call 'aws-docs.search(query: "Lambda timeout")'
+mcporter call 'aws-mcp.sts_GetCallerIdentity()'
+mcporter call aws-mcp.s3_ListBuckets
+mcporter call 'aws-documentation.search(query: "Lambda timeout")'
 ```
 
 > Ensure PATH includes `~/.local/bin` for `mcporter`/`uvx` discovery.
