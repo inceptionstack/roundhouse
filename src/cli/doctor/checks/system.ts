@@ -34,7 +34,7 @@ export const systemChecks: DoctorCheck[] = [
     return {
       id: "pip3", category: "system", name: "pip3", summary: ver ? ver.split(" ")[1] ?? ver : "not found",
       status: ver ? "pass" : "warn",
-      details: !ver ? ["Needed for whisper STT auto-install"] : undefined,
+      details: !ver ? ["Used by agent to install whisper for STT"] : undefined,
     };
   }),
 

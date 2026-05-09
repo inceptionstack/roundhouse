@@ -603,8 +603,8 @@ export async function stepPostflight(logger: StepLog): Promise<void> {
 
   if (platform() === "linux" || process.env.ROUNDHOUSE_VOICE === "1") {
     if (!whichSync("whisper")) {
-      logger.warn("whisper not found — STT will auto-install on first voice message");
-      logger.log("    Pre-install: pip3 install openai-whisper");
+      logger.warn("whisper not found — agent will be prompted to install on first voice message");
+      logger.log("    Or pre-install manually: pip3 install --user openai-whisper");
     } else {
       logger.ok("whisper available");
     }
