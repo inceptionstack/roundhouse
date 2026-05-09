@@ -359,8 +359,17 @@ export class Gateway {
     try {
       console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
-      // Enrich audio attachments with transcripts (STT)
-      await this.enrichWithStt(thread, agentMessage);
+      // Enrich audio attachments with transcripts (STT) — show typing while processing
+      if (agentMessage.attachments?.some((a: any) => a.mediaType === "audio")) {
+        const sttTyping = startTypingLoop(thread);
+        try {
+          await this.enrichWithStt(thread, agentMessage);
+        } finally {
+          sttTyping();
+        }
+      } else {
+        await this.enrichWithStt(thread, agentMessage);
+      }
 
       // Let the agent adapter apply platform-specific message transforms
       if (agent.prepareMessage) {
