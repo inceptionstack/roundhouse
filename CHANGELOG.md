@@ -4,7 +4,10 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+- **IPC unix socket** — `roundhouse message "text"` sends messages to active transports via `~/.roundhouse/gateway.sock`
+- **Session routing** — `--session main` targets primary chat, numeric ID targets specific chat
+- 13 IPC integration tests
 
 ## [0.5.7] — 2026-05-09
 
