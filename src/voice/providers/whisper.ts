@@ -109,6 +109,133 @@ async function installWhisperWithPip(): Promise<string | null> {
 }
 
 /**
+ * Install whisper via uv tool install (fallback when pip3 unavailable).
+ */
+async function installWhisperWithUv(): Promise<string | null> {
+  const uvPaths = [
+    join(homedir(), ".local", "bin", "uv"),
+    "/usr/local/bin/uv",
+    "/usr/bin/uv",
+  ];
+  let uvBin: string | null = null;
+  for (const p of uvPaths) {
+    try { await access(p, constants.X_OK); uvBin = p; break; } catch {}
+  }
+  if (!uvBin) {
+    console.warn("[stt/whisper] uv not available — cannot auto-install whisper");
+    return null;
+  }
+
+  console.log("[stt/whisper] installing openai-whisper via uv tool install...");
+  return new Promise<string | null>((resolve) => {
+    execFile(
+      uvBin!,
+      ["tool", "install", "openai-whisper"],
+      {
+        timeout: 300_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, HOME: homedir() },
+      },
+      async (err, _stdout, stderr) => {
+        if (err) {
+          console.error("[stt/whisper] uv tool install failed:", err.message);
+          if (stderr) console.error("[stt/whisper] stderr:", stderr.slice(0, 500));
+          resolve(null);
+          return;
+        }
+        console.log("[stt/whisper] uv tool install succeeded");
+        invalidateCache();
+        const binary = await findWhisperBinary();
+        if (!binary) {
+          console.error("[stt/whisper] uv tool install succeeded but binary not found in expected paths");
+          resolve(null);
+          return;
+        }
+        // Validate binary
+        execFile(binary, ["--help"], { timeout: 10_000 }, (helpErr) => {
+          if (helpErr) {
+            console.error("[stt/whisper] uv-installed binary --help failed:", helpErr.message);
+            resolve(null);
+          } else {
+            resolve(binary);
+          }
+        });
+      },
+    );
+  });
+}
+
+/**
+ * Ensure ffmpeg is available (required by whisper). Install static binary if missing.
+ */
+let ffmpegPromise: Promise<boolean> | null = null;
+let ffmpegFailed = false;
+
+async function ensureFfmpeg(): Promise<boolean> {
+  const ffmpegPaths = [
+    join(homedir(), ".local", "bin", "ffmpeg"),
+    "/usr/local/bin/ffmpeg",
+    "/usr/bin/ffmpeg",
+  ];
+  for (const p of ffmpegPaths) {
+    try { await access(p, constants.X_OK); return true; } catch {}
+  }
+
+  if (ffmpegFailed) return false;
+  if (ffmpegPromise) return ffmpegPromise;
+
+  ffmpegPromise = (async () => {
+    const arch = process.arch === "arm64" ? "arm64" : "amd64";
+    const url = `https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${arch}-static.tar.xz`;
+    const destDir = join(homedir(), ".local", "bin");
+    const dest = join(destDir, "ffmpeg");
+    const tmpDir = join("/tmp", `ffmpeg-install-${randomBytes(4).toString("hex")}`);
+    console.log(`[stt/whisper] installing static ffmpeg (${arch})...`);
+
+    try {
+      mkdirSync(destDir, { recursive: true });
+      mkdirSync(tmpDir, { recursive: true });
+
+      // Download and extract
+      const ok = await new Promise<boolean>((resolve) => {
+        execFile("bash", ["-c", `curl -fsSL '${url}' | tar xJ -C '${tmpDir}' --wildcards '*/ffmpeg' 2>/dev/null || curl -fsSL '${url}' | tar xJ -C '${tmpDir}'`],
+          { timeout: 120_000 },
+          (err) => resolve(!err),
+        );
+      });
+      if (!ok) { ffmpegFailed = true; return false; }
+
+      // Find the extracted ffmpeg binary
+      const found = await new Promise<string>((resolve) => {
+        execFile("find", [tmpDir, "-name", "ffmpeg", "-type", "f"], { timeout: 5000 }, (err, stdout) => {
+          resolve(err ? "" : stdout.toString().trim().split("\n")[0]);
+        });
+      });
+      if (!found || !found.startsWith(tmpDir + "/")) { ffmpegFailed = true; return false; }
+
+      // Move to dest
+      const { rename, chmod, copyFile } = await import("node:fs/promises");
+      await rename(found, dest).catch(async () => {
+        // Cross-device: copy then remove (unlink is best-effort)
+        await copyFile(found, dest);
+        try { const { unlink } = await import("node:fs/promises"); await unlink(found); } catch {}
+      });
+      await chmod(dest, 0o755);
+      console.log("[stt/whisper] ffmpeg installed successfully");
+      return true;
+    } catch (err: any) {
+      console.error("[stt/whisper] ffmpeg install failed:", err.message);
+      ffmpegFailed = true;
+      return false;
+    } finally {
+      try { await rm(tmpDir, { recursive: true }); } catch {}
+    }
+  })().finally(() => { ffmpegPromise = null; });
+
+  return ffmpegPromise;
+}
+
+/**
  * Warm the whisper model by running a tiny transcription.
  * This forces the model download (~461MB for small).
  */
@@ -193,7 +320,17 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
   async function getBinary(): Promise<string | null> {
     // Check if already available
     const existing = await findWhisperBinary();
-    if (existing) return existing;
+    if (existing) {
+      // Ensure ffmpeg is available too (only auto-install if enabled)
+      if (autoInstall) {
+        const hasFfmpeg = await ensureFfmpeg();
+        if (!hasFfmpeg) {
+          console.warn("[stt/whisper] whisper found but ffmpeg unavailable");
+          return null;
+        }
+      }
+      return existing;
+    }
 
     // Try auto-install
     if (!autoInstall) return null;
@@ -201,10 +338,16 @@ export function createWhisperProvider(config: SttProviderConfig): InstallableWhi
 
     // Singleton: join existing install or start new one
     if (!installPromise) {
-      installPromise = installWhisperWithPip().then((result) => {
-        if (!result) installFailed = true;
+      installPromise = (async () => {
+        // Try pip3 first, then uv
+        let result = await installWhisperWithPip();
+        if (!result) result = await installWhisperWithUv();
+        if (!result) { installFailed = true; return null; }
+        // Also ensure ffmpeg
+        const hasFfmpeg = await ensureFfmpeg();
+        if (!hasFfmpeg) { installFailed = true; return null; }
         return result;
-      }).finally(() => {
+      })().finally(() => {
         installPromise = null;
       });
     }
