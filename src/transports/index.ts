@@ -3,4 +3,4 @@
  */
 
 export type { TransportAdapter, ChatThread, IncomingMessage, ProgressHandle } from "./types";
-export { TelegramTransportAdapter } from "./telegram/adapter";
+export { TelegramAdapter } from "./telegram/telegram-adapter";
