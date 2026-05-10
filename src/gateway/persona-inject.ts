@@ -83,10 +83,12 @@ export function injectPersonaSection(text: string): string {
   } else {
     // Cheap mtime check — auto-reload if agent edited the files
     const currentMtime = getMaxMtime();
-    if (currentMtime > lastMtime) {
+    if (currentMtime !== lastMtime) {
       reloadPersona();
     }
   }
   if (!cachedPersona) return text;
-  return `<persona>\n${cachedPersona}\n</persona>\n\n${text}`;
+  // Escape any literal </persona> in content to prevent XML injection
+  const safe = cachedPersona.replace(/<\/persona>/gi, "&lt;/persona&gt;");
+  return `<persona>\n${safe}\n</persona>\n\n${text}`;
 }
