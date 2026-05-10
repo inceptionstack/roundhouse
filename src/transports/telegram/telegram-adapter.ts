@@ -7,6 +7,7 @@
 
 import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult } from "../types";
 import { isTelegramThread, postTelegramHtml } from "./html";
+import { markdownToTelegramHtml } from "./format";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
@@ -77,12 +78,14 @@ export class TelegramAdapter implements TransportAdapter {
     return thread;
   }
 
-  async notify(chatIds: number[], text: string, options?: { parseMode?: string }): Promise<void> {
+  async notify(chatIds: number[], text: string): Promise<void> {
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.warn("[roundhouse] TELEGRAM_BOT_TOKEN not set — skipping notification");
       return;
     }
-    await sendTelegramToMany(chatIds, text, options);
+    // Convert lightweight markdown to Telegram HTML
+    const html = markdownToTelegramHtml(text);
+    await sendTelegramToMany(chatIds, html, { parseMode: "HTML" });
   }
 
   async isPairingPending(): Promise<boolean> {
