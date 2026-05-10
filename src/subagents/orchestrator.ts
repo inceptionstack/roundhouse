@@ -133,12 +133,21 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
   }
 
   async list(): Promise<RunStatus[]> {
+    return this.listRuns(true);
+  }
+
+  /** List runs without refreshing status (for watcher use). */
+  async listRaw(): Promise<RunStatus[]> {
+    return this.listRuns(false);
+  }
+
+  private async listRuns(refresh: boolean): Promise<RunStatus[]> {
     try {
       const entries = await readdir(this.subagentsRoot, { withFileTypes: true });
       const statuses = await Promise.all(
         entries
           .filter((entry) => entry.isDirectory())
-          .map((entry) => this.status(entry.name)),
+          .map((entry) => refresh ? this.status(entry.name) : this.readStatus(entry.name)),
       );
       return statuses.filter((status): status is RunStatus => status !== null);
     } catch (err: any) {
@@ -155,6 +164,13 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
     const current = await this.readStatus(runId);
     if (!current || current.status !== "running") return current;
     return this.terminateRun(runId, "timeout");
+  }
+
+  /** Called by watcher to finalize dead out-of-process runs WITH notification. */
+  async recoverRun(runId: string): Promise<RunStatus | null> {
+    const current = await this.readStatus(runId);
+    if (!current || current.status !== "running") return current;
+    return this.refreshRunningStatus(current, true);
   }
 
   private async terminateRun(runId: string, outcome: TerminalStatus): Promise<RunStatus | null> {
@@ -177,14 +193,14 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
     return current;
   }
 
-  private async refreshRunningStatus(current: RunStatus): Promise<RunStatus> {
+  private async refreshRunningStatus(current: RunStatus, notify = false): Promise<RunStatus> {
     const alive = await this.isProcessAlive(current.pid, current.spawnClockTicks);
     if (alive) return current;
 
-    // Status refresh detected dead process — finalize silently (no notification).
-    // Notifications only come from handleChildExit or watcher-driven enforceTimeout.
+    // Process is dead. If called from status() (notify=false), finalize silently.
+    // If called from watcher (notify=true), fire completion notification.
     const outcome = this.pendingTerminalStatus.get(current.runId) ?? "failed";
-    return this.finalizeRun(current.runId, outcome, { notify: false });
+    return this.finalizeRun(current.runId, outcome, { notify });
   }
 
   private async handleChildExit(

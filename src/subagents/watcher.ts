@@ -41,7 +41,7 @@ export class SubAgentWatcher {
     this.polling = true;
 
     try {
-      const statuses = await this.orchestrator.list();
+      const statuses = await this.orchestrator.listRaw();
       const now = Date.now();
 
       for (const status of statuses) {
@@ -50,6 +50,9 @@ export class SubAgentWatcher {
 
         if (status.deadlineAt && Date.parse(status.deadlineAt) <= now) {
           await this.orchestrator.enforceTimeout(status.runId);
+        } else {
+          // Detect crashed out-of-process children and finalize with notification
+          await this.orchestrator.recoverRun(status.runId);
         }
       }
     } finally {
