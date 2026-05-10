@@ -176,3 +176,42 @@ aws s3 ls
 aws logs tail /aws/lambda/<name> --since 1h
 aws cloudformation describe-stacks --stack-name <name>
 ```
+
+## Sub-Agent Delegation
+
+Spawn background sub-agents for tasks that take time. The main conversation stays responsive.
+
+**Usage:**
+```bash
+# Spawn a background agent
+roundhouse subagent spawn --role <role> --task "..." --cwd <dir>
+
+# Check status
+roundhouse subagent status <runId>
+roundhouse subagent list
+
+# Cancel a running agent
+roundhouse subagent abort <runId>
+```
+
+**Roles:**
+- `review` — Code review, architecture review, PR review
+- `research` — Read docs, explore APIs, gather information
+- `scout` — Search codebase, find patterns, map structure
+- `implementation` — Write code, fix bugs, refactor
+
+**Behavior:**
+- Sub-agents run as background processes (15 min timeout default)
+- You get notified when they complete
+- Multiple agents can run concurrently
+- They share the filesystem — no isolation between them
+
+**When to delegate:**
+- Task will take several minutes
+- User wants to keep chatting about something else
+- Independent work that doesn't need live interaction
+
+**When NOT to delegate:**
+- Quick tasks (< 30 seconds)
+- Tasks needing user input mid-way
+- You can just do it directly in the current turn
