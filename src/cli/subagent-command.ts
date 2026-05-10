@@ -1,8 +1,9 @@
 /**
  * cli/subagent-command.ts — CLI interface for sub-agent delegation
  *
- * Called by the agent via shell to spawn/status/list/abort sub-agents.
- * Communicates with the running gateway via IPC.
+ * Thin disk-state client that reads/writes ~/.roundhouse/subagents/ directly.
+ * The gateway's watcher handles lifecycle (timeout, completion notification).
+ * spawn() creates the process and persists state; the gateway adopts it on next poll.
  */
 
 import { readFileSync } from "node:fs";
@@ -26,6 +27,10 @@ function loadGatewayConfig(): { notifyChatIds: number[] } {
 function buildRouting(): RoutingInfo {
   const cfg = loadGatewayConfig();
   const chatId = String(cfg.notifyChatIds[0] ?? "");
+  if (!chatId) {
+    console.error("Error: no Telegram chat configured. Run 'roundhouse setup' first or pass --chat-id.");
+    process.exit(1);
+  }
   return {
     transport: "telegram",
     chatId,
@@ -57,13 +62,23 @@ export async function handleSubagentCommand(args: string[]): Promise<void> {
         process.exit(1);
       }
 
+      let timeoutMs: number | undefined;
+      if (timeoutStr) {
+        const n = Number(timeoutStr);
+        if (!Number.isFinite(n) || n <= 0) {
+          console.error(`Invalid timeout: ${timeoutStr}. Must be a positive number (milliseconds).`);
+          process.exit(1);
+        }
+        timeoutMs = n;
+      }
+
       const spec: SpawnSpec = {
         role,
         task,
         cwd,
         routing: buildRouting(),
         model: model || undefined,
-        timeoutMs: timeoutStr ? Number(timeoutStr) : undefined,
+        timeoutMs,
       };
 
       try {
@@ -112,8 +127,9 @@ export async function handleSubagentCommand(args: string[]): Promise<void> {
         console.error("Usage: roundhouse subagent abort <runId>");
         process.exit(1);
       }
+      // Sends SIGTERM to child PID. Gateway watcher finalizes status on next poll.
       await orchestrator.abort(runId);
-      console.log(`Aborted: ${runId}`);
+      console.log(`Signal sent. Run ${runId.slice(0, 8)} will be finalized by gateway watcher.`);
       break;
     }
 
