@@ -12,7 +12,8 @@ import { validateSchedule } from "../cron/schedule";
 import { validateTemplate } from "../cron/template";
 import { parseDuration } from "../cron/durations";
 import type { CronJobConfig, CronSchedule } from "../cron/types";
-import { DEFAULT_TIMEOUT_MS, DEFAULT_TIMEZONE, VALID_NOTIFY_ON, DEFAULT_RUNS_LIMIT } from "../cron/constants";
+import { DEFAULT_TIMEZONE, VALID_NOTIFY_ON, DEFAULT_RUNS_LIMIT } from "../cron/constants";
+import { formatSchedule, formatRunCounts, formatJobSummary, formatJobDetail, formatRunLine, runStatusIcon, jobEnabledIcon } from "../cron/format";
 import { sendIpc } from "../ipc/client";
 
 /**
@@ -26,13 +27,28 @@ async function notifyCronAction(message: string): Promise<void> {
     // Gateway not running — CLI is standalone, skip notification
   }
 }
-import { formatSchedule, formatRunCounts, formatJobSummary, formatJobDetail, formatRunLine, runStatusIcon, jobEnabledIcon } from "../cron/format";
 
 function rejectBuiltin(id: string): void {
   if (isBuiltinJob(id)) {
     console.error(`Job ID "${id}" is reserved for built-in jobs.`);
     process.exit(1);
   }
+}
+
+/** Validate ID, reject builtins, load job or exit with error. */
+async function requireJob(store: CronStore, positional: string[], usage: string): Promise<{ id: string; job: CronJobConfig }> {
+  const { id, job } = await loadJob(store, positional, usage);
+  rejectBuiltin(id);
+  return { id, job };
+}
+
+/** Validate ID and load job or exit with error (no builtin check — for read-only commands). */
+async function loadJob(store: CronStore, positional: string[], usage: string): Promise<{ id: string; job: CronJobConfig }> {
+  const id = positional[1];
+  if (!id) { console.error(`Usage: ${usage}`); process.exit(1); }
+  const job = await store.getJob(id);
+  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
+  return { id, job };
 }
 
 function validateNotifyOn(value?: string): "always" | "success" | "failure" {
@@ -152,10 +168,7 @@ export async function cronList(store: CronStore, _positional: string[], flags: R
 }
 
 export async function cronShow(store: CronStore, positional: string[], flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron show <id>"); process.exit(1); }
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
+  const { id, job } = await loadJob(store, positional, "roundhouse cron show <id>");
   const state = await store.getState(id);
   const runs = await store.listRuns(id, 5);
   if (flags.json) {
@@ -166,11 +179,7 @@ export async function cronShow(store: CronStore, positional: string[], flags: Re
 }
 
 export async function cronTrigger(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron trigger <id>"); process.exit(1); }
-  rejectBuiltin(id);
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
+  const { id, job } = await requireJob(store, positional, "roundhouse cron trigger <id>");
   console.log(`Triggering ${id}...`);
   const runner = new CronRunner(store);
   const record = await runner.runJob(job, new Date(), "manual");
@@ -181,8 +190,7 @@ export async function cronTrigger(store: CronStore, positional: string[], _flags
 }
 
 export async function cronRuns(store: CronStore, positional: string[], flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron runs <id>"); process.exit(1); }
+  const { id } = await loadJob(store, positional, "roundhouse cron runs <id>");
   const runs = await store.listRuns(id, parseInt(flags.limit ?? String(DEFAULT_RUNS_LIMIT), 10));
   if (runs.length === 0) {
     console.log(`No runs for ${id}.`);
@@ -196,37 +204,27 @@ export async function cronRuns(store: CronStore, positional: string[], flags: Re
 }
 
 export async function cronPause(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron pause <id>"); process.exit(1); }
-  rejectBuiltin(id);
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
-  job.enabled = false;
-  job.updatedAt = new Date().toISOString();
-  await store.writeJob(job);
-  console.log(`⏸️ Job "${id}" paused.`);
-  await notifyCronAction(`⏸️ Cron job **paused**: \`${id}\``);
+  await cronToggleEnabled(store, positional, false);
 }
 
 export async function cronResume(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron resume <id>"); process.exit(1); }
-  rejectBuiltin(id);
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
-  job.enabled = true;
+  await cronToggleEnabled(store, positional, true);
+}
+
+async function cronToggleEnabled(store: CronStore, positional: string[], enabled: boolean): Promise<void> {
+  const cmd = enabled ? "resume" : "pause";
+  const { id, job } = await requireJob(store, positional, `roundhouse cron ${cmd} <id>`);
+  job.enabled = enabled;
   job.updatedAt = new Date().toISOString();
   await store.writeJob(job);
-  console.log(`▶️ Job "${id}" resumed.`);
-  await notifyCronAction(`▶️ Cron job **resumed**: \`${id}\``);
+  const emoji = enabled ? "▶️" : "⏸️";
+  const verb = enabled ? "resumed" : "paused";
+  console.log(`${emoji} Job "${id}" ${verb}.`);
+  await notifyCronAction(`${emoji} Cron job **${verb}**: \`${id}\``);
 }
 
 export async function cronEdit(store: CronStore, positional: string[], flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron edit <id> [--prompt '...'] [--cron '...'] ..."); process.exit(1); }
-  rejectBuiltin(id);
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
+  const { id, job } = await requireJob(store, positional, "roundhouse cron edit <id> [--prompt '...'] [--cron '...'] ...");
 
   if (flags.prompt) job.prompt = flags.prompt;
   if (flags.description) job.description = flags.description;
@@ -255,11 +253,7 @@ export async function cronEdit(store: CronStore, positional: string[], flags: Re
 }
 
 export async function cronDelete(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
-  const id = positional[1];
-  if (!id) { console.error("Usage: roundhouse cron delete <id>"); process.exit(1); }
-  rejectBuiltin(id);
-  const job = await store.getJob(id);
-  if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
+  const { id } = await requireJob(store, positional, "roundhouse cron delete <id>");
   await store.deleteJob(id);
   console.log(`🗑️ Job "${id}" deleted.`);
   await notifyCronAction(`🗑️ Cron job **deleted**: \`${id}\``);

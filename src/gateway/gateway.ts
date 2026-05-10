@@ -20,7 +20,7 @@ import type { PressureLevel } from "../memory/types";
 // TODO: move progress into TransportAdapter when multi-transport lands
 import { createProgressMessage } from "../transports/telegram/progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
-import { saveAttachments as _saveAttachments, type AttachmentResult } from "./attachments";
+import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
@@ -37,27 +37,13 @@ import { injectToolsSection } from "./tools-inject";
 import { injectPersonaSection, loadPersona } from "./persona-inject";
 import { checkVersionChange } from "./whats-new";
 
+/** Limits */
+const MAX_SUBAGENT_STDOUT_CHARS = 3000;
+const MAX_MESSAGE_CHUNK = 4000;
+const MAX_ERROR_PREVIEW = 200;
+
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
-
-/** Match a bot command, handling optional @botname suffix */
-function isCommand(text: string, cmd: string): boolean {
-  return _isCmd(text, cmd, _botUsername);
-}
-
-/** Match a command that accepts subcommands (e.g. /crons trigger <id>) */
-function isCommandWithArgs(text: string, cmd: string): boolean {
-  return _isCmdArgs(text, cmd, _botUsername);
-}
-
-function getSystemResources() {
-  return _getSysRes();
-}
-
-
-function resolveAgentThreadId(thread: any, message: any): string {
-  return _resolveThread(thread, message);
-}
 
 // ── Chat SDK adapter factories ───────────────────────
 // Lazy-imported so we don't crash if an adapter package isn't installed.
@@ -75,10 +61,6 @@ async function buildChatAdapters(
   }
 
   return adapters;
-}
-
-async function saveAttachments(threadId: string, attachments: any[]): Promise<AttachmentResult> {
-  return _saveAttachments(threadId, attachments);
 }
 
 // ── Gateway ──────────────────────────────────────────
@@ -225,7 +207,7 @@ export class Gateway {
 
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
-      let agentThreadId = applyTopicOverride(resolveAgentThreadId(thread, message), thread);
+      let agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
       const userText = message.text ?? "";
       const authorName = message.author?.userName ?? message.author?.userId ?? "?";
       const rawAttachments = message.attachments ?? [];
@@ -245,7 +227,7 @@ export class Gateway {
         return;
       }
 
-      if (isCommand(userText, "/start")) return;
+      if (_isCmd(userText, "/start", _botUsername)) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
       // ── Command dispatch (registry-based) ───
@@ -261,23 +243,23 @@ export class Gateway {
       };
 
       for (const [cmd, handler] of Object.entries(COMMAND_REGISTRY)) {
-        if (isCommand(trimmed, cmd)) {
+        if (_isCmd(trimmed, cmd, _botUsername)) {
           await handler(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
           return;
         }
       }
 
       // Commands with custom context (accept args)
-      if (isCommandWithArgs(trimmed, "/model") || isCommand(trimmed, "/model")) {
+      if (_isCmdArgs(trimmed, "/model", _botUsername) || _isCmd(trimmed, "/model", _botUsername)) {
         await handleModel({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
-      if (isCommandWithArgs(trimmed, "/later") || isCommand(trimmed, "/later")) {
+      if (_isCmdArgs(trimmed, "/later", _botUsername) || _isCmd(trimmed, "/later", _botUsername)) {
         await handleLater({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
 
-      if (isCommandWithArgs(trimmed, "/topic") || isCommand(trimmed, "/topic")) {
+      if (_isCmdArgs(trimmed, "/topic", _botUsername) || _isCmd(trimmed, "/topic", _botUsername)) {
         await handleTopic({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
@@ -288,28 +270,28 @@ export class Gateway {
 
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
-      let agentThreadId = applyTopicOverride(resolveAgentThreadId(thread, message), thread);
+      let agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
       const text = (message.text ?? "").trim();
       // /stop — abort the in-flight agent run immediately
-      if (isCommand(text, "/stop")) {
+      if (_isCmd(text, "/stop", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         await handleStop({ thread, agentThreadId, agent: this.router.resolve(agentThreadId), abortControllers });
         return;
       }
       // /verbose — toggle verbose mode immediately
-      if (isCommand(text, "/verbose")) {
+      if (_isCmd(text, "/verbose", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         await handleVerbose({ thread, agentThreadId, verboseThreads });
         return;
       }
       // /doctor — run health checks immediately
-      if (isCommand(text, "/doctor")) {
+      if (_isCmd(text, "/doctor", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         await handleDoctor({ thread, runDoctor, createDoctorContext, formatDoctorTelegram, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
       // /crons manages scheduled jobs
-      if (isCommandWithArgs(text, "/crons") || isCommandWithArgs(text, "/jobs")) {
+      if (_isCmdArgs(text, "/crons", _botUsername) || _isCmdArgs(text, "/jobs", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         await handleCrons({ thread, text, cronScheduler: this.cronScheduler, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
@@ -511,7 +493,7 @@ export class Gateway {
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        const safeMsg = errMsg.split('\n')[0].slice(0, 200);
+        const safeMsg = errMsg.split('\n')[0].slice(0, MAX_ERROR_PREVIEW);
         console.error(`[roundhouse] agent error:`, err);
         try {
           await thread.post(`⚠️ Error: ${safeMsg}`);
@@ -750,7 +732,7 @@ export class Gateway {
       await this.transport.postMessage(thread, text);
       return;
     }
-    for (const chunk of splitMessage(text, 4000)) {
+    for (const chunk of splitMessage(text, MAX_MESSAGE_CHUNK)) {
       try {
         await thread.post({ markdown: chunk });
       } catch {
@@ -789,7 +771,7 @@ export class Gateway {
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
     const nodeVer = process.version;
     const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
-    const sys = getSystemResources();
+    const sys = _getSysRes();
 
     // Get agent info if available (use first resolve — SingleAgentRouter always returns same agent)
     let agentInfo = "";
@@ -880,37 +862,40 @@ export class Gateway {
 
   /** Handle sub-agent completion — notify user AND inject result into agent session */
   private async handleSubagentCompletion(status: RunStatus, routing: RoutingInfo): Promise<void> {
+    const chatId = Number(routing.chatId);
+    if (!chatId) return;
+
+    await this.notifySubagentResult(status, chatId);
+    await this.injectSubagentResult(status, chatId);
+  }
+
+  /** Notify user of sub-agent completion via transport */
+  private async notifySubagentResult(status: RunStatus, chatId: number): Promise<void> {
     const emoji = status.status === "complete" ? "✅" : status.status === "timeout" ? "⏰" : "❌";
     const duration = status.completedAt && status.startedAt
       ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
       : 0;
     const summary = `${emoji} **Sub-agent ${status.status}** (${status.role})\n⏱ ${duration}s | run: \`${status.runId.slice(0, 8)}\``;
-
-    const chatId = Number(routing.chatId);
-
-    // 1. Notify user via Telegram
     try {
-      if (chatId) {
-        await this.transport.notify([chatId], summary);
-      }
+      await this.transport.notify([chatId], summary);
     } catch (err) {
       console.error("[roundhouse] sub-agent completion notification failed:", err);
     }
+  }
 
-    // 2. Inject result into agent session as synthetic turn
+  /** Inject sub-agent output into agent session as synthetic turn */
+  private async injectSubagentResult(status: RunStatus, chatId: number): Promise<void> {
     try {
-      if (!chatId) return;
       const runDir = join(process.env.HOME || "/home/ec2-user", ".roundhouse", "subagents", status.runId);
       let stdout = "";
       try { stdout = await readFile(join(runDir, "stdout.log"), "utf-8"); } catch {}
 
       const resultText = stdout.trim()
-        ? `[Sub-agent ${status.role} completed (${status.status})]\n\nResult:\n${stdout.trim().slice(0, 3000)}`
+        ? `[Sub-agent ${status.role} completed (${status.status})]\n\nResult:\n${stdout.trim().slice(0, MAX_SUBAGENT_STDOUT_CHARS)}`
         : `[Sub-agent ${status.role} ${status.status} — no output]`;
 
       const syntheticThread = this.transport.createThread(chatId);
-      const agentThreadId = "main";
-      await this.handleAgentTurn(syntheticThread, agentThreadId, resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers);
+      await this.handleAgentTurn(syntheticThread, "main", resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers);
     } catch (err) {
       console.error("[roundhouse] sub-agent result injection failed:", err);
     }
