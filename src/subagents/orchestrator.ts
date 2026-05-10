@@ -120,6 +120,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
       return runId;
     } catch (err) {
       resolveReady!(); // Unblock handleChildExit if it's waiting
+      this.statusReady.delete(runId);
       try {
         if (typeof child?.pid === "number") {
           this.signalProcess(child.pid, "SIGTERM");
