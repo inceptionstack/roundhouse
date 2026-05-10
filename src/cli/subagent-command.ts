@@ -28,7 +28,7 @@ function buildRouting(): RoutingInfo {
   const cfg = loadGatewayConfig();
   const chatId = String(cfg.notifyChatIds[0] ?? "");
   if (!chatId) {
-    console.error("Error: no Telegram chat configured. Run 'roundhouse setup' first or pass --chat-id.");
+    console.error("Error: no Telegram chat configured. Run 'roundhouse setup' first.");
     process.exit(1);
   }
   return {
@@ -127,9 +127,8 @@ export async function handleSubagentCommand(args: string[]): Promise<void> {
         console.error("Usage: roundhouse subagent abort <runId>");
         process.exit(1);
       }
-      // Sends SIGTERM to child PID. Gateway watcher finalizes status on next poll.
       await orchestrator.abort(runId);
-      console.log(`Signal sent. Run ${runId.slice(0, 8)} will be finalized by gateway watcher.`);
+      console.log(`Aborted: ${runId.slice(0, 8)}`);
       break;
     }
 
