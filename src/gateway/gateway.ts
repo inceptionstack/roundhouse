@@ -376,8 +376,8 @@ export class Gateway {
     this.subagentOrchestrator.onSpawn(async (status) => {
       const chatId = Number(status.routing?.chatId);
       if (chatId) {
-        const msg = `🔬 <b>Sub-agent launched</b> (${status.role})\nrun: <code>${status.runId.slice(0, 8)}</code>`;
-        try { await this.transport.notify([chatId], msg, { parseMode: "HTML" }); } catch {}
+        const msg = `🔬 **Sub-agent launched** (${status.role})\nrun: \`${status.runId.slice(0, 8)}\``;
+        try { await this.transport.notify([chatId], msg); } catch {}
       }
     });
     this.subagentWatcher = new SubAgentWatcher(
@@ -884,14 +884,14 @@ export class Gateway {
     const duration = status.completedAt && status.startedAt
       ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
       : 0;
-    const summary = `${emoji} <b>Sub-agent ${status.status}</b> (${status.role})\n⏱ ${duration}s | run: <code>${status.runId.slice(0, 8)}</code>`;
+    const summary = `${emoji} **Sub-agent ${status.status}** (${status.role})\n⏱ ${duration}s | run: \`${status.runId.slice(0, 8)}\``;
 
     const chatId = Number(routing.chatId);
 
     // 1. Notify user via Telegram
     try {
       if (chatId) {
-        await this.transport.notify([chatId], summary, { parseMode: "HTML" });
+        await this.transport.notify([chatId], summary);
       }
     } catch (err) {
       console.error("[roundhouse] sub-agent completion notification failed:", err);

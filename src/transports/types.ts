@@ -54,7 +54,7 @@ export interface TransportAdapter {
   ownsThread(thread: ChatThread): boolean;
 
   /** Send notifications to configured recipients */
-  notify(chatIds: number[], text: string, options?: { parseMode?: string }): Promise<void>;
+  notify(chatIds: number[], text: string): Promise<void>;
 
   /**
    * Create a thread object for a given chat ID.
