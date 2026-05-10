@@ -521,6 +521,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     getInfo(threadId?: string): Record<string, unknown> {
       // Get model from the requested thread's session, or most recently used
       let modelInfo: string | undefined;
+      let hasActiveSession = false;
       let contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
       const threadEntry = threadId ? sessions.get(threadId) : undefined;
 
@@ -528,6 +529,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         const model = threadEntry.session.model;
         if (model) modelInfo = `${model.provider}/${model.id}`;
         contextUsage = threadEntry.session.getContextUsage() ?? undefined;
+        hasActiveSession = true;
       }
 
       if (!modelInfo) {
@@ -566,6 +568,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       return {
         version,
         model: modelInfo ?? "unknown",
+        hasActiveSession,
         configuredModel: configuredModel || modelInfo || "unknown",
         activeSessions: sessions.size,
         cwd,
