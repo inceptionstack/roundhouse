@@ -28,6 +28,8 @@ import { handleLater } from "./later-command";
 import { handleTopic, applyTopicOverride } from "./topic-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
+import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
+import type { RunStatus, RoutingInfo } from "../subagents";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { injectToolsSection } from "./tools-inject";
@@ -89,6 +91,8 @@ export class Gateway {
   private sttService: SttService | null = null;
   private cronScheduler: CronSchedulerService | null = null;
   private ipcServer: IpcServer | null = null;
+  private subagentOrchestrator: SubAgentOrchestratorImpl | null = null;
+  private subagentWatcher: SubAgentWatcher | null = null;
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -361,6 +365,17 @@ export class Gateway {
     } catch (err) {
       console.error("[roundhouse] IPC server start failed:", (err as Error).message);
     }
+
+    // Start sub-agent orchestrator + watcher
+    this.subagentOrchestrator = new SubAgentOrchestratorImpl();
+    this.subagentWatcher = new SubAgentWatcher(
+      this.subagentOrchestrator,
+      async (status, routing) => {
+        await this.handleSubagentCompletion(status, routing);
+      },
+    );
+    this.subagentWatcher.start();
+    console.log("[roundhouse] sub-agent watcher started");
 
     // Send startup notification (after cron init so we can include job counts)
     await this.notifyStartup(platforms);
@@ -821,6 +836,9 @@ export class Gateway {
   }
 
   async stop() {
+    if (this.subagentWatcher) {
+      this.subagentWatcher.stop();
+    }
     if (this.ipcServer) {
       this.ipcServer.stop();
     }
@@ -830,5 +848,23 @@ export class Gateway {
     try { await this.chat?.shutdown(); } catch (e) { console.warn("[roundhouse] chat shutdown error:", e); }
     await this.router.dispose();
     console.log("[roundhouse] stopped");
+  }
+
+  /** Handle sub-agent completion — post result to originating thread */
+  private async handleSubagentCompletion(status: RunStatus, routing: RoutingInfo): Promise<void> {
+    const emoji = status.status === "complete" ? "✅" : status.status === "timeout" ? "⏰" : "❌";
+    const duration = status.completedAt && status.startedAt
+      ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
+      : 0;
+    const summary = `${emoji} <b>Sub-agent ${status.status}</b> (${status.role})\n⏱ ${duration}s | run: <code>${status.runId.slice(0, 8)}</code>`;
+
+    try {
+      const chatId = Number(routing.chatId);
+      if (chatId) {
+        await this.transport.notify([chatId], summary);
+      }
+    } catch (err) {
+      console.error("[roundhouse] sub-agent completion notification failed:", err);
+    }
   }
 }
