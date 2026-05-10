@@ -15,6 +15,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "compact", description: "Compact context window" },
   { command: "model", description: "Show or switch AI model" },
   { command: "later", description: "Save an idea for later" },
+  { command: "topic", description: "Switch conversation topic" },
   { command: "verbose", description: "Toggle verbose tool output" },
   { command: "stop", description: "Stop the current agent run" },
   { command: "restart", description: "Restart agent process" },
