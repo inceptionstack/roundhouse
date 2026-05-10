@@ -151,20 +151,15 @@ export async function handleCompact(ctx: CommandContext): Promise<void> {
 
 // ── /status ──────────────────────────────────────────
 
-export async function handleStatus(ctx: CommandContext): Promise<void> {
-  const { thread, agent, agentThreadId, config, allowedUsers, verboseThreads, postWithFallback } = ctx;
+// ── Status helpers ────────────────────────────────────────
 
-  const uptimeSec = process.uptime();
-  const uptimeStr = uptimeSec < 3600
-    ? `${Math.floor(uptimeSec / 60)}m ${Math.floor(uptimeSec % 60)}s`
-    : `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
-  const platforms = Object.keys(config.chat.adapters).join(", ");
-  const debugStream = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
-  const nodeVer = process.version;
-  const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
+function formatUptime(sec: number): string {
+  return sec < 3600
+    ? `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`
+    : `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
 
-  // Check for available update (async, non-blocking)
-  let updateAvailable = "";
+async function checkAvailableUpdate(): Promise<string> {
   try {
     const { exec } = await import("node:child_process");
     const { promisify } = await import("node:util");
@@ -172,14 +167,25 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
     const { stdout } = await execAsync("npm view @inceptionstack/roundhouse version 2>/dev/null", { timeout: 10_000 });
     const latest = stdout.trim().split("\n").pop()!.trim();
     if (latest && /^\d+\.\d+\.\d+$/.test(latest) && latest !== ROUNDHOUSE_VERSION) {
-      // Simple semver comparison: split and compare numerically
       const [lM, lm, lp] = latest.split(".").map(Number);
       const [cM, cm, cp] = ROUNDHOUSE_VERSION.split(".").map(Number);
       if (lM > cM || (lM === cM && lm > cm) || (lM === cM && lm === cm && lp > cp)) {
-        updateAvailable = latest;
+        return latest;
       }
     }
-  } catch { /* network unavailable — skip */ }
+  } catch { /* network unavailable */ }
+  return "";
+}
+
+export async function handleStatus(ctx: CommandContext): Promise<void> {
+  const { thread, agent, agentThreadId, config, allowedUsers, verboseThreads, postWithFallback } = ctx;
+
+  const uptimeStr = formatUptime(process.uptime());
+  const platforms = Object.keys(config.chat.adapters).join(", ");
+  const debugStream = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
+  const nodeVer = process.version;
+  const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
+  const updateAvailable = await checkAvailableUpdate();
 
   const info = agent.getInfo ? agent.getInfo(agentThreadId) : {};
   const agentVersion = info.version ? `v${info.version}` : "";

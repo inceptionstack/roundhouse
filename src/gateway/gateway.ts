@@ -237,45 +237,32 @@ export class Gateway {
       if (isCommand(userText, "/start")) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
-      // Handle /new command
-      if (isCommand(userText.trim(), "/new")) {
-        await handleNew(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
-        return;
+      // ── Command dispatch (registry-based) ───
+      const trimmed = userText.trim();
+
+      // Commands using standard CommandContext
+      const COMMAND_REGISTRY: Record<string, (ctx: any) => Promise<void>> = {
+        "/new": handleNew,
+        "/restart": handleRestart,
+        "/update": handleUpdate,
+        "/compact": handleCompact,
+        "/status": handleStatus,
+      };
+
+      for (const [cmd, handler] of Object.entries(COMMAND_REGISTRY)) {
+        if (isCommand(trimmed, cmd)) {
+          await handler(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
+          return;
+        }
       }
 
-      // Handle /restart command
-      if (isCommand(userText.trim(), "/restart")) {
-        await handleRestart(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
+      // Commands with custom context (accept args)
+      if (isCommandWithArgs(trimmed, "/model") || isCommand(trimmed, "/model")) {
+        await handleModel({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
-
-      // Handle /update command
-      if (isCommand(userText.trim(), "/update")) {
-        await handleUpdate(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
-        return;
-      }
-
-      // Handle /compact command
-      if (isCommand(userText.trim(), "/compact")) {
-        await handleCompact(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
-        return;
-      }
-
-      // Handle /status command
-      if (isCommand(userText.trim(), "/status")) {
-        await handleStatus(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
-        return;
-      }
-
-      // Handle /model command
-      if (isCommandWithArgs(userText.trim(), "/model") || isCommand(userText.trim(), "/model")) {
-        await handleModel({ thread, text: userText.trim(), postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
-      }
-
-      // Handle /later command
-      if (isCommandWithArgs(userText.trim(), "/later") || isCommand(userText.trim(), "/later")) {
-        await handleLater({ thread, text: userText.trim(), postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
+      if (isCommandWithArgs(trimmed, "/later") || isCommand(trimmed, "/later")) {
+        await handleLater({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
         return;
       }
 
