@@ -2,6 +2,40 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.14] — 2026-05-10
+
+### Added
+- **"What's New" notification** — after `/update` + restart, startup message shows changelog highlights from the new version
+- Command dispatch registry — cleaner gateway routing (−13 lines)
+- Status helpers extracted (`formatUptime`, `checkAvailableUpdate`)
+
+### Fixed
+- COMMAND_REGISTRY type safety (`CommandContext` not `any`)
+- CHANGELOG.md now included in published npm package
+
+## [0.5.13] — 2026-05-10
+
+### Added
+- **soul.md + user.md persona injection** — agent identity + user context, auto-reloads on file change
+- tools.md now hints agent to check `~/.roundhouse/workspace/later.md`
+
+### Fixed
+- XML injection: escape `</persona>` in user-supplied persona files
+- `mkdirSync` before `writeSettings` (fixes fresh-install crash)
+- mtime check uses `!==` instead of `>` (catches deletions)
+- `/later@BotName` suffix now stripped in group chats
+
+## [0.5.12] — 2026-05-10
+
+### Added
+- **Inline keyboard for /model** — 8 frontier Bedrock models (2-column, 4-row layout)
+- Models: Claude Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5, DeepSeek R1, Llama 4, Nova Pro, Mistral Large
+
+## [0.5.11] — 2026-05-09
+
+### Added
+- **/later command** — quick-capture ideas to `~/.roundhouse/workspace/later.md`
+
 ## [0.5.10] — 2026-05-09
 
 ### Fixed
