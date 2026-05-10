@@ -110,10 +110,15 @@ describe("subagents", () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0]?.[0]).toBe("pi");
-    expect(spawnMock.mock.calls[0]?.[1]?.[0]).toBe("--session-dir");
-    expect(spawnMock.mock.calls[0]?.[1]?.[1]).toBe(runDir);
-    expect(spawnMock.mock.calls[0]?.[1]?.[2]).toBe("-p");
-    expect(spawnMock.mock.calls[0]?.[1]?.[3]).toBe(`@${join(runDir, "brief.md")}`);
+    const args = spawnMock.mock.calls[0]?.[1];
+    expect(args).toContain("--no-extensions");
+    expect(args).toContain("--no-skills");
+    expect(args).toContain("--session-dir");
+    expect(args).toContain("-p");
+    expect(args).toContain(`@${join(runDir, "brief.md")}`);
+    // --session-dir followed by runDir
+    const sdIdx = args.indexOf("--session-dir");
+    expect(args[sdIdx + 1]).toBe(runDir);
     expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({
       cwd: rootDir,
       detached: true,
