@@ -43,6 +43,11 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     });
   }
   onCompletion(listener: (status: RunStatus) => Promise<void> | void): () => void { return this.finalizer.onCompletion(listener); }
+  private spawnListeners: Array<(status: RunStatus) => Promise<void> | void> = [];
+  onSpawn(listener: (status: RunStatus) => Promise<void> | void): () => void {
+    this.spawnListeners.push(listener);
+    return () => { this.spawnListeners = this.spawnListeners.filter(l => l !== listener); };
+  }
   isRunManagedInProcess(runId: string): boolean { return this.children.has(runId); }
 
   async spawn(spec: SpawnSpec): Promise<string> {
@@ -94,6 +99,12 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
       this.children.set(runId, { pid });
       await this.store.write(initialStatus);
       resolveReady!();
+
+      // Notify spawn listeners
+      for (const listener of this.spawnListeners) {
+        try { await listener(initialStatus); } catch {}
+      }
+
       return runId;
     } catch (err) {
       this.children.delete(runId);
