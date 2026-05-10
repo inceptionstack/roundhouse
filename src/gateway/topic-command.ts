@@ -10,7 +10,7 @@
  *   /topic main      — return to default session
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDHOUSE_DIR } from "../config";
 
@@ -56,13 +56,17 @@ export function setActiveTopic(chatId: string, topic: string): void {
   persistTopics();
 }
 
-/** Get all known topics for a chat. */
-export function listTopics(chatId: string): string[] {
-  // We only track the *active* topic in memory.
-  // The full list comes from the agent's session store — 
-  // for now just return current if set.
-  const current = activeTopics.get(chatId);
-  return current && current !== "main" ? [current] : [];
+/** Get all known topics from memory-state directory. */
+export function listTopics(): string[] {
+  const stateDir = join(ROUNDHOUSE_DIR, "memory-state");
+  try {
+    return readdirSync(stateDir)
+      .filter(f => f.startsWith("topic_c") && f.endsWith(".json"))
+      .map(f => f.replace(/^topic_c/, "").replace(/\.json$/, ""))
+      .map(f => f.replace(/__/g, "_")); // reverse threadIdToDir encoding
+  } catch {
+    return [];
+  }
 }
 
 export interface TopicCommandContext {
@@ -82,13 +86,15 @@ export async function handleTopic(ctx: TopicCommandContext): Promise<void> {
   const topicName = match?.[1]?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
 
   if (!topicName) {
-    // Show current topic
+    // Show current topic + known topics
     const current = getActiveTopic(chatId) ?? "main (default)";
-    await postWithFallback(thread,
-      `📂 Current topic: \`${current}\`\n\n` +
-      `Switch with: \`/topic <name>\`\n` +
-      `Return to default: \`/topic main\``
-    );
+    const known = listTopics();
+    let msg = `📂 Current topic: \`${current}\`\n\n`;
+    if (known.length > 0) {
+      msg += `Known topics: ${known.map(t => `\`${t}\``).join(", ")}\n\n`;
+    }
+    msg += `Switch with: \`/topic <name>\`\nReturn to default: \`/topic main\``;
+    await postWithFallback(thread, msg);
     return;
   }
 
