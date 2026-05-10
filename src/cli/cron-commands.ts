@@ -13,6 +13,19 @@ import { validateTemplate } from "../cron/template";
 import { parseDuration } from "../cron/durations";
 import type { CronJobConfig, CronSchedule } from "../cron/types";
 import { DEFAULT_TIMEOUT_MS, DEFAULT_TIMEZONE, VALID_NOTIFY_ON, DEFAULT_RUNS_LIMIT } from "../cron/constants";
+import { sendIpc } from "../ipc/client";
+
+/**
+ * Send a notification about a cron management action via IPC to the gateway.
+ * Non-fatal — if gateway is not running, silently skip.
+ */
+async function notifyCronAction(message: string): Promise<void> {
+  try {
+    await sendIpc({ type: "notify", text: message });
+  } catch {
+    // Gateway not running — CLI is standalone, skip notification
+  }
+}
 import { formatSchedule, formatRunCounts, formatJobSummary, formatJobDetail, formatRunLine, runStatusIcon, jobEnabledIcon } from "../cron/format";
 
 function rejectBuiltin(id: string): void {
@@ -100,8 +113,12 @@ export async function cronAdd(store: CronStore, positional: string[], flags: Rec
   };
 
   await store.writeJob(job);
-  console.log(`✅ Cron job "${id}" ${existing ? "updated" : "created"}.`);
+  const verb = existing ? "updated" : "created";
+  console.log(`✅ Cron job "${id}" ${verb}.`);
   if (flags.json) console.log(JSON.stringify(job, null, 2));
+
+  const schedDesc = flags.cron ? `cron: ${flags.cron}` : flags.every ? `every ${flags.every}` : flags.at ? `once at ${flags.at}` : "";
+  await notifyCronAction(`📋 Cron job **${verb}**: \`${id}\`\n${schedDesc}${flags.description ? " — " + flags.description : ""}`);
 }
 
 export async function cronList(store: CronStore, _positional: string[], flags: Record<string, string>): Promise<void> {
@@ -188,6 +205,7 @@ export async function cronPause(store: CronStore, positional: string[], _flags: 
   job.updatedAt = new Date().toISOString();
   await store.writeJob(job);
   console.log(`⏸️ Job "${id}" paused.`);
+  await notifyCronAction(`⏸️ Cron job **paused**: \`${id}\``);
 }
 
 export async function cronResume(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
@@ -200,6 +218,7 @@ export async function cronResume(store: CronStore, positional: string[], _flags:
   job.updatedAt = new Date().toISOString();
   await store.writeJob(job);
   console.log(`▶️ Job "${id}" resumed.`);
+  await notifyCronAction(`▶️ Cron job **resumed**: \`${id}\``);
 }
 
 export async function cronEdit(store: CronStore, positional: string[], flags: Record<string, string>): Promise<void> {
@@ -232,6 +251,7 @@ export async function cronEdit(store: CronStore, positional: string[], flags: Re
   job.updatedAt = new Date().toISOString();
   await store.writeJob(job);
   console.log(`✅ Job "${id}" updated.`);
+  await notifyCronAction(`✏️ Cron job **edited**: \`${id}\``);
 }
 
 export async function cronDelete(store: CronStore, positional: string[], _flags: Record<string, string>): Promise<void> {
@@ -242,6 +262,7 @@ export async function cronDelete(store: CronStore, positional: string[], _flags:
   if (!job) { console.error(`Job not found: ${id}`); process.exit(1); }
   await store.deleteJob(id);
   console.log(`🗑️ Job "${id}" deleted.`);
+  await notifyCronAction(`🗑️ Cron job **deleted**: \`${id}\``);
 }
 
 export function cronHelp(): void {
