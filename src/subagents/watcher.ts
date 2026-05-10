@@ -1,4 +1,4 @@
-import type { RoutingInfo, RunStatus, SubAgentOrchestrator } from "./types";
+import type { RoutingInfo, RunStatus, SubAgentLifecycle } from "./types";
 
 export class SubAgentWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -6,7 +6,7 @@ export class SubAgentWatcher {
   private polling = false;
 
   constructor(
-    private readonly orchestrator: SubAgentOrchestrator,
+    private readonly orchestrator: SubAgentLifecycle,
     private readonly notifyCompletion: (status: RunStatus, routing: RoutingInfo) => Promise<void> | void,
     private readonly pollIntervalMs = 5000,
   ) {}
@@ -19,7 +19,9 @@ export class SubAgentWatcher {
     );
 
     this.timer = setInterval(() => {
-      void this.poll();
+      void this.poll().catch((err) => {
+        console.error("[roundhouse] subagent watcher poll error:", err);
+      });
     }, this.pollIntervalMs);
   }
 

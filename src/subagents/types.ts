@@ -35,13 +35,16 @@ export interface RunStatus {
   spawnClockTicks: string;
 }
 
+/** Public API for consumers (gateway, commands, agent tools) */
 export interface SubAgentOrchestrator {
   spawn(spec: SpawnSpec): Promise<string>;
   status(runId: string): Promise<RunStatus | null>;
   list(): Promise<RunStatus[]>;
   abort(runId: string): Promise<void>;
+}
 
-  // Watcher-facing methods (used internally by SubAgentWatcher)
+/** Internal API used by SubAgentWatcher for lifecycle management */
+export interface SubAgentLifecycle {
   listRaw(): Promise<RunStatus[]>;
   recoverRun(runId: string): Promise<RunStatus | null>;
   enforceTimeout(runId: string): Promise<RunStatus | null>;

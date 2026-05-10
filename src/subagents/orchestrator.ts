@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { buildBrief } from "./brief";
 import { isProcessAlive, readSpawnClockTicks } from "./pid";
-import type { RunStatus, SpawnSpec, SubAgentOrchestrator } from "./types";
+import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -22,7 +22,7 @@ interface OrchestratorOptions {
   now?: () => Date;
 }
 
-export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
+export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentLifecycle {
   private readonly dataRoot: string;
   private readonly subagentsRoot: string;
   private readonly spawnProcess: typeof spawn;
@@ -34,6 +34,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
   private readonly children = new Map<string, ChildProcess>();
   private readonly pendingTerminalStatus = new Map<string, TerminalStatus>();
   private readonly completionListeners = new Set<CompletionListener>();
+  private readonly statusReady = new Map<string, Promise<void>>();
 
   constructor(options: OrchestratorOptions = {}) {
     this.dataRoot = options.dataRoot ?? join(homedir(), ".roundhouse");
@@ -78,6 +79,9 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
 
     let child: ChildProcess;
     let initialStatus: RunStatus | null = null;
+    let resolveReady: () => void;
+    const readyPromise = new Promise<void>((r) => { resolveReady = r; });
+    this.statusReady.set(runId, readyPromise);
 
     try {
       child = this.spawnProcess("pi", ["--session-dir", runDir, brief], {
@@ -110,10 +114,12 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
       };
 
       await this.writeStatus(initialStatus);
+      resolveReady!();
       this.children.set(runId, child);
       child.unref();
       return runId;
     } catch (err) {
+      resolveReady!(); // Unblock handleChildExit if it's waiting
       try {
         if (typeof child?.pid === "number") {
           this.signalProcess(child.pid, "SIGTERM");
@@ -208,6 +214,13 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
     exitCode: number | null,
     initialStatus: RunStatus | null,
   ): Promise<void> {
+    // Wait for status.json to be written (handles fast-exit race)
+    const ready = this.statusReady.get(runId);
+    if (ready) {
+      await ready;
+      this.statusReady.delete(runId);
+    }
+
     this.children.delete(runId);
 
     const current = await this.readStatus(runId) ?? initialStatus;
