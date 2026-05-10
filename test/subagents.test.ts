@@ -112,8 +112,8 @@ describe("subagents", () => {
     expect(spawnMock.mock.calls[0]?.[0]).toBe("pi");
     expect(spawnMock.mock.calls[0]?.[1]?.[0]).toBe("--session-dir");
     expect(spawnMock.mock.calls[0]?.[1]?.[1]).toBe(runDir);
-    expect(spawnMock.mock.calls[0]?.[1]?.[2]).toBe("--brief-file");
-    expect(spawnMock.mock.calls[0]?.[1]?.[3]).toBe(join(runDir, "brief.md"));
+    expect(spawnMock.mock.calls[0]?.[1]?.[2]).toBe("-p");
+    expect(spawnMock.mock.calls[0]?.[1]?.[3]).toBe(`@${join(runDir, "brief.md")}`);
     expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({
       cwd: rootDir,
       detached: true,
