@@ -814,34 +814,10 @@ export class Gateway {
 
     // Only fire for the primary (first) chat
     const primaryChatId = chatIds[0];
-    const threadId = `telegram:${primaryChatId}`;
     const agentThreadId = "main";
 
-    // Create a synthetic Telegram-compatible thread so streaming, HTML conversion,
-    // message splitting, and progressive edits all work identically to real chat threads.
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const syntheticThread = {
-      id: threadId,
-      adapter: {
-        telegramFetch: async (method: string, payload: Record<string, unknown>) => {
-          if (!token) return null;
-          const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: primaryChatId, ...payload }),
-            signal: AbortSignal.timeout(30_000),
-          });
-          if (!res.ok) return null;
-          const json = await res.json() as { result?: unknown };
-          return json.result ?? null;
-        },
-      },
-      post: async (content: string | { markdown: string }) => {
-        const text = typeof content === "string" ? content : content.markdown;
-        await this.transport.notify([primaryChatId], text);
-      },
-      startTyping: async () => {},
-    };
+    // Create a thread via the transport adapter — no transport-specific logic in gateway
+    const syntheticThread = this.transport.createThread(primaryChatId);
 
     const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
 
