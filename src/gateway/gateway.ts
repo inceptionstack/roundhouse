@@ -373,6 +373,13 @@ export class Gateway {
 
     // Start sub-agent orchestrator + watcher
     this.subagentOrchestrator = new SubAgentOrchestratorImpl();
+    this.subagentOrchestrator.onSpawn(async (status) => {
+      const chatId = Number(status.routing?.chatId);
+      if (chatId) {
+        const msg = `🔬 <b>Sub-agent launched</b> (${status.role})\nrun: <code>${status.runId.slice(0, 8)}</code>`;
+        try { await this.transport.notify([chatId], msg, { parseMode: "HTML" }); } catch {}
+      }
+    });
     this.subagentWatcher = new SubAgentWatcher(
       this.subagentOrchestrator,
       async (status, routing) => {
