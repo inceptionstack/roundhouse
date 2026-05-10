@@ -50,12 +50,12 @@ export class TelegramAdapter implements TransportAdapter {
     return isTelegramThread(thread as any);
   }
 
-  async notify(chatIds: number[], text: string): Promise<void> {
+  async notify(chatIds: number[], text: string, options?: { parseMode?: string }): Promise<void> {
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.warn("[roundhouse] TELEGRAM_BOT_TOKEN not set — skipping notification");
       return;
     }
-    await sendTelegramToMany(chatIds, text);
+    await sendTelegramToMany(chatIds, text, options);
   }
 
   async isPairingPending(): Promise<boolean> {

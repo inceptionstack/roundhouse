@@ -175,6 +175,11 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
 }
 
 async function assertDirectoryExists(path: string): Promise<void> {
-  const info = await stat(path);
-  if (!info.isDirectory()) throw new Error(`Sub-agent cwd is not a directory: ${path}`);
+  try {
+    const info = await stat(path);
+    if (!info.isDirectory()) throw new Error(`Sub-agent cwd is not a directory: ${path}`);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") throw new Error(`Sub-agent cwd does not exist: ${path}`);
+    throw err;
+  }
 }
