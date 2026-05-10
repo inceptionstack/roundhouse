@@ -861,7 +861,7 @@ export class Gateway {
     try {
       const chatId = Number(routing.chatId);
       if (chatId) {
-        await this.transport.notify([chatId], summary);
+        await this.transport.notify([chatId], summary, { parseMode: "HTML" });
       }
     } catch (err) {
       console.error("[roundhouse] sub-agent completion notification failed:", err);

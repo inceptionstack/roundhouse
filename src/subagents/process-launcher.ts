@@ -70,15 +70,12 @@ export class ProcessLauncher {
 }
 
 function defaultPiAvailabilityCheck(): void {
-  if (piAvailableCache !== undefined) {
-    if (!piAvailableCache) throw new Error("pi executable not found in PATH");
-    return;
-  }
+  if (piAvailableCache === true) return;
+  // No negative caching — retry on every spawn so installing pi mid-session works
   try {
     execFileSync("which", ["pi"], { stdio: "pipe" });
     piAvailableCache = true;
   } catch {
-    piAvailableCache = false;
     throw new Error("pi executable not found in PATH");
   }
 }
