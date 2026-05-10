@@ -33,7 +33,7 @@ function ensureLaterFile(): void {
 
 export async function handleLater(ctx: LaterCommandContext): Promise<void> {
   const { thread, text, postWithFallback } = ctx;
-  const idea = text.replace(/^\/later\s*/i, "").trim();
+  const idea = text.replace(/^\/later(@\S+)?\s*/i, "").trim();
 
   // No argument: show contents
   if (!idea) {

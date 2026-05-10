@@ -10,7 +10,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 /** Known model aliases → Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
@@ -58,6 +58,7 @@ function readSettings(): Record<string, any> {
 }
 
 function writeSettings(settings: Record<string, any>): void {
+  mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
   writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
 }
 
