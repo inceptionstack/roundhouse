@@ -31,6 +31,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { injectToolsSection } from "./tools-inject";
 import { injectPersonaSection, loadPersona } from "./persona-inject";
+import { checkVersionChange } from "./whats-new";
 
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";
@@ -746,6 +747,9 @@ export class Gateway {
       cronInfo = `Cron jobs: ${cs.enabledCount}/${cs.jobCount} enabled`;
     }
 
+    // Check if this is a fresh update (call once, before loop)
+    const whatsNew = checkVersionChange();
+
     for (const chatId of chatIds) {
       const sessionId = Number(chatId) < 0 ? `group:${chatId}` : "main";
       const perChatText = [
@@ -767,7 +771,8 @@ export class Gateway {
         `  Process: ${memMB} MB RSS`,
       ].filter(line => line != null).join("\n");
 
-      await this.transport.notify([chatId], perChatText);
+      const fullText = whatsNew ? `${perChatText}\n\n${whatsNew}` : perChatText;
+      await this.transport.notify([chatId], fullText);
     }
   }
 
