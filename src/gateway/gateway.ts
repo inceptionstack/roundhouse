@@ -25,6 +25,7 @@ import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
+import { handleTopic, applyTopicOverride } from "./topic-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { hostname } from "node:os";
@@ -215,7 +216,7 @@ export class Gateway {
 
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
-      const agentThreadId = resolveAgentThreadId(thread, message);
+      let agentThreadId = applyTopicOverride(resolveAgentThreadId(thread, message), thread);
       const userText = message.text ?? "";
       const authorName = message.author?.userName ?? message.author?.userId ?? "?";
       const rawAttachments = message.attachments ?? [];
@@ -267,13 +268,18 @@ export class Gateway {
         return;
       }
 
+      if (isCommandWithArgs(trimmed, "/topic") || isCommand(trimmed, "/topic")) {
+        await handleTopic({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
+        return;
+      }
+
       // Dispatch to agent turn handler
       await this.handleAgentTurn(thread, agentThreadId, userText, rawAttachments, verboseThreads, threadLocks, abortControllers);
     };
 
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
-      const agentThreadId = resolveAgentThreadId(thread, message);
+      let agentThreadId = applyTopicOverride(resolveAgentThreadId(thread, message), thread);
       const text = (message.text ?? "").trim();
       // /stop — abort the in-flight agent run immediately
       if (isCommand(text, "/stop")) {
