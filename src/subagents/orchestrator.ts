@@ -150,7 +150,11 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     const alive = await this.isProcessAlive(current.pid, current.spawnClockTicks);
     if (alive) return current;
 
-    const outcome = this.terminationHandler.terminalStatusFor(current);
+    // Process is dead. If it had a requested outcome (abort/timeout), use that.
+    // Otherwise check stdout — orphan recovery doesn't know exit code.
+    const outcome = current.requestedOutcome
+      ? this.terminationHandler.terminalStatusFor(current)
+      : await this.inferFromStdout(current.runId);
     return this.finalizer.finalizeRun(current.runId, outcome, { notify });
   }
 
@@ -180,14 +184,26 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
    */
   private async inferOutcome(runId: string, exitCode: number | null): Promise<"complete" | "failed"> {
     if (exitCode === 0) return "complete";
-    if (exitCode === null) return "failed"; // signal-killed, not a teardown error
+    if (exitCode === null) {
+      // For handleChildExit: null means signal-killed → failed
+      // But callers recovering orphans should use inferFromStdout directly
+      return "failed";
+    }
+    return this.inferFromStdout(runId);
+  }
+
+  /**
+   * Check stdout for substantial output. Used for:
+   * - Non-zero exit codes (teardown errors)
+   * - Recovered orphan processes (unknown exit code)
+   */
+  private async inferFromStdout(runId: string): Promise<"complete" | "failed"> {
     try {
       const stdoutPath = join(this.store.getRunDir(runId), "stdout.log");
       const content = await readFile(stdoutPath, "utf-8");
-      // If stdout has substantial content (>50 chars), the agent did its job
       if (content.trim().length > 50) return "complete";
     } catch {
-      // No stdout file or can't read — fall through to failed
+      // No stdout file or can't read
     }
     return "failed";
   }
