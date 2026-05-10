@@ -249,6 +249,39 @@ describe("subagents", () => {
     expect(status?.exitCode).toBe(1);
   });
 
+  it("non-zero exit with substantial stdout is treated as complete", async () => {
+    const child = createMockChild(7777);
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => "9999",
+    });
+
+    const runId = await orchestrator.spawn({
+      role: "research",
+      task: "Research something",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    });
+
+    // Write stdout content before exit (simulates agent producing output)
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const runDir = join(rootDir, "subagents", runId);
+    writeFileSync(join(runDir, "stdout.log"), "Here is the research result with plenty of meaningful content that exceeds the threshold.");
+
+    child.emit("exit", 1);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("complete");
+    expect(status?.exitCode).toBe(1);
+  });
+
   it("status() does not trigger completion notification for dead process", async () => {
     const runId = "33333333-3333-3333-3333-333333333333";
     const completionCb = vi.fn();
