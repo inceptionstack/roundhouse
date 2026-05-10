@@ -45,6 +45,7 @@ export interface SubAgentOrchestrator {
   status(runId: string): Promise<RunStatus | null>;
   list(): Promise<RunStatus[]>;
   abort(runId: string): Promise<void>;
+  onSpawn(listener: (status: RunStatus) => Promise<void> | void): () => void;
 }
 
 /** Internal API used by SubAgentWatcher for lifecycle management */
