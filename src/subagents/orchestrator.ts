@@ -9,7 +9,7 @@ import { ProcessLauncher, type ProcessLauncherOptions } from "./process-launcher
 import { RunFinalizer } from "./run-finalizer";
 import { RunStore } from "./run-store";
 import { TerminationHandler } from "./termination-handler";
-import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator, TerminalStatus } from "./types";
+import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 export interface OrchestratorOptions extends ProcessLauncherOptions {
