@@ -821,9 +821,14 @@ export class Gateway {
     const syntheticThread = {
       id: threadId,
       post: async (text: string) => {
-        await this.transport.notify([primaryChatId], text);
+        await this.transport.notify([primaryChatId], text, { parseMode: "HTML" });
       },
       startTyping: async () => {},
+      handleStream: async (iterable: AsyncIterable<string>) => {
+        let text = "";
+        for await (const chunk of iterable) text += chunk;
+        if (text.trim()) await this.transport.notify([primaryChatId], text.trim());
+      },
     };
 
     const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
