@@ -277,6 +277,55 @@ describe("subagents", () => {
     expect(() => parseStatFile("1234 (pi) S 1 2 3")).toThrow("Incomplete");
     expect(() => parseStatFile("no closing paren")).toThrow("Invalid");
   });
+
+  it("watcher polls and notifies on dead out-of-process run", async () => {
+    const { SubAgentWatcher } = await import("../src/subagents/watcher");
+    const runId = "run-watcher";
+    const completionCb = vi.fn();
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "implementation",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "50", parentThreadId: "telegram:50:main" },
+      status: "running",
+      pid: 1234,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "333",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      isProcessAlive: async () => false,
+    });
+    orchestrator.onCompletion(completionCb);
+
+    const watcherNotify = vi.fn();
+    const watcher = new SubAgentWatcher(orchestrator, watcherNotify, 50);
+    watcher.start();
+
+    // Wait for at least one poll cycle
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    // onCompletion listener should have fired (from recoverRun)
+    expect(completionCb).toHaveBeenCalledTimes(1);
+    expect(completionCb.mock.calls[0][0].status).toBe("failed");
+    expect(completionCb.mock.calls[0][0].runId).toBe(runId);
+
+    // Watcher's own notify callback should also fire
+    expect(watcherNotify).toHaveBeenCalledTimes(1);
+
+    // Subsequent polls should NOT re-notify (already finalized)
+    completionCb.mockClear();
+    watcherNotify.mockClear();
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+    expect(completionCb).not.toHaveBeenCalled();
+    expect(watcherNotify).not.toHaveBeenCalled();
+  });
 });
 
 function createMockChild(pid: number): EventEmitter & { pid: number; unref: ReturnType<typeof vi.fn> } {

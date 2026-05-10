@@ -1,5 +1,4 @@
-import { SubAgentOrchestratorImpl } from "./orchestrator";
-import type { RoutingInfo, RunStatus } from "./types";
+import type { RoutingInfo, RunStatus, SubAgentOrchestrator } from "./types";
 
 export class SubAgentWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -7,7 +6,7 @@ export class SubAgentWatcher {
   private polling = false;
 
   constructor(
-    private readonly orchestrator: SubAgentOrchestratorImpl,
+    private readonly orchestrator: SubAgentOrchestrator,
     private readonly notifyCompletion: (status: RunStatus, routing: RoutingInfo) => Promise<void> | void,
     private readonly pollIntervalMs = 5000,
   ) {}

@@ -40,4 +40,11 @@ export interface SubAgentOrchestrator {
   status(runId: string): Promise<RunStatus | null>;
   list(): Promise<RunStatus[]>;
   abort(runId: string): Promise<void>;
+
+  // Watcher-facing methods (used internally by SubAgentWatcher)
+  listRaw(): Promise<RunStatus[]>;
+  recoverRun(runId: string): Promise<RunStatus | null>;
+  enforceTimeout(runId: string): Promise<RunStatus | null>;
+  isRunManagedInProcess(runId: string): boolean;
+  onCompletion(listener: (status: RunStatus) => Promise<void> | void): () => void;
 }
