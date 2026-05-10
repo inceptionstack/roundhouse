@@ -181,8 +181,10 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
     const alive = await this.isProcessAlive(current.pid, current.spawnClockTicks);
     if (alive) return current;
 
+    // Status refresh detected dead process — finalize silently (no notification).
+    // Notifications only come from handleChildExit or watcher-driven enforceTimeout.
     const outcome = this.pendingTerminalStatus.get(current.runId) ?? "failed";
-    return this.finalizeRun(current.runId, outcome, {});
+    return this.finalizeRun(current.runId, outcome, { notify: false });
   }
 
   private async handleChildExit(
@@ -209,7 +211,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
   private async finalizeRun(
     runId: string,
     status: TerminalStatus,
-    extra: { exitCode?: number },
+    extra: { exitCode?: number; notify?: boolean },
   ): Promise<RunStatus> {
     const current = await this.readStatus(runId);
     if (!current) {
@@ -226,7 +228,9 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
 
     await this.writeStatus(updated);
     this.pendingTerminalStatus.delete(runId);
-    await this.notifyCompletion(updated);
+    if (extra.notify !== false) {
+      await this.notifyCompletion(updated);
+    }
     return updated;
   }
 
@@ -264,8 +268,21 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator {
 }
 
 function defaultPiAvailabilityCheck(): void {
-  execFileSync("which", ["pi"], { stdio: "pipe" });
+  // Cached: only check once per process lifetime
+  if (piAvailableCache !== undefined) {
+    if (!piAvailableCache) throw new Error("pi executable not found in PATH");
+    return;
+  }
+  try {
+    execFileSync("which", ["pi"], { stdio: "pipe" });
+    piAvailableCache = true;
+  } catch {
+    piAvailableCache = false;
+    throw new Error("pi executable not found in PATH");
+  }
 }
+
+let piAvailableCache: boolean | undefined;
 
 function defaultSignalProcess(pid: number, signal: "SIGTERM"): void {
   process.kill(pid, signal);

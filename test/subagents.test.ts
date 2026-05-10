@@ -186,6 +186,97 @@ describe("subagents", () => {
     expect(status?.status).toBe("failed");
     expect(status?.completedAt).toBeTruthy();
   });
+
+  it("handles child exit event with code 0 as complete", async () => {
+    const child = createMockChild(5555);
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const completionCb = vi.fn();
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => "8888",
+    });
+    orchestrator.onCompletion(completionCb);
+
+    const runId = await orchestrator.spawn({
+      role: "scout",
+      task: "Find all TODO comments",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    });
+
+    // Simulate child exiting with code 0
+    child.emit("exit", 0);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("complete");
+    expect(status?.exitCode).toBe(0);
+    expect(completionCb).toHaveBeenCalledTimes(1);
+    expect(completionCb.mock.calls[0][0].status).toBe("complete");
+  });
+
+  it("handles child exit event with non-zero code as failed", async () => {
+    const child = createMockChild(6666);
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => "9999",
+    });
+
+    const runId = await orchestrator.spawn({
+      role: "review",
+      task: "Review PR",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    });
+
+    child.emit("exit", 1);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("failed");
+    expect(status?.exitCode).toBe(1);
+  });
+
+  it("status() does not trigger completion notification for dead process", async () => {
+    const runId = "run-silent";
+    const completionCb = vi.fn();
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "research",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "30", parentThreadId: "telegram:30:main" },
+      status: "running",
+      pid: 99,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "111",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      isProcessAlive: async () => false,
+    });
+    orchestrator.onCompletion(completionCb);
+
+    await orchestrator.status(runId);
+
+    expect(completionCb).not.toHaveBeenCalled();
+  });
+
+  it("parseStatFile throws on truncated input", () => {
+    expect(() => parseStatFile("1234 (pi) S 1 2 3")).toThrow("Incomplete");
+    expect(() => parseStatFile("no closing paren")).toThrow("Invalid");
+  });
 });
 
 function createMockChild(pid: number): EventEmitter & { pid: number; unref: ReturnType<typeof vi.fn> } {
