@@ -97,6 +97,7 @@ export class Gateway {
   private verboseThreads = new Set<string>();
   private threadLocks = new Map<string, Promise<void>>();
   private abortControllers = new Map<string, AbortController>();
+  private flushInProgress = new Set<string>();
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -457,6 +458,7 @@ export class Gateway {
 
       stopTyping = startTypingLoop(thread);
 
+      let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
       try {
         let turnUsedTools = false;
         if (agent.promptStream) {
@@ -485,7 +487,12 @@ export class Gateway {
             agent, memoryRoot, this.config.memory,
           );
           const effectivePressure = maxPressure(memoryPrepared?.pendingCompact, pressure);
-          if (effectivePressure !== "none") {
+          if (effectivePressure === "soft") {
+            // Soft flush deferred to OUTSIDE the lock (no memory state invariants affected)
+            deferredSoftFlush = { thread, agentThreadId, agent, memoryRoot };
+          } else if (effectivePressure !== "none") {
+            // Hard/emergency: must run INSIDE the lock (compact changes session state,
+            // prepareMemoryForTurn on next turn needs post-compact reinjection)
             try {
               await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, effectivePressure);
             } catch (err) {
@@ -509,6 +516,22 @@ export class Gateway {
       releaseLock!();
       if (threadLocks.get(agentThreadId) === lockPromise) {
         threadLocks.delete(agentThreadId);
+      }
+    }
+
+    // Soft flush runs OUTSIDE the thread lock.
+    // Soft flush only prompts the agent to save facts to MEMORY.md — no compact,
+    // no session state change, no force-reinject needed. Safe to run concurrently.
+    if (deferredSoftFlush && !this.flushInProgress.has(deferredSoftFlush.agentThreadId)) {
+      const { thread: t, agentThreadId: tid, agent: a, memoryRoot: mr } = deferredSoftFlush;
+      this.flushInProgress.add(tid);
+      console.log(`[roundhouse] soft flush for thread=${tid} (lock released, running async)`);
+      try {
+        await this.handleContextPressure(t, tid, a, mr, "soft");
+      } catch (err) {
+        console.error(`[roundhouse] soft flush error:`, (err as Error).message);
+      } finally {
+        this.flushInProgress.delete(tid);
       }
     }
   }
@@ -636,18 +659,19 @@ export class Gateway {
 
   /**
    * Handle context pressure — flush memory and/or compact.
-   * Runs inside the thread lock after a turn completes.
+   * Soft: runs OUTSIDE the thread lock (non-blocking to user messages).
+   * Hard/emergency: runs INSIDE the thread lock (memory state invariants).
    */
   private async handleContextPressure(thread: any, agentThreadId: string, agent: AgentAdapter, memoryRoot: string, pressure: PressureLevel) {
     if (pressure === "none") return;
-
-    console.log(`[roundhouse] context pressure: ${pressure} for thread=${thread.id} agentThread=${agentThreadId}`);
 
     if (pressure === "soft") {
       // Soft: prompt agent to save facts, no compact
       // Cooldown is checked inside flushMemoryThenCompact (returns null if skipped)
       try {
-        await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, "soft", this.config.memory);
+        const result = await flushMemoryThenCompact(agentThreadId, agent, memoryRoot, "soft", this.config.memory);
+        // result is null if cooldown skipped OR if soft flush ran (soft always returns null)
+        // Log only — don't message user for soft flush (it's background housekeeping)
       } catch (err) {
         console.error(`[roundhouse] soft flush error:`, (err as Error).message);
       }
