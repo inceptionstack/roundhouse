@@ -542,17 +542,18 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         }
       }
 
-      // Fall back to configured default from settings.json
-      if (!modelInfo) {
-        try {
-          const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
-          const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-          if (settings.defaultProvider && settings.defaultModel) {
-            modelInfo = `${settings.defaultProvider}/${settings.defaultModel}`;
-          }
-        } catch (err) {
-          console.warn(`[pi-agent] could not read settings.json for model info:`, (err as Error).message);
+      // Read configured model from settings.json (used for fallback + configuredModel field)
+      let configuredModel = "";
+      try {
+        const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
+        const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+        if (settings.defaultProvider && settings.defaultModel) {
+          configuredModel = `${settings.defaultProvider}/${settings.defaultModel}`;
         }
+      } catch {}
+
+      if (!modelInfo && configuredModel) {
+        modelInfo = configuredModel;
       }
 
       // Read agent version
@@ -565,6 +566,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       return {
         version,
         model: modelInfo ?? "unknown",
+        configuredModel: configuredModel || modelInfo || "unknown",
         activeSessions: sessions.size,
         cwd,
         contextTokens: contextUsage?.tokens ?? null,

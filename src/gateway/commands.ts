@@ -211,7 +211,17 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
     `🤖 Agent: ${agentLabel}`,
   ];
 
-  if (info.model) lines.push(`🧠 Model: \`${info.model}\``);
+  if (info.model && info.model !== "unknown") {
+    const configuredModel = info.configuredModel as string | undefined;
+    if (configuredModel && configuredModel !== info.model) {
+      lines.push(`🧠 Model: \`${configuredModel}\` (configured)`);
+      lines.push(`   ↳ session using: \`${info.model}\` (until /new)`);
+    } else {
+      lines.push(`🧠 Model: \`${info.model}\``);
+    }
+  } else if (info.configuredModel) {
+    lines.push(`🧠 Model: \`${info.configuredModel}\``);
+  }
   if (info.activeSessions !== undefined) lines.push(`💬 Active sessions: ${info.activeSessions}`);
 
   lines.push(
