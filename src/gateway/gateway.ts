@@ -364,6 +364,9 @@ export class Gateway {
 
     // Send startup notification (after cron init so we can include job counts)
     await this.notifyStartup(platforms);
+
+    // Fire boot turn — agent says hello (seeds session so it's never empty)
+    await this.fireBootTurn(verboseThreads, threadLocks, abortControllers);
   }
 
   /**
@@ -779,6 +782,41 @@ export class Gateway {
 
       const fullText = whatsNew ? `${perChatText}\n\n${whatsNew}` : perChatText;
       await this.transport.notify([chatId], fullText);
+    }
+  }
+
+  /**
+   * Fire a boot turn — send a prompt to the agent so it greets in-character.
+   * Seeds the session on startup so context is never empty.
+   */
+  private async fireBootTurn(
+    verboseThreads: Set<string>,
+    threadLocks: Map<string, Promise<void>>,
+    abortControllers: Map<string, AbortController>,
+  ) {
+    const chatIds = this.config.chat.notifyChatIds;
+    if (!chatIds?.length) return;
+
+    // Only fire for the primary (first) chat
+    const primaryChatId = chatIds[0];
+    const threadId = `telegram:${primaryChatId}`;
+    const agentThreadId = "main";
+
+    // Create a synthetic thread that posts via the transport
+    const syntheticThread = {
+      id: threadId,
+      post: async (text: string) => {
+        await this.transport.notify([primaryChatId], text);
+      },
+      startTyping: async () => {},
+    };
+
+    const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
+
+    try {
+      await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers);
+    } catch (err) {
+      console.error("[roundhouse] boot turn failed:", (err as Error).message);
     }
   }
 
