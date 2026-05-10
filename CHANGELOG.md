@@ -2,6 +2,15 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.19] — 2026-05-10
+- Sub-agent orchestrator: spawn background Pi agents for review/research/scout/implementation
+- CLI: `roundhouse subagent spawn/status/list/abort`
+- Telegram notifications on sub-agent completion (✅/⏰/❌)
+- Security: UUID-only run IDs, path traversal guard, SIGKILL escalation
+- Boot turn: agent greets in-character on startup
+- /status shows configured model after /model switch
+- TUI: fresh session support on new deploys
+
 ## [0.5.14] — 2026-05-10
 
 ### Added
