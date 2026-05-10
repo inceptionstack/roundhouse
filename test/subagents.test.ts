@@ -33,6 +33,7 @@ describe("subagents", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await rm(rootDir, { recursive: true, force: true });
   });
 
@@ -409,6 +410,127 @@ describe("subagents", () => {
     })).rejects.toThrow("/proc unavailable");
 
     expect(signalProcess).toHaveBeenCalledWith(7878, "SIGTERM");
+  });
+
+  it("escalates to SIGKILL when process survives SIGTERM", async () => {
+    const runId = "89898989-8989-8989-8989-898989898989";
+    const signalProcess = vi.fn();
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "implementation",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "70", parentThreadId: "telegram:70:main" },
+      status: "running",
+      pid: 3131,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "1212",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      isProcessAlive: vi.fn(async () => true),
+      signalProcess,
+    });
+
+    // Directly test escalation (the setTimeout path is an implementation detail)
+    await (orchestrator as any).terminationHandler.escalateTermination(runId, 3131, "1212");
+
+    expect(signalProcess).toHaveBeenCalledWith(3131, "SIGKILL");
+  });
+
+  it("honors persisted requestedOutcome when a different process handles child exit finalization", async () => {
+    const runId = "90909090-9090-9090-9090-909090909090";
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "review",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "80", parentThreadId: "telegram:80:main" },
+      status: "running",
+      requestedOutcome: "aborted",
+      pid: 4141,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "3434",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({ dataRoot: rootDir });
+
+    await (orchestrator as any).handleChildExit(runId, 0);
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("failed");
+    expect(status?.exitCode).toBe(0);
+  });
+
+  it("coalesces concurrent finalization for the same run into one notification", async () => {
+    const runId = "91919191-9191-9191-9191-919191919191";
+    const completionCb = vi.fn();
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "research",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "90", parentThreadId: "telegram:90:main" },
+      status: "running",
+      pid: 5151,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "5656",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({ dataRoot: rootDir });
+    orchestrator.onCompletion(completionCb);
+
+    await Promise.all([
+      (orchestrator as any).finalizeRun(runId, "failed", {}),
+      (orchestrator as any).finalizeRun(runId, "failed", {}),
+    ]);
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("failed");
+    expect(completionCb).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips SIGKILL escalation when the running status no longer matches the scheduled pid/ticks", async () => {
+    const runId = "92929292-9292-9292-9292-929292929292";
+    const signalProcess = vi.fn();
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "implementation",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "100", parentThreadId: "telegram:100:main" },
+      status: "running",
+      pid: 6161,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "7878",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      isProcessAlive: vi.fn(async () => true),
+      signalProcess,
+    });
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "implementation",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "100", parentThreadId: "telegram:100:main" },
+      status: "running",
+      pid: 6262,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:15:00.000Z",
+      spawnClockTicks: "7979",
+    });
+
+    await (orchestrator as any).terminationHandler.escalateTermination(runId, 6161, "7878");
+
+    expect(signalProcess).not.toHaveBeenCalled();
   });
 
   it("finalizes cleanly when child already exited before launch completes", async () => {

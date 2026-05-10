@@ -6,15 +6,12 @@ import { join } from "node:path";
 import { buildBrief } from "./brief";
 import { isProcessAlive as defaultIsProcessAlive } from "./pid";
 import { ProcessLauncher, type ProcessLauncherOptions } from "./process-launcher";
+import { RunFinalizer } from "./run-finalizer";
 import { RunStore } from "./run-store";
+import { TerminationHandler } from "./termination-handler";
 import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
-
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
-
 type TerminalStatus = Exclude<RunStatus["status"], "running">;
-type RequestedOutcome = NonNullable<RunStatus["requestedOutcome"]>;
-type CompletionListener = (status: RunStatus) => Promise<void> | void;
-const TERMINATE_GRACE_MS = 10_000;
 
 export interface OrchestratorOptions extends ProcessLauncherOptions {
   dataRoot?: string;
@@ -27,10 +24,10 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
   private readonly launcher: ProcessLauncher;
   private readonly isProcessAlive: (pid: number, expectedTicks: string) => Promise<boolean>;
   private readonly now: () => Date;
+  private readonly finalizer: RunFinalizer;
+  private readonly terminationHandler: TerminationHandler;
   private readonly children = new Map<string, { pid: number }>();
-  private readonly completionListeners = new Set<CompletionListener>();
   private readonly statusReady = new Map<string, Promise<void>>();
-  private readonly finalizingRuns = new Set<string>();
 
   constructor(options: OrchestratorOptions = {}) {
     const dataRoot = options.dataRoot ?? join(homedir(), ".roundhouse");
@@ -38,16 +35,16 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     this.launcher = new ProcessLauncher(options);
     this.isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
     this.now = options.now ?? (() => new Date());
+    this.finalizer = new RunFinalizer({ store: this.store, now: this.now });
+    this.terminationHandler = new TerminationHandler({
+      store: this.store,
+      isProcessAlive: this.isProcessAlive,
+      signalProcess: this.launcher.signalProcess,
+      finalizeRun: (runId, status, extra) => this.finalizeRun(runId, status, extra),
+    });
   }
-
-  onCompletion(listener: CompletionListener): () => void {
-    this.completionListeners.add(listener);
-    return () => { this.completionListeners.delete(listener); };
-  }
-
-  isRunManagedInProcess(runId: string): boolean {
-    return this.children.has(runId);
-  }
+  onCompletion(listener: (status: RunStatus) => Promise<void> | void): () => void { return this.finalizer.onCompletion(listener); }
+  isRunManagedInProcess(runId: string): boolean { return this.children.has(runId); }
 
   async spawn(spec: SpawnSpec): Promise<string> {
     await assertDirectoryExists(spec.cwd);
@@ -102,6 +99,8 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     } catch (err) {
       this.children.delete(runId);
       if (typeof launchedPid === "number") {
+        // Defense in depth: the launcher handles /proc/bootstrap failures, while the orchestrator
+        // still owns cleanup for later failures such as status.json persistence after launch.
         try {
           this.launcher.signalProcess(launchedPid, "SIGTERM");
         } catch {}
@@ -123,13 +122,8 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     return this.refreshRunningStatus(current);
   }
 
-  async list(): Promise<RunStatus[]> {
-    return this.listRuns(true);
-  }
-
-  async listRaw(): Promise<RunStatus[]> {
-    return this.listRuns(false);
-  }
+  async list(): Promise<RunStatus[]> { return this.listRuns(true); }
+  async listRaw(): Promise<RunStatus[]> { return this.listRuns(false); }
 
   private async listRuns(refresh: boolean): Promise<RunStatus[]> {
     const dirs = await this.store.listDirs();
@@ -139,14 +133,12 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     return statuses.filter((s): s is RunStatus => s !== null);
   }
 
-  async abort(runId: string): Promise<void> {
-    await this.terminateRun(runId, "aborted");
-  }
+  async abort(runId: string): Promise<void> { await this.terminationHandler.terminateRun(runId, "aborted"); }
 
   async enforceTimeout(runId: string): Promise<RunStatus | null> {
     const current = await this.store.read(runId);
     if (!current || current.status !== "running") return current;
-    return this.terminateRun(runId, "timeout");
+    return this.terminationHandler.terminateRun(runId, "timeout");
   }
 
   async recoverRun(runId: string): Promise<RunStatus | null> {
@@ -155,36 +147,11 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     return this.refreshRunningStatus(current, true);
   }
 
-  // --- State machine ---
-
-  private async terminateRun(runId: string, outcome: RequestedOutcome): Promise<RunStatus | null> {
-    const current = await this.store.read(runId);
-    if (!current || current.status !== "running") return current;
-    const updated = await this.persistRequestedOutcome(current, outcome);
-
-    const alive = await this.isProcessAlive(updated.pid, updated.spawnClockTicks);
-    if (!alive) {
-      return this.finalizeRun(runId, this.terminalStatusFor(updated), {});
-    }
-
-    try {
-      this.launcher.signalProcess(updated.pid, "SIGTERM");
-    } catch {
-      return this.finalizeRun(runId, this.terminalStatusFor(updated), {});
-    }
-
-    setTimeout(() => {
-      void this.escalateTermination(runId, updated.pid, updated.spawnClockTicks);
-    }, TERMINATE_GRACE_MS);
-
-    return updated;
-  }
-
   private async refreshRunningStatus(current: RunStatus, notify = false): Promise<RunStatus> {
     const alive = await this.isProcessAlive(current.pid, current.spawnClockTicks);
     if (alive) return current;
 
-    const outcome = this.terminalStatusFor(current);
+    const outcome = this.terminationHandler.terminalStatusFor(current);
     return this.finalizeRun(current.runId, outcome, { notify });
   }
 
@@ -201,81 +168,18 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     if (!current || current.status !== "running") return;
 
     const outcome = current.requestedOutcome
-      ? this.terminalStatusFor(current)
+      ? this.terminationHandler.terminalStatusFor(current)
       : (exitCode === 0 ? "complete" : "failed");
 
     await this.finalizeRun(runId, outcome, { exitCode: exitCode ?? undefined });
   }
 
-  private async finalizeRun(
-    runId: string,
-    status: TerminalStatus,
-    extra: { exitCode?: number; notify?: boolean },
-  ): Promise<RunStatus> {
-    const current = await this.store.read(runId);
-    if (!current) throw new Error(`Unknown sub-agent run: ${runId}`);
-    if (current.status !== "running") return current;
-    if (this.finalizingRuns.has(runId)) return current;
-
-    this.finalizingRuns.add(runId);
-    try {
-      const latest = await this.store.read(runId);
-      if (!latest) throw new Error(`Unknown sub-agent run: ${runId}`);
-      if (latest.status !== "running") return latest;
-
-      const updated: RunStatus = {
-        ...latest,
-        status,
-        completedAt: this.now().toISOString(),
-        exitCode: extra.exitCode ?? latest.exitCode,
-      };
-
-      await this.store.write(updated);
-      if (extra.notify !== false) {
-        await this.notifyCompletion(updated);
-      }
-      return updated;
-    } finally {
-      this.finalizingRuns.delete(runId);
-    }
-  }
-
-  private async notifyCompletion(status: RunStatus): Promise<void> {
-    await Promise.allSettled(
-      [...this.completionListeners].map((l) => Promise.resolve(l(status))),
-    );
-  }
-
-  private terminalStatusFor(status: RunStatus): TerminalStatus {
-    if (status.requestedOutcome === "timeout") return "timeout";
-    if (status.requestedOutcome === "aborted") return "failed";
-    return "failed";
-  }
-
-  private async persistRequestedOutcome(current: RunStatus, requestedOutcome: RequestedOutcome): Promise<RunStatus> {
-    if (current.requestedOutcome === requestedOutcome) return current;
-    const updated: RunStatus = { ...current, requestedOutcome };
-    await this.store.write(updated);
-    return updated;
-  }
-
-  private async escalateTermination(runId: string, pid: number, spawnClockTicks: string): Promise<void> {
-    const current = await this.store.read(runId);
-    if (!current || current.status !== "running") return;
-    if (current.pid !== pid || current.spawnClockTicks !== spawnClockTicks) return;
-
-    const alive = await this.isProcessAlive(pid, spawnClockTicks);
-    if (!alive) return;
-
-    try {
-      this.launcher.signalProcess(pid, "SIGKILL");
-    } catch {}
+  private async finalizeRun(runId: string, status: TerminalStatus, extra: { exitCode?: number; notify?: boolean }): Promise<RunStatus> {
+    return this.finalizer.finalizeRun(runId, status, extra);
   }
 }
 
 async function assertDirectoryExists(path: string): Promise<void> {
   const info = await stat(path);
-  if (!info.isDirectory()) {
-    throw new Error(`Sub-agent cwd is not a directory: ${path}`);
-  }
+  if (!info.isDirectory()) throw new Error(`Sub-agent cwd is not a directory: ${path}`);
 }
