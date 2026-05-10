@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, readFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -168,9 +168,28 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
 
     const outcome = current.requestedOutcome
       ? this.terminationHandler.terminalStatusFor(current)
-      : (exitCode === 0 ? "complete" : "failed");
+      : await this.inferOutcome(runId, exitCode);
 
     await this.finalizer.finalizeRun(runId, outcome, { exitCode: exitCode ?? undefined });
+  }
+  /**
+   * Determine terminal status for a child exit.
+   * If exit code is non-zero but the agent produced meaningful stdout output,
+   * treat as "complete" — the work succeeded but the process had a teardown error
+   * (e.g. pi-hard-no stale context exception on session close).
+   */
+  private async inferOutcome(runId: string, exitCode: number | null): Promise<"complete" | "failed"> {
+    if (exitCode === 0) return "complete";
+    if (exitCode === null) return "failed"; // signal-killed, not a teardown error
+    try {
+      const stdoutPath = join(this.store.getRunDir(runId), "stdout.log");
+      const content = await readFile(stdoutPath, "utf-8");
+      // If stdout has substantial content (>50 chars), the agent did its job
+      if (content.trim().length > 50) return "complete";
+    } catch {
+      // No stdout file or can't read — fall through to failed
+    }
+    return "failed";
   }
 }
 
