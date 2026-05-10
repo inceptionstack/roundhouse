@@ -291,7 +291,7 @@ describe("subagents", () => {
       status: "running",
       pid: 1234,
       startedAt: "2026-05-10T12:00:00.000Z",
-      deadlineAt: "2026-05-10T12:15:00.000Z",
+      deadlineAt: "2099-01-01T00:00:00.000Z",
       spawnClockTicks: "333",
     });
 
@@ -309,7 +309,7 @@ describe("subagents", () => {
     await new Promise((r) => setTimeout(r, 150));
     watcher.stop();
 
-    // onCompletion listener should have fired (from recoverRun)
+    // onCompletion listener should have fired (from recoverRun — process dead, deadline not yet)
     expect(completionCb).toHaveBeenCalledTimes(1);
     expect(completionCb.mock.calls[0][0].status).toBe("failed");
     expect(completionCb.mock.calls[0][0].runId).toBe(runId);
@@ -325,6 +325,31 @@ describe("subagents", () => {
     watcher.stop();
     expect(completionCb).not.toHaveBeenCalled();
     expect(watcherNotify).not.toHaveBeenCalled();
+  });
+
+  it("enforceTimeout finalizes dead process as timeout not failed", async () => {
+    const runId = "run-timeout";
+
+    await writeStatusFixture(rootDir, runId, {
+      runId,
+      role: "implementation",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "60", parentThreadId: "telegram:60:main" },
+      status: "running",
+      pid: 2222,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      deadlineAt: "2026-05-10T12:01:00.000Z", // already past
+      spawnClockTicks: "444",
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      isProcessAlive: async () => false,
+    });
+
+    const result = await orchestrator.enforceTimeout(runId);
+    expect(result?.status).toBe("timeout");
+    expect(result?.completedAt).toBeTruthy();
   });
 });
 

@@ -186,7 +186,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
 
     const alive = await this.isProcessAlive(current.pid, current.spawnClockTicks);
     if (!alive) {
-      return this.finalizeRun(runId, "failed", {});
+      return this.finalizeRun(runId, outcome, {});
     }
 
     this.pendingTerminalStatus.set(runId, outcome);
