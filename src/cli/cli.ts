@@ -322,20 +322,20 @@ async function cmdTui() {
       })
       .sort((a, b) => b.mtime - a.mtime);
   } catch {
-    console.error(`No session directory found at ${threadPath}.`);
-    process.exit(1);
+    // No session directory — will start fresh below
   }
 
-  if (candidates.length === 0) {
-    console.error(`No session files found at ${threadPath}.`);
-    process.exit(1);
+  let piArgs: string[];
+  if (candidates.length > 0) {
+    const selected = candidates[0];
+    console.log(`\nResuming: ${selected.sessionFile}\n`);
+    piArgs = ["--resume", selected.sessionFile];
+  } else {
+    console.log(`\nNo existing sessions for thread "${threadId}". Starting fresh.\n`);
+    piArgs = ["--session-dir", threadPath];
   }
 
-  const selected = candidates[0];
-
-  console.log(`\nOpening: ${selected.sessionFile}\n`);
-
-  const child = spawn("pi", ["--resume", selected.sessionFile], { stdio: "inherit" });
+  const child = spawn("pi", piArgs, { stdio: "inherit" });
   child.on("error", (err) => {
     console.error((err as any).code === "ENOENT" ? "'pi' not found in PATH." : `Failed: ${err.message}`);
     process.exit(1);
