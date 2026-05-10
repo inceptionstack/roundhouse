@@ -13,14 +13,14 @@ export interface ProcessLauncherOptions {
   spawnProcess?: typeof spawn;
   checkPiAvailable?: () => void;
   readSpawnClockTicks?: (pid: number) => Promise<string>;
-  signalProcess?: (pid: number, signal: "SIGTERM") => void;
+  signalProcess?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
 }
 
 export class ProcessLauncher {
   private readonly spawnProcess: typeof spawn;
   private readonly checkPiAvailable: () => void;
   private readonly readSpawnClockTicksFn: (pid: number) => Promise<string>;
-  readonly signalProcess: (pid: number, signal: "SIGTERM") => void;
+  readonly signalProcess: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
 
   constructor(options: ProcessLauncherOptions = {}) {
     this.spawnProcess = options.spawnProcess ?? spawn;
@@ -33,16 +33,18 @@ export class ProcessLauncher {
     this.checkPiAvailable();
   }
 
-  async launch(runDir: string, brief: string, cwd: string): Promise<LaunchResult> {
+  async launch(runDir: string, cwd: string, onChildCreated?: (child: ChildProcess) => void): Promise<LaunchResult> {
     const stdoutHandle = await open(join(runDir, "stdout.log"), "a");
     const stderrHandle = await open(join(runDir, "stderr.log"), "a");
+    let child: ChildProcess | undefined;
 
     try {
-      const child = this.spawnProcess("pi", ["--session-dir", runDir, brief], {
+      child = this.spawnProcess("pi", ["--session-dir", runDir, "--brief-file", join(runDir, "brief.md")], {
         cwd,
         detached: true,
         stdio: ["ignore", stdoutHandle.fd, stderrHandle.fd],
       });
+      onChildCreated?.(child);
 
       await waitForChildSpawn(child);
 
@@ -54,6 +56,13 @@ export class ProcessLauncher {
       child.unref();
 
       return { child, pid: child.pid, spawnClockTicks };
+    } catch (err) {
+      if (typeof child?.pid === "number") {
+        try {
+          this.signalProcess(child.pid, "SIGTERM");
+        } catch {}
+      }
+      throw err;
     } finally {
       await Promise.allSettled([stdoutHandle.close(), stderrHandle.close()]);
     }
@@ -76,7 +85,7 @@ function defaultPiAvailabilityCheck(): void {
 
 let piAvailableCache: boolean | undefined;
 
-function defaultSignalProcess(pid: number, signal: "SIGTERM"): void {
+function defaultSignalProcess(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
   process.kill(pid, signal);
 }
 

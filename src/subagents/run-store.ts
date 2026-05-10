@@ -3,6 +3,15 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/pro
 import { join } from "node:path";
 import type { RunStatus } from "./types";
 
+const RUN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function validateRunId(runId: string): string {
+  if (!RUN_ID_RE.test(runId)) {
+    throw new Error(`Invalid sub-agent run ID: ${runId}`);
+  }
+  return runId;
+}
+
 export class RunStore {
   private readonly subagentsRoot: string;
 
@@ -11,7 +20,7 @@ export class RunStore {
   }
 
   getRunDir(runId: string): string {
-    return join(this.subagentsRoot, runId);
+    return join(this.subagentsRoot, validateRunId(runId));
   }
 
   async read(runId: string): Promise<RunStatus | null> {
@@ -33,7 +42,9 @@ export class RunStore {
   async listDirs(): Promise<string[]> {
     try {
       const entries = await readdir(this.subagentsRoot, { withFileTypes: true });
-      return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      return entries
+        .filter((e) => e.isDirectory() && RUN_ID_RE.test(e.name))
+        .map((e) => e.name);
     } catch (err: any) {
       if (err?.code === "ENOENT") return [];
       throw err;

@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { SubAgentOrchestratorImpl } from "../subagents/orchestrator";
+import { validateRunId } from "../subagents/run-store";
 import type { SpawnSpec, SubAgentRole, RoutingInfo } from "../subagents/types";
 
 const ROUNDHOUSE_DIR = join(homedir(), ".roundhouse");
@@ -97,6 +98,7 @@ export async function handleSubagentCommand(args: string[]): Promise<void> {
         console.error("Usage: roundhouse subagent status <runId>");
         process.exit(1);
       }
+      validateCliRunId(runId);
       const status = await orchestrator.status(runId);
       if (!status) {
         console.error(`Run not found: ${runId}`);
@@ -127,8 +129,23 @@ export async function handleSubagentCommand(args: string[]): Promise<void> {
         console.error("Usage: roundhouse subagent abort <runId>");
         process.exit(1);
       }
+      validateCliRunId(runId);
+      const current = await orchestrator.status(runId);
+      if (!current) {
+        console.error(`Run not found: ${runId}`);
+        process.exit(1);
+      }
+      if (current.status !== "running") {
+        console.log(`Run already ${current.status}: ${runId.slice(0, 8)}`);
+        break;
+      }
       await orchestrator.abort(runId);
-      console.log(`Aborted: ${runId.slice(0, 8)}`);
+      const status = await orchestrator.status(runId);
+      if (status?.status === "running") {
+        console.log(`Abort requested: ${runId.slice(0, 8)}`);
+      } else {
+        console.log(`Aborted: ${runId.slice(0, 8)}`);
+      }
       break;
     }
 
@@ -142,4 +159,13 @@ function getFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx === -1 || idx + 1 >= args.length) return undefined;
   return args[idx + 1];
+}
+
+function validateCliRunId(runId: string): void {
+  try {
+    validateRunId(runId);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 }

@@ -111,6 +111,8 @@ describe("subagents", () => {
     expect(spawnMock.mock.calls[0]?.[0]).toBe("pi");
     expect(spawnMock.mock.calls[0]?.[1]?.[0]).toBe("--session-dir");
     expect(spawnMock.mock.calls[0]?.[1]?.[1]).toBe(runDir);
+    expect(spawnMock.mock.calls[0]?.[1]?.[2]).toBe("--brief-file");
+    expect(spawnMock.mock.calls[0]?.[1]?.[3]).toBe(join(runDir, "brief.md"));
     expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({
       cwd: rootDir,
       detached: true,
@@ -125,7 +127,7 @@ describe("subagents", () => {
   });
 
   it("refreshes stale running status entries to failed", async () => {
-    const runId = "run-refresh";
+    const runId = "11111111-1111-1111-1111-111111111111";
     await writeStatusFixture(rootDir, runId, {
       runId,
       role: "research",
@@ -154,7 +156,7 @@ describe("subagents", () => {
   });
 
   it("does not signal when abort sees a stale PID", async () => {
-    const runId = "run-abort";
+    const runId = "22222222-2222-2222-2222-222222222222";
     const signalProcess = vi.fn();
 
     await writeStatusFixture(rootDir, runId, {
@@ -247,7 +249,7 @@ describe("subagents", () => {
   });
 
   it("status() does not trigger completion notification for dead process", async () => {
-    const runId = "run-silent";
+    const runId = "33333333-3333-3333-3333-333333333333";
     const completionCb = vi.fn();
 
     await writeStatusFixture(rootDir, runId, {
@@ -280,7 +282,7 @@ describe("subagents", () => {
 
   it("watcher polls and notifies on dead out-of-process run", async () => {
     const { SubAgentWatcher } = await import("../src/subagents/watcher");
-    const runId = "run-watcher";
+    const runId = "44444444-4444-4444-4444-444444444444";
     const completionCb = vi.fn();
 
     await writeStatusFixture(rootDir, runId, {
@@ -328,7 +330,7 @@ describe("subagents", () => {
   });
 
   it("enforceTimeout finalizes dead process as timeout not failed", async () => {
-    const runId = "run-timeout";
+    const runId = "55555555-5555-5555-5555-555555555555";
 
     await writeStatusFixture(rootDir, runId, {
       runId,
@@ -351,11 +353,105 @@ describe("subagents", () => {
     expect(result?.status).toBe("timeout");
     expect(result?.completedAt).toBeTruthy();
   });
+
+  it("rejects non-UUID run IDs", async () => {
+    const orchestrator = new SubAgentOrchestratorImpl({ dataRoot: rootDir });
+
+    await expect(orchestrator.status("../escape")).rejects.toThrow("Invalid sub-agent run ID");
+  });
+
+  it("kills spawned child when status persistence fails after launch", async () => {
+    const child = createMockChild(7777);
+    const signalProcess = vi.fn();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => "1234",
+      signalProcess,
+    });
+    (orchestrator as any).store.write = vi.fn().mockRejectedValue(new Error("disk full"));
+
+    await expect(orchestrator.spawn({
+      role: "implementation",
+      task: "Persist status",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    })).rejects.toThrow("disk full");
+
+    expect(signalProcess).toHaveBeenCalledWith(7777, "SIGTERM");
+  });
+
+  it("kills spawned child when spawn clock tick lookup fails", async () => {
+    const child = createMockChild(7878);
+    const signalProcess = vi.fn();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => {
+        throw new Error("/proc unavailable");
+      },
+      signalProcess,
+    });
+
+    await expect(orchestrator.spawn({
+      role: "implementation",
+      task: "Read spawn ticks",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    })).rejects.toThrow("/proc unavailable");
+
+    expect(signalProcess).toHaveBeenCalledWith(7878, "SIGTERM");
+  });
+
+  it("finalizes cleanly when child already exited before launch completes", async () => {
+    const child = createMockChild(8888);
+    child.exitCode = 0;
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    });
+
+    const orchestrator = new SubAgentOrchestratorImpl({
+      dataRoot: rootDir,
+      readSpawnClockTicks: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return "5678";
+      },
+    });
+
+    const runId = await orchestrator.spawn({
+      role: "scout",
+      task: "Race exit",
+      cwd: rootDir,
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "telegram:1:main" },
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const status = await orchestrator.status(runId);
+    expect(status?.status).toBe("complete");
+    expect(status?.exitCode).toBe(0);
+  });
 });
 
-function createMockChild(pid: number): EventEmitter & { pid: number; unref: ReturnType<typeof vi.fn> } {
-  const child = new EventEmitter() as EventEmitter & { pid: number; unref: ReturnType<typeof vi.fn> };
+function createMockChild(
+  pid: number,
+): EventEmitter & { pid: number; exitCode: number | null; unref: ReturnType<typeof vi.fn> } {
+  const child = new EventEmitter() as EventEmitter & {
+    pid: number;
+    exitCode: number | null;
+    unref: ReturnType<typeof vi.fn>;
+  };
   child.pid = pid;
+  child.exitCode = null;
   child.unref = vi.fn();
   return child;
 }

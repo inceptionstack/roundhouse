@@ -27,6 +27,7 @@ export interface RunStatus {
   cwd: string;
   routing: RoutingInfo;
   status: "running" | "complete" | "failed" | "timeout";
+  requestedOutcome?: "aborted" | "timeout";
   pid: number;
   startedAt: string;
   deadlineAt?: string;
