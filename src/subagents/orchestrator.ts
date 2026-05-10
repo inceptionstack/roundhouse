@@ -9,9 +9,8 @@ import { ProcessLauncher, type ProcessLauncherOptions } from "./process-launcher
 import { RunFinalizer } from "./run-finalizer";
 import { RunStore } from "./run-store";
 import { TerminationHandler } from "./termination-handler";
-import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
+import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator, TerminalStatus } from "./types";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
-type TerminalStatus = Exclude<RunStatus["status"], "running">;
 
 export interface OrchestratorOptions extends ProcessLauncherOptions {
   dataRoot?: string;
@@ -40,7 +39,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
       store: this.store,
       isProcessAlive: this.isProcessAlive,
       signalProcess: this.launcher.signalProcess,
-      finalizeRun: (runId, status, extra) => this.finalizeRun(runId, status, extra),
+      finalizeRun: this.finalizer.finalizeRun.bind(this.finalizer),
     });
   }
   onCompletion(listener: (status: RunStatus) => Promise<void> | void): () => void { return this.finalizer.onCompletion(listener); }
@@ -152,7 +151,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     if (alive) return current;
 
     const outcome = this.terminationHandler.terminalStatusFor(current);
-    return this.finalizeRun(current.runId, outcome, { notify });
+    return this.finalizer.finalizeRun(current.runId, outcome, { notify });
   }
 
   private async handleChildExit(runId: string, exitCode: number | null): Promise<void> {
@@ -171,11 +170,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
       ? this.terminationHandler.terminalStatusFor(current)
       : (exitCode === 0 ? "complete" : "failed");
 
-    await this.finalizeRun(runId, outcome, { exitCode: exitCode ?? undefined });
-  }
-
-  private async finalizeRun(runId: string, status: TerminalStatus, extra: { exitCode?: number; notify?: boolean }): Promise<RunStatus> {
-    return this.finalizer.finalizeRun(runId, status, extra);
+    await this.finalizer.finalizeRun(runId, outcome, { exitCode: exitCode ?? undefined });
   }
 }
 

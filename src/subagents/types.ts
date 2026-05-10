@@ -1,5 +1,8 @@
 export type SubAgentRole = "review" | "research" | "scout" | "implementation";
 
+/** Terminal states for a sub-agent run (excludes "running") */
+export type TerminalStatus = Exclude<RunStatus["status"], "running">;
+
 export interface RoutingInfo {
   transport: "telegram";
   chatId: string;

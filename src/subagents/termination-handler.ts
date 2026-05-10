@@ -1,9 +1,8 @@
-import type { RunStatus } from "./types";
+import type { RunStatus, TerminalStatus } from "./types";
 import { RunStore } from "./run-store";
 
 const TERMINATE_GRACE_MS = 10_000;
 
-type TerminalStatus = Exclude<RunStatus["status"], "running">;
 type RequestedOutcome = NonNullable<RunStatus["requestedOutcome"]>;
 
 export interface TerminationHandlerOptions {
@@ -72,6 +71,8 @@ export class TerminationHandler {
 
   terminalStatusFor(status: RunStatus): TerminalStatus {
     if (status.requestedOutcome === "timeout") return "timeout";
+    // "aborted" maps to "failed" because there's no "aborted" terminal status in the
+    // RunStatus union — abort is an intent, "failed" is the observable outcome.
     if (status.requestedOutcome === "aborted") return "failed";
     return "failed";
   }

@@ -1,7 +1,6 @@
 import { RunStore } from "./run-store";
-import type { RunStatus } from "./types";
+import type { RunStatus, TerminalStatus } from "./types";
 
-type TerminalStatus = Exclude<RunStatus["status"], "running">;
 type CompletionListener = (status: RunStatus) => Promise<void> | void;
 
 export interface RunFinalizerOptions {

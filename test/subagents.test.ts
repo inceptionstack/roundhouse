@@ -485,8 +485,8 @@ describe("subagents", () => {
     orchestrator.onCompletion(completionCb);
 
     await Promise.all([
-      (orchestrator as any).finalizeRun(runId, "failed", {}),
-      (orchestrator as any).finalizeRun(runId, "failed", {}),
+      (orchestrator as any).finalizer.finalizeRun(runId, "failed", {}),
+      (orchestrator as any).finalizer.finalizeRun(runId, "failed", {}),
     ]);
 
     const status = await orchestrator.status(runId);
