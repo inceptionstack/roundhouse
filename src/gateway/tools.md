@@ -10,6 +10,8 @@ Do NOT create files directly in `~/` or pollute the home directory. Use subdirec
 - `~/.roundhouse/workspace/later.md` — ideas saved via `/later`
 - `~/.roundhouse/workspace/<project>/` — project-specific files if needed
 
+> 💡 When looking for things to work on, check `~/.roundhouse/workspace/later.md` for saved ideas and tasks.
+
 ## roundhouse cron add
 
 Schedule recurring or one-shot jobs. The user may ask you to "remind me", "check every X", "do Y later", or "schedule Z".
