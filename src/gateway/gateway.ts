@@ -32,6 +32,7 @@ import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { injectToolsSection } from "./tools-inject";
 import { injectPersonaSection, loadPersona } from "./persona-inject";
 import { checkVersionChange } from "./whats-new";
@@ -93,6 +94,9 @@ export class Gateway {
   private ipcServer: IpcServer | null = null;
   private subagentOrchestrator: SubAgentOrchestratorImpl | null = null;
   private subagentWatcher: SubAgentWatcher | null = null;
+  private verboseThreads = new Set<string>();
+  private threadLocks = new Map<string, Promise<void>>();
+  private abortControllers = new Map<string, AbortController>();
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -210,13 +214,13 @@ export class Gateway {
     }
 
     // Per-thread verbose toggle (shows tool_start messages)
-    const verboseThreads = new Set<string>();
+    const verboseThreads = this.verboseThreads;
 
     // Per-thread abort signal for /stop
-    const abortControllers = new Map<string, AbortController>();
+    const abortControllers = this.abortControllers;
 
     // Per-thread lock to serialize prompts (concurrent mode lets /stop through)
-    const threadLocks = new Map<string, Promise<void>>();
+    const threadLocks = this.threadLocks;
 
     // ── Unified handler ────────────────────────────
     const handle = async (thread: any, message: any) => {
@@ -843,7 +847,7 @@ export class Gateway {
     console.log("[roundhouse] stopped");
   }
 
-  /** Handle sub-agent completion — post result to originating thread */
+  /** Handle sub-agent completion — notify user AND inject result into agent session */
   private async handleSubagentCompletion(status: RunStatus, routing: RoutingInfo): Promise<void> {
     const emoji = status.status === "complete" ? "✅" : status.status === "timeout" ? "⏰" : "❌";
     const duration = status.completedAt && status.startedAt
@@ -851,13 +855,33 @@ export class Gateway {
       : 0;
     const summary = `${emoji} <b>Sub-agent ${status.status}</b> (${status.role})\n⏱ ${duration}s | run: <code>${status.runId.slice(0, 8)}</code>`;
 
+    const chatId = Number(routing.chatId);
+
+    // 1. Notify user via Telegram
     try {
-      const chatId = Number(routing.chatId);
       if (chatId) {
         await this.transport.notify([chatId], summary, { parseMode: "HTML" });
       }
     } catch (err) {
       console.error("[roundhouse] sub-agent completion notification failed:", err);
+    }
+
+    // 2. Inject result into agent session as synthetic turn
+    try {
+      if (!chatId) return;
+      const runDir = join(process.env.HOME || "/home/ec2-user", ".roundhouse", "subagents", status.runId);
+      let stdout = "";
+      try { stdout = await readFile(join(runDir, "stdout.log"), "utf-8"); } catch {}
+
+      const resultText = stdout.trim()
+        ? `[Sub-agent ${status.role} completed (${status.status})]\n\nResult:\n${stdout.trim().slice(0, 3000)}`
+        : `[Sub-agent ${status.role} ${status.status} — no output]`;
+
+      const syntheticThread = this.transport.createThread(chatId);
+      const agentThreadId = "main";
+      await this.handleAgentTurn(syntheticThread, agentThreadId, resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers);
+    } catch (err) {
+      console.error("[roundhouse] sub-agent result injection failed:", err);
     }
   }
 }
