@@ -241,7 +241,7 @@ export class Gateway {
       const trimmed = userText.trim();
 
       // Commands using standard CommandContext
-      const COMMAND_REGISTRY: Record<string, (ctx: any) => Promise<void>> = {
+      const COMMAND_REGISTRY: Record<string, (ctx: CommandContext) => Promise<void>> = {
         "/new": handleNew,
         "/restart": handleRestart,
         "/update": handleUpdate,
