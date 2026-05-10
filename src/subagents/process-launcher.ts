@@ -39,7 +39,7 @@ export class ProcessLauncher {
     let child: ChildProcess | undefined;
 
     try {
-      child = this.spawnProcess("pi", ["--session-dir", runDir, "-p", `@${join(runDir, "brief.md")}`], {
+      child = this.spawnProcess("pi", ["--no-extensions", "--no-skills", "--session-dir", runDir, "-p", `@${join(runDir, "brief.md")}`], {
         cwd,
         detached: true,
         stdio: ["ignore", stdoutHandle.fd, stderrHandle.fd],
