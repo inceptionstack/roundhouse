@@ -57,6 +57,14 @@ export interface TransportAdapter {
   notify(chatIds: number[], text: string, options?: { parseMode?: string }): Promise<void>;
 
   /**
+   * Create a thread object for a given chat ID.
+   * Used by gateway for synthetic turns (boot turn, cron notifications)
+   * where no incoming message triggered the interaction.
+   * Returns a thread compatible with the streaming system.
+   */
+  createThread(chatId: number): ChatThread;
+
+  /**
    * Check if a pairing flow is pending.
    * Gateway uses this to decide whether to attempt pairing on incoming messages.
    */

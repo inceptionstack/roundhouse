@@ -50,6 +50,33 @@ export class TelegramAdapter implements TransportAdapter {
     return isTelegramThread(thread as any);
   }
 
+  createThread(chatId: number): ChatThread {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const threadId = `telegram:${chatId}`;
+    const telegramFetch = async (method: string, payload: Record<string, unknown>) => {
+      if (!token) return null;
+      const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, ...payload }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) return null;
+      const json = await res.json() as { result?: unknown };
+      return json.result ?? null;
+    };
+    const thread: ChatThread = {
+      id: threadId,
+      adapter: { telegramFetch },
+      post: async (content: string | { markdown: string }) => {
+        const text = typeof content === "string" ? content : content.markdown;
+        await postTelegramHtml(thread as any, text);
+      },
+      startTyping: async () => {},
+    };
+    return thread;
+  }
+
   async notify(chatIds: number[], text: string, options?: { parseMode?: string }): Promise<void> {
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.warn("[roundhouse] TELEGRAM_BOT_TOKEN not set — skipping notification");
