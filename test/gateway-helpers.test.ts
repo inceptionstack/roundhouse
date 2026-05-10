@@ -61,6 +61,24 @@ describe("gateway/helpers", () => {
       expect(resolveAgentThreadId(thread, message)).toBe("group:-456");
     });
 
+    it("routes forum topic to separate session", () => {
+      const thread = { id: "telegram:-100123:42" };
+      const message = { chat: { type: "supergroup", id: -100123 } };
+      expect(resolveAgentThreadId(thread, message)).toBe("group:-100123:topic:42");
+    });
+
+    it("routes forum topic via message_thread_id", () => {
+      const thread = { id: "telegram:-100123" };
+      const message = { chat: { type: "supergroup", id: -100123 }, message_thread_id: 99 };
+      expect(resolveAgentThreadId(thread, message)).toBe("group:-100123:topic:99");
+    });
+
+    it("group without topic stays flat", () => {
+      const thread = { id: "telegram:-100123" };
+      const message = { chat: { type: "supergroup", id: -100123 } };
+      expect(resolveAgentThreadId(thread, message)).toBe("group:-100123");
+    });
+
     it("routes telegram positive IDs to main", () => {
       const thread = { id: "telegram:789" };
       const message = {};

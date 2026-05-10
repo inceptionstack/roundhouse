@@ -51,19 +51,38 @@ function getChatId(thread: any, message: any): string {
 
 /**
  * Resolve the agent-facing thread ID from a chat message.
- * Private/DM → "main", group → "group:<chatId>"
+ * Private/DM → "main", group → "group:<chatId>", forum topic → "group:<chatId>:topic:<topicId>"
  */
 export function resolveAgentThreadId(thread: any, message: any): string {
   const chatType = String(message?.chat?.type ?? thread?.chat?.type ?? thread?.type ?? "").toLowerCase();
+  
+  // Extract topic ID if present (forum threads)
+  const topicId = message?.message_thread_id ?? thread?.messageThreadId ?? extractTopicFromThreadId(thread?.id);
+  
   if (["private", "dm", "direct", "im"].includes(chatType)) return "main";
-  if (["group", "supergroup", "channel"].includes(chatType)) return `group:${getChatId(thread, message)}`;
+  if (["group", "supergroup", "channel"].includes(chatType)) {
+    const base = `group:${getChatId(thread, message)}`;
+    return topicId ? `${base}:topic:${topicId}` : base;
+  }
 
   const telegramChatId = telegramChatIdFromThreadId(thread?.id);
   if (telegramChatId !== null) {
-    return telegramChatId < 0 ? `group:${telegramChatId}` : "main";
+    const base = telegramChatId < 0 ? `group:${telegramChatId}` : "main";
+    return (topicId && telegramChatId < 0) ? `${base}:topic:${topicId}` : base;
   }
 
   return String(thread?.id ?? "main");
+}
+
+/** Extract message_thread_id from thread ID string like "telegram:chatId:topicId" */
+function extractTopicFromThreadId(threadId: string | undefined): number | undefined {
+  if (!threadId) return undefined;
+  const parts = threadId.split(":");
+  if (parts.length === 3 && parts[0] === "telegram") {
+    const parsed = parseInt(parts[2], 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 // ── System Resources ─────────────────────────────────
