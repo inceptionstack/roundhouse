@@ -213,11 +213,11 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
 
   if (info.model && info.model !== "unknown") {
     const configuredModel = info.configuredModel as string | undefined;
-    if (configuredModel && configuredModel !== info.model) {
+    if (configuredModel && configuredModel !== info.model && info.hasActiveSession) {
       lines.push(`🧠 Model: \`${configuredModel}\` (configured)`);
       lines.push(`   ↳ session using: \`${info.model}\` (until /new)`);
     } else {
-      lines.push(`🧠 Model: \`${info.model}\``);
+      lines.push(`🧠 Model: \`${configuredModel || info.model}\``);
     }
   } else if (info.configuredModel) {
     lines.push(`🧠 Model: \`${info.configuredModel}\``);
