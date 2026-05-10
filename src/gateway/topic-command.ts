@@ -10,8 +10,9 @@
  *   /topic main      — return to default session
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { ROUNDHOUSE_DIR } from "../config";
 
 const TOPICS_FILE = join(ROUNDHOUSE_DIR, "active-topics.json");
@@ -28,7 +29,9 @@ try {
 function persistTopics(): void {
   try {
     mkdirSync(ROUNDHOUSE_DIR, { recursive: true });
-    writeFileSync(TOPICS_FILE, JSON.stringify(Object.fromEntries(activeTopics)));
+    const tmp = TOPICS_FILE + "." + randomBytes(4).toString("hex");
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(activeTopics)));
+    renameSync(tmp, TOPICS_FILE);
   } catch (e) { console.error("[roundhouse] failed to persist topics:", e); }
 }
 
@@ -38,12 +41,12 @@ export function getActiveTopic(chatId: string): string | undefined {
   return (topic && topic !== "main") ? topic : undefined;
 }
 
-/** Apply topic override to a resolved agent thread ID. */
+/** Apply topic override to a resolved agent thread ID. Scoped per chat. */
 export function applyTopicOverride(agentThreadId: string, thread: { id?: string }): string {
   if (agentThreadId !== "main") return agentThreadId;
   const chatId = thread.id?.split(":")[1] ?? thread.id ?? "";
   const topic = getActiveTopic(String(chatId));
-  return topic ? `topic:${topic}` : agentThreadId;
+  return topic ? `topic:${chatId}:${topic}` : agentThreadId;
 }
 
 /** Set the active topic for a chat. */
@@ -56,14 +59,16 @@ export function setActiveTopic(chatId: string, topic: string): void {
   persistTopics();
 }
 
-/** Get all known topics from memory-state directory. */
-export function listTopics(): string[] {
+/** Get all known topics for a specific chat from memory-state directory. */
+export function listTopics(chatId: string): string[] {
   const stateDir = join(ROUNDHOUSE_DIR, "memory-state");
+  // Files are named topic_c<chatId>_c<topicName>.json (threadIdToDir encoding)
+  const prefix = `topic_c${chatId}_c`;
   try {
     return readdirSync(stateDir)
-      .filter(f => f.startsWith("topic_c") && f.endsWith(".json"))
-      .map(f => f.replace(/^topic_c/, "").replace(/\.json$/, ""))
-      .map(f => f.replace(/__/g, "_")); // reverse threadIdToDir encoding
+      .filter(f => f.startsWith(prefix) && f.endsWith(".json"))
+      .map(f => f.slice(prefix.length).replace(/\.json$/, ""))
+      .map(f => f.replace(/__/g, "_")); // reverse threadIdToDir underscore encoding
   } catch {
     return [];
   }
@@ -81,6 +86,12 @@ export async function handleTopic(ctx: TopicCommandContext): Promise<void> {
   // Extract chat ID from thread (for private: "telegram:<chatId>")
   const chatId = thread.id?.split(":")[1] ?? thread.id;
 
+  // /topic only works in private chats (groups use forum topics instead)
+  if (chatId && chatId.startsWith("-")) {
+    await postWithFallback(thread, "⚠️ /topic only works in private chats. Use Telegram forum topics for groups.");
+    return;
+  }
+
   // Parse the topic name from the command
   const match = text.match(/^\/topic(?:@\S+)?\s+(.+)/i);
   const topicName = match?.[1]?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
@@ -88,7 +99,7 @@ export async function handleTopic(ctx: TopicCommandContext): Promise<void> {
   if (!topicName) {
     // Show current topic + known topics
     const current = getActiveTopic(chatId) ?? "main (default)";
-    const known = listTopics();
+    const known = listTopics(chatId);
     let msg = `📂 Current topic: \`${current}\`\n\n`;
     if (known.length > 0) {
       msg += `Known topics: ${known.map(t => `\`${t}\``).join(", ")}\n\n`;

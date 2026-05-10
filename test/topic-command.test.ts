@@ -29,10 +29,10 @@ describe("topic-command", () => {
   });
 
   describe("applyTopicOverride", () => {
-    it("overrides 'main' when topic is active", () => {
+    it("overrides 'main' when topic is active (scoped to chat)", () => {
       setActiveTopic("456", "deploy");
       const result = applyTopicOverride("main", { id: "telegram:456" });
-      expect(result).toBe("topic:deploy");
+      expect(result).toBe("topic:456:deploy");
     });
 
     it("returns main when no topic active", () => {
