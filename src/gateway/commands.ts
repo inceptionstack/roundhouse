@@ -68,6 +68,14 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
     await thread.post("⚠️ /update requires an allowlist to be configured.");
     return;
   }
+  // Seed .last-version with current version BEFORE update, so new code detects the change on restart
+  try {
+    const { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } = await import("../config");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    mkdirSync(ROUNDHOUSE_DIR, { recursive: true });
+    writeFileSync(join(ROUNDHOUSE_DIR, ".last-version"), ROUNDHOUSE_VERSION + "\n");
+  } catch {}
   console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
   const progress = await createProgressMessage(thread, "📦 Checking for updates...");
   try {

@@ -48,12 +48,11 @@ export function checkVersionChange(): string | null {
   // No change
   if (lastVersion === ROUNDHOUSE_VERSION) return null;
 
-  // First run (no previous version)
-  if (!lastVersion) return null;
-
-  // Version changed — this is an update
+  // Version changed (or first run after feature was added) — show what's new
   const changelog = getLatestChangelog();
-  const header = `🆕 Updated: v${lastVersion} → v${ROUNDHOUSE_VERSION}`;
+  const header = lastVersion
+    ? `🆕 Updated: v${lastVersion} → v${ROUNDHOUSE_VERSION}`
+    : `🆕 What's new in v${ROUNDHOUSE_VERSION}`;
   if (!changelog) return header;
   return `${header}\n\n${changelog}`;
 }
