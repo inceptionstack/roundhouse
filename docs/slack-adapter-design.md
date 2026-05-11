@@ -7,17 +7,22 @@
 
 ## 1. Architecture Decisions
 
-### Socket Mode (chosen) vs Events API
+### Socket Mode (chosen) vs Events API vs Polling
 
-| | Socket Mode | Events API |
-|---|---|---|
-| Public URL | ❌ Not needed | ✅ Required |
-| Infra | Zero (WebSocket from bot) | Needs HTTPS endpoint |
-| Latency | Real-time | Real-time |
-| Firewall | Works behind NAT/firewall | Needs inbound port |
-| Consistency | Same model as Telegram polling | Different (webhook) |
+| | Socket Mode | Events API | Polling (history) |
+|---|---|---|---|
+| Public URL | ❌ Not needed | ✅ Required | ❌ Not needed |
+| Infra | Zero (WebSocket from bot) | Needs HTTPS endpoint | None (API reads) |
+| Latency | Real-time | Real-time | 5-30s (polling interval) |
+| Firewall | Works behind NAT/firewall | Needs inbound port | Works behind NAT |
+| API pressure | 1 connection | 1 connection | Many (history reads) |
+| Consistency | Real-time events | Real-time events | Dedup needed |
 
-**Decision: Socket Mode.** Roundhouse runs on a single EC2 instance behind NAT. Socket Mode needs zero additional infrastructure — same operational model as Telegram long-polling. The bot initiates a WebSocket connection to Slack, receives events in real-time.
+**Decision: Socket Mode.** Alternatives:
+- **Events API:** Requires public HTTPS endpoint + Lambda/managed service to forward to Roundhouse. Operational burden.
+- **Polling:** Roundhouse would call `conversations.history` every N seconds per channel, track cursor, handle duplicates/missed events. Higher API quota burn (1 read per channel per poll), higher latency, need distributed dedup state.
+
+Socket Mode needs zero additional infrastructure — same operational model as Telegram long-polling but with real-time events instead of polling. The bot initiates a WebSocket connection to Slack, receives events as they happen.
 
 **Dependencies:**
 - `@slack/bolt` — Framework handling Socket Mode, event dispatch, middleware
@@ -135,24 +140,27 @@ ownsThread(thread: ChatThread): boolean {
 
 ### `notify(chatIds: number[], text: string): Promise<void>`
 
-Slack uses string channel IDs, not numeric. The interface takes `number[]` (Telegram legacy). SlackAdapter uses a **chatId→channelId map** from config to resolve targets:
+Slack uses string channel IDs, not numeric. The interface takes `number[]` (Telegram legacy). SlackAdapter maps gateway numeric IDs to Slack strings via **`pairedChannels`** config (see Section 7: Configuration Schema):
 
 ```typescript
 async notify(chatIds: number[], text: string): Promise<void> {
   if (chatIds.length === 0) return; // No-op on empty (matches TelegramAdapter)
   const mrkdwn = markdownToMrkdwn(text);
   const targets: string[] = [];
+  
+  // Map numeric gateway IDs to Slack channel strings via pairedChannels
   for (const id of chatIds) {
-    const channel = this.config.channelMap?.[String(id)];
-    if (channel) {
-      targets.push(channel);
+    const slackChannel = this.config.pairedChannels?.[String(id)];
+    if (slackChannel) {
+      targets.push(slackChannel);
     } else {
-      console.warn(`[slack] notify: no channelMap entry for chatId=${id}, skipping`);
+      console.warn(`[slack] notify: no pairedChannels entry for gatewayId=${id}, skipping`);
     }
   }
+  
   const finalTargets = [...new Set(targets)]; // Dedupe
   if (finalTargets.length === 0) {
-    console.warn(`[slack] notify: no targets resolved for chatIds=[${chatIds.join(',')}]`);
+    console.warn(`[slack] notify: no targets resolved for gatewayIds=[${chatIds.join(',')}]`);
     return;
   }
   for (const channel of finalTargets) {
@@ -161,20 +169,20 @@ async notify(chatIds: number[], text: string): Promise<void> {
 }
 ```
 
-**Design:** Unmapped chatIds are dropped with a warning. When `chatIds` is empty, no-op (matches TelegramAdapter semantics). For explicit broadcast, gateway should call with the configured `notifyChatIds` from config.
+**Design:** Empty `chatIds` = no-op (matches TelegramAdapter semantics). Unmapped IDs are dropped with warning. For explicit broadcast, gateway calls with configured `notifyChatIds` from config.
 
 ### `createThread(chatId: number): ChatThread`
 
-Creates a synthetic DM-style thread (no `thread_ts` — messages go to channel top-level). Uses `channelMap` to resolve chatId → Slack channel, falls back to `primaryChannel` with a warning if unmapped. For threaded synthetic turns, gateway should use a thread from a real incoming message.
+Creates a synthetic thread for boot turns and cron notifications. Maps `chatId` → Slack channel via `pairedChannels` config (Section 7: Configuration Schema). Throws if mapping not found (no silent fallback — synthetic turns must have explicit routing).
 
 ```typescript
 createThread(chatId: number): ChatThread {
-  const channelId = this.config.channelMap?.[String(chatId)] ?? this.config.primaryChannel;
+  const channelId = this.config.pairedChannels?.[String(chatId)];
   if (!channelId) {
-    throw new Error(`[slack] createThread: no channelMap entry for chatId=${chatId} and no primaryChannel configured`);
-  }
-  if (!this.config.channelMap?.[String(chatId)]) {
-    console.warn(`[slack] createThread: no mapping for chatId=${chatId}, using primaryChannel`);
+    throw new Error(
+      `[slack] createThread: no pairedChannels entry for gatewayId=${chatId}. ` +
+      `Synthetic threads (boot turn, cron) require explicit paired channel mapping.`
+    );
   }
   return {
     id: `slack:${channelId}`,
@@ -187,6 +195,8 @@ createThread(chatId: number): ChatThread {
   };
 }
 ```
+
+**Design change:** No `primaryChannel` fallback. Synthetic turns (boot, cron) are not ad-hoc — they should only fire to an explicitly paired channel to prevent accidental routing to wrong destinations.
 
 ### `isPairingPending(): Promise<boolean>`
 
@@ -238,6 +248,13 @@ export function markdownToMrkdwn(md: string): string {
 }
 
 function transformNonCode(text: string): string {
+  // ⚠️ DESIGN NOTE: This regex-chaining approach is functional but fragile.
+  // A stateful token-stream parser would be more robust for production:
+  // (1) tokenize input into {type, value} tuples (link_text, url, bold, code, etc.),
+  // (2) transform by token type, (3) reassemble. This avoids overlapping replacements,
+  // order-of-operations gotchas, and edge cases (balanced parens in URLs, nested < >).
+  // Implementation should consider this upgrade path before shipping.
+  
   // 1. Convert __bold__ → *bold* (markdown alt-bold via double underscore)
   text = text.replace(/__([^_]+)__/g, '*$1*');
   // 2. Convert **bold** → *bold*
@@ -315,10 +332,10 @@ export async function handleSlackStream(
   let consecutiveFailures = 0;
   const UPDATE_INTERVAL_MS = 1000; // Rate limit: 1 update/sec
   const MAX_UPDATE_FAILURES = 5;   // Abort update loop after N consecutive non-ratelimit failures
-  let everUpdated = false;
-
   const MAX_RATELIMIT_STREAK = 10; // Cap ratelimit-only backoffs too
+  const PREVIEW_CHARS = 3000;      // Show first N chars during streaming (not entire buffer)
   let ratelimitStreak = 0;
+  let everUpdated = false;
 
   for await (const event of stream) {
     if (event.type === 'text-delta') {
@@ -326,10 +343,15 @@ export async function handleSlackStream(
       const now = Date.now();
       if (now - lastUpdate >= UPDATE_INTERVAL_MS && consecutiveFailures < MAX_UPDATE_FAILURES && ratelimitStreak < MAX_RATELIMIT_STREAK) {
         try {
+          // Interim updates show preview only (first N chars + ellipsis if longer)
+          // This prevents update failures when full buffer grows past Slack's update size limit
+          const preview = buffer.length > PREVIEW_CHARS 
+            ? buffer.slice(0, PREVIEW_CHARS) + '…' 
+            : buffer;
           await client.chat.update({
             channel: channelId,
             ts: messageTs,
-            text: markdownToMrkdwn(buffer),
+            text: markdownToMrkdwn(preview),
           });
           lastUpdate = now;
           consecutiveFailures = 0;
@@ -371,14 +393,29 @@ export async function handleSlackStream(
           thread_ts: threadTs ?? messageTs,
         });
       }
-    } catch {
+    } catch (err: any) {
+      console.warn(`[slack] final update failed:`, err.message);
+      // If the placeholder never updated successfully, delete it and post complete response fresh
+      // This preserves thread structure: all chunks post coherently (either all in one thread or fresh)
       if (!everUpdated) {
         try { await client.chat.delete({ channel: channelId, ts: messageTs }); } catch {}
-        for (const chunk of chunks) {
-          await client.chat.postMessage({ channel: channelId, text: chunk, thread_ts: threadTs });
+        // Post all chunks fresh; if threadTs provided, thread under that; otherwise post first chunk
+        // and thread the rest under it for coherence
+        if (threadTs) {
+          // Channel thread: post all under existing threadTs
+          for (const chunk of chunks) {
+            await client.chat.postMessage({ channel: channelId, text: chunk, thread_ts: threadTs });
+          }
+        } else {
+          // DM or new thread: post first chunk top-level, rest threaded under it
+          if (chunks.length === 0) return; // defensive: splitMrkdwn may return [] on empty buffer
+          const firstMsg = await client.chat.postMessage({ channel: channelId, text: chunks[0] });
+          for (let i = 1; i < chunks.length; i++) {
+            await client.chat.postMessage({ channel: channelId, text: chunks[i], thread_ts: firstMsg.ts });
+          }
         }
       } else {
-        console.warn('[slack] final chat.update failed; partial message remains visible');
+        console.warn('[slack] final chat.update failed after partial success; response partially visible');
       }
     }
   } else {
@@ -439,9 +476,8 @@ roundhouse setup --slack
     "adapters": {
       "slack": {
         // Tokens: use SLACK_BOT_TOKEN / SLACK_APP_TOKEN env vars
-        "primaryChannel": "D04XXXXX", // DM channel for boot turn / synthetic threads
-        "channelMap": {               // Numeric gateway ID → Slack channel ID
-          "1775159795": "D04XXXXX"    // Maps Telegram chatId to Slack channel
+        "pairedChannels": {          // Numeric gateway ID → Slack channel ID (from pairing flow)
+          "1775159795": "D04XXXXX"   // gatewayId → Slack DM channel
         },
         "allowedUserIds": ["U04XXXXX"],
         "requireMention": true        // Default: true. In channels, only respond to @bot
@@ -488,8 +524,9 @@ settings:
 ## 8. Security
 
 ### Token Handling
-- Bot token stored in roundhouse.json (0600 perms) or env var
-- App token (Socket Mode) is app-level, not user-level — lower risk
+- Bot token: use `SLACK_BOT_TOKEN` env var (preferred) or store in roundhouse.json with 0600 perms
+- App token (Socket Mode): use `SLACK_APP_TOKEN` env var (preferred) or store in roundhouse.json with 0600 perms
+- If tokens in config file: implementation must enforce 0600 perms on write (roundhouse.json is 0644 by default — unsafe!)
 - No tokens logged or transmitted
 
 ### Allowlist Enforcement
