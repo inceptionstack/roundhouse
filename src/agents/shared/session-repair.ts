@@ -92,12 +92,19 @@ function reparentDroppedEntries(
   }
 
   const remap = new Map<string, string | null>();
-  const resolveAncestor = (id: string): string | null => {
+  const resolveAncestor = (id: string, visited: Set<string> = new Set()): string | null => {
     if (remap.has(id)) return remap.get(id)!;
     if (!droppedEntryIds.has(id)) return id;
+    if (visited.has(id)) {
+      // Cycle in parentId chain (self-parent or loop) — bail with null rather than
+      // blow the stack. Should never happen in a well-formed session file.
+      remap.set(id, null);
+      return null;
+    }
+    visited.add(id);
     const e = entryById.get(id);
     const parent = e?.parentId ?? null;
-    const resolved = parent === null ? null : resolveAncestor(parent);
+    const resolved = parent === null ? null : resolveAncestor(parent, visited);
     remap.set(id, resolved);
     return resolved;
   };
@@ -303,9 +310,13 @@ export function isToolPairingError(err: unknown): boolean {
 
   if (patterns.some(p => p.test(msg))) return true;
 
-  // ValidationException from Bedrock with 400 status sometimes carries the text
-  // in nested fields; best-effort stringify check.
-  if (name === 'ValidationException' || /400/.test(msg)) {
+  // Bedrock ValidationException may carry the pairing text in nested fields
+  // (e.g. err.cause.message, $metadata). Only stringify-search when the error
+  // *looks* like a Bedrock validation error — avoid noisy matches on unrelated
+  // messages that happen to contain '400'.
+  const httpStatus =
+    (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  if (name === 'ValidationException' || httpStatus === 400) {
     try {
       const full = JSON.stringify(err);
       if (patterns.some(p => p.test(full))) return true;

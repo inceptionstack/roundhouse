@@ -2,7 +2,7 @@
  * session-repair.test.ts — Tests for file-level session repair.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -309,9 +309,52 @@ describe('session-repair', () => {
       expect(isToolPairingError(err)).toBe(false);
     });
 
+    it('does not match generic messages containing "400" (F5 tightening)', () => {
+      // Before the fix, any message containing "400" triggered a JSON.stringify
+      // deep search. After fix, we require ValidationException name OR
+      // $metadata.httpStatusCode === 400.
+      const err = new Error('queued 400 tasks for retry');
+      expect(isToolPairingError(err)).toBe(false);
+    });
+
+    it('uses $metadata.httpStatusCode to gate deep search (F5)', () => {
+      const err = Object.assign(new Error('Bad request'), {
+        $metadata: { httpStatusCode: 400 },
+        cause: { message: 'tool_use without tool_result in messages.5' },
+      });
+      expect(isToolPairingError(err)).toBe(true);
+    });
+
     it('handles null/undefined safely', () => {
       expect(isToolPairingError(null)).toBe(false);
       expect(isToolPairingError(undefined)).toBe(false);
+    });
+  });
+
+  describe('repairSessionFile — tree edge cases', () => {
+    it('survives a self-parenting cycle in parentId (F3)', () => {
+      // Hand-craft a malformed file where an orphan toolCall entry points to itself.
+      const entries: object[] = [
+        HEADER, MODEL_CHANGE,
+        userMsg('u1', 'mc-1', 'hi'),
+        // self-parent cycle
+        { ...assistantToolCall('a1', 'a1', 'call-1') },
+      ];
+      const path = tmpJsonl(entries);
+      // Should not stack-overflow; should still produce a valid result.
+      const rep = repairSessionFile(path);
+      expect(rep.repaired).toBe(true);
+      expect(rep.droppedEntryIds).toContain('a1');
+    });
+
+    it('survives a 2-node parentId loop (F3)', () => {
+      const a1 = assistantToolCall('a1', 'a2', 'call-1');
+      const a2 = assistantToolCall('a2', 'a1', 'call-2');
+      const path = tmpJsonl([HEADER, MODEL_CHANGE, userMsg('u1', 'mc-1', 'hi'), a1, a2]);
+      const rep = repairSessionFile(path);
+      expect(rep.repaired).toBe(true);
+      // Both orphaned entries dropped, no crash
+      expect(rep.droppedEntryIds.sort()).toEqual(['a1', 'a2']);
     });
   });
 });

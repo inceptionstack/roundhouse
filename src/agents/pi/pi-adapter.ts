@@ -86,7 +86,30 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
 
-  async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void, onDrainComplete?: () => void): Promise<void> {
+  /**
+   * Callback shape for re-subscribing after a mid-turn session swap (auto-repair).
+   * Caller provides:
+   *   - `subscribe(session)` — re-attach the caller's event handler to the new session
+   *   - `unsubscribeOld()` — detach from the old session before it's disposed
+   *
+   * Ordering inside runPromptAndFollowUps on repair:
+   *   1. unsubscribeOld() on the pre-repair session
+   *   2. dispose old session
+   *   3. repair + reload
+   *   4. subscribe(newSession) so the retry's events reach the caller
+   */
+  interface Resubscribe {
+    unsubscribeOld: () => void;
+    subscribe: (session: AgentSession) => void;
+  }
+
+  async function runPromptAndFollowUps(
+    entry: SessionEntry,
+    text: string,
+    onDraining?: () => void,
+    onDrainComplete?: () => void,
+    resubscribe?: Resubscribe,
+  ): Promise<void> {
     entry.inFlight++;
     try {
       try {
@@ -116,9 +139,25 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           `(${report.droppedToolCallIds.length} toolCalls, ${report.droppedToolResultIds.length} toolResults). ` +
           `Backup: ${report.backupPath}`
         );
-        // Reload session so pi-ai re-reads the repaired file
-        const reloaded = await reloadSession(entry);
+        // Detach caller's subscriber from the dying session before we swap, so
+        // it doesn't receive events from (or prevent GC of) the old session.
+        resubscribe?.unsubscribeOld();
+        // Dispose the old session to release file handles / timers / subscribers (F2).
+        const oldSession = entry.session;
+        try {
+          const maybeDispose = (oldSession as unknown as { dispose?: () => void | Promise<void> }).dispose;
+          if (typeof maybeDispose === "function") {
+            await maybeDispose.call(oldSession);
+          }
+        } catch (disposeErr) {
+          console.warn(`[pi-agent] old session dispose failed (non-fatal):`, disposeErr);
+        }
+        // Reload session so pi-ai re-reads the repaired file (by explicit path, not "most recent").
+        const reloaded = await reloadSession(entry, sessionFile);
         entry.session = reloaded.session;
+        // Re-attach caller's subscriber to the new session so the retry's
+        // text_delta/tool events flow through (F1).
+        resubscribe?.subscribe(entry.session);
         await entry.session.prompt(text);
       }
       await drainSessionEvents(entry.session);
@@ -183,15 +222,20 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
    * Intentionally does NOT re-run one-time setup (memory-capability detection,
    * tool registration) — those belong to createSession(). This is a narrow
    * "replace the pi session object" operation.
+   *
+   * Opens the *exact* repaired file by path (not continueRecent) to avoid
+   * picking up a different recent session file.
    */
-  async function reloadSession(entry: SessionEntry): Promise<{ session: AgentSession }> {
+  async function reloadSession(entry: SessionEntry, repairedSessionFile: string): Promise<{ session: AgentSession }> {
     const threadId = entry.threadId;
     if (!threadId) {
       throw new Error("reloadSession: entry has no threadId; cannot reload");
     }
     const dirName = threadIdToDir(threadId);
     const threadDir = join(sessionsDir, dirName);
-    const sessionManager = SessionManager.continueRecent(cwd, threadDir);
+    // Open the specific repaired file by path so we don't race with other
+    // session files in the directory (F4).
+    const sessionManager = SessionManager.open(repairedSessionFile, threadDir, cwd);
     console.log(`[pi-agent] reloaded session for ${threadId}: ${sessionManager.getSessionFile()}`);
     const result = await createAgentSession({
       cwd,
@@ -410,7 +454,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             const entry = await getOrCreate(threadId);
             entry.lastUsed = Date.now();
 
-            const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
+            // Extracted subscriber handler so it can be re-attached after an
+            // auto-repair session swap (captures only the enqueue closure,
+            // not `entry.session`, so it's safe to re-use).
+            const handleEvent = (event: AgentSessionEvent) => {
               if (DEBUG_STREAM) {
                 const extra =
                   event.type === "message_end" || event.type === "message_start"
@@ -448,21 +495,34 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 eventQueue.push(streamEvent);
                 resolve?.();
               }
-            });
+            };
+
+            // Subscription is mutable so auto-repair can swap it when the
+            // session is reloaded mid-prompt.
+            let unsub = entry.session.subscribe(handleEvent);
 
             try {
-              await runPromptAndFollowUps(entry, text, () => {
-                eventQueue.push({ type: "draining" });
-                resolve?.();
-              }, () => {
-                eventQueue.push({ type: "drain_complete" });
-                resolve?.();
-              });
+              await runPromptAndFollowUps(
+                entry,
+                text,
+                () => {
+                  eventQueue.push({ type: "draining" });
+                  resolve?.();
+                },
+                () => {
+                  eventQueue.push({ type: "drain_complete" });
+                  resolve?.();
+                },
+                {
+                  unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
+                  subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
+                },
+              );
               // Final drain — guarantees all subscriber events have been delivered
               // before we unsubscribe below.
               await drainSessionEvents(entry.session);
             } finally {
-              unsub();
+              try { unsub(); } catch { /* ignore */ }
               eventQueue.push({ type: "agent_end" });
               done = true;
               resolve?.();
@@ -655,7 +715,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     entry.lastUsed = Date.now();
 
     let fullText = "";
-    const unsub = entry.session.subscribe((event: AgentSessionEvent) => {
+    const handleEvent = (event: AgentSessionEvent) => {
       if (
         event.type === "message_update" &&
         event.assistantMessageEvent.type === "text_delta"
@@ -667,13 +727,17 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           fullText += "\n\n" + custom.content;
         }
       }
-    });
+    };
+    let unsub = entry.session.subscribe(handleEvent);
 
     try {
-      await runPromptAndFollowUps(entry, text);
+      await runPromptAndFollowUps(entry, text, undefined, undefined, {
+        unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
+        subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
+      });
       await drainSessionEvents(entry.session);
     } finally {
-      unsub();
+      try { unsub(); } catch { /* ignore */ }
     }
 
     return { text: fullText };
