@@ -144,15 +144,28 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // Detach caller's subscriber from the dying session before we swap, so
         // it doesn't receive events from (or prevent GC of) the old session.
         resubscribe?.unsubscribeOld();
-        // Dispose the old session to release file handles / timers / subscribers (F2).
+        // Reload session FIRST (before disposing old) so that if
+        // SessionManager.open / createAgentSession throws, we don't leave the
+        // SessionEntry with a disposed-but-still-referenced session that
+        // subsequent prompts would reuse. Old session stays alive as fallback
+        // until the new one is fully constructed.
+        let reloaded: { session: AgentSession };
         try {
-          entry.session.dispose();
+          reloaded = await reloadSession(entry, sessionFile);
+        } catch (reloadErr) {
+          console.warn(`[pi-agent] reloadSession failed after repair — keeping old session, re-subscribing`, reloadErr);
+          // Re-attach to the old session so the caller isn't silently orphaned.
+          resubscribe?.subscribe(entry.session);
+          throw err; // surface original tool-pairing error — repair didn't help
+        }
+        // Now it's safe to dispose the old session: we have a working replacement.
+        const oldSession = entry.session;
+        entry.session = reloaded.session;
+        try {
+          oldSession.dispose();
         } catch (disposeErr) {
           console.warn(`[pi-agent] old session dispose failed (non-fatal):`, disposeErr);
         }
-        // Reload session so pi-ai re-reads the repaired file (by explicit path, not "most recent").
-        const reloaded = await reloadSession(entry, sessionFile);
-        entry.session = reloaded.session;
         // Re-attach caller's subscriber to the new session so the retry's
         // text_delta/tool events flow through (F1).
         resubscribe?.subscribe(entry.session);
