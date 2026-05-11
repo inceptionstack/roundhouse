@@ -18,6 +18,10 @@ import type {
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
 
+// Re-export Message so tests/consumers can import it from this module
+// (required under isolatedModules when tests do `import { type Message } from './message-validator'`)
+export type { Message } from '@earendil-works/pi-ai';
+
 export interface ValidationResult {
   isValid: boolean;
   orphanedToolCallIds: string[];
@@ -47,8 +51,13 @@ export function validateToolPairing(messages: Message[]): ValidationResult {
       for (const block of msg.content) {
         if ((block as ToolCall).type === 'toolCall' && (block as ToolCall).id) {
           const callId = (block as ToolCall).id;
+          // Duplicate toolCall IDs would be a pi-ai invariant violation upstream;
+          // keep first-occurrence semantics (set().add ignores dups; Map.set overwrites
+          // with last-seen index — guard to preserve earliest position for ordering checks).
+          if (!toolCallIndexes.has(callId)) {
+            toolCallIndexes.set(callId, i);
+          }
           toolCallIds.add(callId);
-          toolCallIndexes.set(callId, i);
         }
       }
     }
