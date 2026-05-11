@@ -287,7 +287,9 @@ export class Gateway {
       // /toggle-review — flip pi-hard-no code-review on/off (persists across sessions)
       if (_isCmd(text, "/toggle-review", _botUsername) || _isCmd(text, "/toggle-code-review", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        await handleToggleReview({ thread, agentThreadId });
+        const agent = this.router.resolve(agentThreadId);
+        const agentCwd = (agent.getInfo?.()?.cwd as string | undefined);
+        await handleToggleReview({ thread, agentThreadId, agentCwd });
         return;
       }
       // /doctor — run health checks immediately
