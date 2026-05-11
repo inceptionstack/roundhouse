@@ -332,29 +332,47 @@ describe('session-repair', () => {
   });
 
   describe('repairSessionFile — tree edge cases', () => {
-    it('survives a self-parenting cycle in parentId (F3)', () => {
-      // Hand-craft a malformed file where an orphan toolCall entry points to itself.
+    it('survives a self-parenting cycle when reparenting a kept child (F3)', () => {
+      // Malformed file: orphan assistant entry a1 self-parents (cycle),
+      // AND a kept entry u2 points at a1 — forcing reparentDroppedEntries
+      // to resolve an ancestor through the cycle. Without the visited guard,
+      // this stack-overflows.
       const entries: object[] = [
         HEADER, MODEL_CHANGE,
         userMsg('u1', 'mc-1', 'hi'),
-        // self-parent cycle
-        { ...assistantToolCall('a1', 'a1', 'call-1') },
+        { ...assistantToolCall('a1', 'a1', 'call-1') }, // self-parent orphan
+        userMsg('u2', 'a1', 'next'), // kept child pointing into the cycle
       ];
       const path = tmpJsonl(entries);
-      // Should not stack-overflow; should still produce a valid result.
       const rep = repairSessionFile(path);
       expect(rep.repaired).toBe(true);
       expect(rep.droppedEntryIds).toContain('a1');
+      // With the cycle, resolveAncestor bails to null — u2 becomes a root.
+      const repaired = parseSessionFile(path);
+      const u2 = repaired.find(e => e.id === 'u2');
+      expect(u2).toBeDefined();
+      expect(u2?.parentId).toBeNull();
     });
 
-    it('survives a 2-node parentId loop (F3)', () => {
+    it('survives a 2-node parentId loop when reparenting a kept child (F3)', () => {
+      // a1 <-> a2 form a cycle, both orphan toolCalls.
+      // u3 is a kept child pointing into the cycle — forces traversal.
       const a1 = assistantToolCall('a1', 'a2', 'call-1');
       const a2 = assistantToolCall('a2', 'a1', 'call-2');
-      const path = tmpJsonl([HEADER, MODEL_CHANGE, userMsg('u1', 'mc-1', 'hi'), a1, a2]);
+      const path = tmpJsonl([
+        HEADER, MODEL_CHANGE,
+        userMsg('u1', 'mc-1', 'hi'),
+        a1, a2,
+        userMsg('u3', 'a2', 'next'), // kept child into the cycle
+      ]);
       const rep = repairSessionFile(path);
       expect(rep.repaired).toBe(true);
-      // Both orphaned entries dropped, no crash
       expect(rep.droppedEntryIds.sort()).toEqual(['a1', 'a2']);
+      // u3 gets reparented to null (cycle bail) rather than crashing.
+      const repaired = parseSessionFile(path);
+      const u3 = repaired.find(e => e.id === 'u3');
+      expect(u3).toBeDefined();
+      expect(u3?.parentId).toBeNull();
     });
   });
 });

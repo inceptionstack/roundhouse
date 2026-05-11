@@ -36,9 +36,6 @@ interface SessionEntry {
   session: AgentSession;
   lastUsed: number;
   inFlight: number;
-  /** Set true after the first auto-repair attempt in this process lifetime to
-   * prevent repeated retry loops on the same session. */
-  repairAttempted?: boolean;
   /** Captured config used to recreate the session after disk-level repair. */
   threadId?: string;
 }
@@ -111,6 +108,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     resubscribe?: Resubscribe,
   ): Promise<void> {
     entry.inFlight++;
+    // Track whether *this specific prompt call* has already retried after a
+    // repair. Prevents retry loops within one turn, but doesn't latch the
+    // SessionEntry for its whole lifetime — a future prompt on the same
+    // long-lived entry can still auto-repair if new corruption appears (F3).
+    let repairedThisCall = false;
     try {
       try {
         await entry.session.prompt(text);
@@ -119,10 +121,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // pairs caused by crashed/aborted tools mid-session). Repair the .jsonl on
         // disk, reload the session, retry once. Do NOT loop — if the repaired file
         // still fails, something else is wrong; surface the original error.
-        if (!isToolPairingError(err) || entry.repairAttempted) {
+        if (!isToolPairingError(err) || repairedThisCall) {
           throw err;
         }
-        entry.repairAttempted = true;
+        repairedThisCall = true;
         const sessionFile = entry.session.sessionFile;
         if (!sessionFile) {
           throw err; // in-memory session — nothing to repair on disk
@@ -143,12 +145,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // it doesn't receive events from (or prevent GC of) the old session.
         resubscribe?.unsubscribeOld();
         // Dispose the old session to release file handles / timers / subscribers (F2).
-        const oldSession = entry.session;
         try {
-          const maybeDispose = (oldSession as unknown as { dispose?: () => void | Promise<void> }).dispose;
-          if (typeof maybeDispose === "function") {
-            await maybeDispose.call(oldSession);
-          }
+          entry.session.dispose();
         } catch (disposeErr) {
           console.warn(`[pi-agent] old session dispose failed (non-fatal):`, disposeErr);
         }
