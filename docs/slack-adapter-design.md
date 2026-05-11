@@ -408,6 +408,7 @@ export async function handleSlackStream(
           }
         } else {
           // DM or new thread: post first chunk top-level, rest threaded under it
+          if (chunks.length === 0) return; // defensive: splitMrkdwn may return [] on empty buffer
           const firstMsg = await client.chat.postMessage({ channel: channelId, text: chunks[0] });
           for (let i = 1; i < chunks.length; i++) {
             await client.chat.postMessage({ channel: channelId, text: chunks[i], thread_ts: firstMsg.ts });
