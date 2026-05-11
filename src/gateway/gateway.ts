@@ -22,7 +22,7 @@ import { createProgressMessage } from "../transports/telegram/progress";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, handleToggleReview, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { handleTopic, applyTopicOverride } from "./topic-command";
@@ -282,6 +282,12 @@ export class Gateway {
       if (_isCmd(text, "/verbose", _botUsername)) {
         if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
         await handleVerbose({ thread, agentThreadId, verboseThreads });
+        return;
+      }
+      // /toggle-review — flip pi-hard-no code-review on/off (persists across sessions)
+      if (_isCmd(text, "/toggle-review", _botUsername) || _isCmd(text, "/toggle-code-review", _botUsername)) {
+        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
+        await handleToggleReview({ thread, agentThreadId });
         return;
       }
       // /doctor — run health checks immediately

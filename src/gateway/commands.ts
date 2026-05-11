@@ -12,6 +12,7 @@ import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, de
 // TODO: move progress into TransportAdapter when multi-transport lands
 import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
+import { toggleEnabled, readEnabled } from "./code-review-toggle";
 
 // ── Types ────────────────────────────────────────────
 
@@ -417,4 +418,60 @@ export async function handleCrons(ctx: CronsContext): Promise<void> {
     stopTyping();
   }
   console.log(`[roundhouse] /crons for thread=${thread.id}`);
+}
+
+// ── /toggle-review ───────────────────────────────────
+
+export interface ToggleReviewContext {
+  thread: any;
+  agentThreadId: string;
+}
+
+/**
+ * Toggle the pi-hard-no auto code-review on/off persistently.
+ *
+ * Writes to ~/.pi/.hardno/settings.json — pi-hard-no v1.3.0+ re-reads this
+ * field at each agent_end, so the change takes effect on the NEXT agent turn
+ * without a session restart.
+ *
+ * If pi-hard-no isn't installed in the user's pi setup, the write still
+ * succeeds (just a JSON file nobody reads). We can't reliably detect install
+ * state from here, so we don't try — the command stays simple.
+ */
+export async function handleToggleReview(ctx: ToggleReviewContext): Promise<void> {
+  const { thread, agentThreadId } = ctx;
+  try {
+    const result = toggleEnabled();
+    const state = result.enabled ? "on" : "off";
+    const icon = result.enabled ? "✅" : "🔕";
+    const note = result.fileExisted
+      ? ""
+      : "\n_(First time — created `~/.pi/.hardno/settings.json`.)_";
+    await thread.post(
+      `${icon} Code review: *${state}*\n\n` +
+        `_Takes effect on the next agent turn — no restart needed._` +
+        note
+    );
+    console.log(
+      `[roundhouse] /toggle-review thread=${thread.id} agentThread=${agentThreadId} → enabled=${result.enabled}`
+    );
+  } catch (err) {
+    const msg = (err as Error).message;
+    console.error(`[roundhouse] /toggle-review failed:`, err);
+    try {
+      await thread.post(`⚠️ Toggle failed: ${msg}`);
+    } catch {
+      /* best-effort notify */
+    }
+  }
+}
+
+/**
+ * Show current code review state without toggling. Read-only helper for UX
+ * (e.g. `/toggle-review status` — not wired yet but exposed for reuse).
+ */
+export function currentReviewState(): "on" | "off" | "default" {
+  const v = readEnabled();
+  if (v === null) return "default";
+  return v ? "on" : "off";
 }
