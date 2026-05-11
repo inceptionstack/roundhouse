@@ -28,6 +28,7 @@ import {
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
+import { isToolPairingError, repairSessionFile } from "../shared/session-repair";
 import { SESSIONS_DIR } from "../../config";
 import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
@@ -35,6 +36,11 @@ interface SessionEntry {
   session: AgentSession;
   lastUsed: number;
   inFlight: number;
+  /** Set true after the first auto-repair attempt in this process lifetime to
+   * prevent repeated retry loops on the same session. */
+  repairAttempted?: boolean;
+  /** Captured config used to recreate the session after disk-level repair. */
+  threadId?: string;
 }
 
 const DEFAULT_SESSIONS_DIR = SESSIONS_DIR;
@@ -83,7 +89,38 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   async function runPromptAndFollowUps(entry: SessionEntry, text: string, onDraining?: () => void, onDrainComplete?: () => void): Promise<void> {
     entry.inFlight++;
     try {
-      await entry.session.prompt(text);
+      try {
+        await entry.session.prompt(text);
+      } catch (err) {
+        // Auto-recover from session-history corruption (orphaned toolCall/toolResult
+        // pairs caused by crashed/aborted tools mid-session). Repair the .jsonl on
+        // disk, reload the session, retry once. Do NOT loop — if the repaired file
+        // still fails, something else is wrong; surface the original error.
+        if (!isToolPairingError(err) || entry.repairAttempted) {
+          throw err;
+        }
+        entry.repairAttempted = true;
+        const sessionFile = entry.session.sessionFile;
+        if (!sessionFile) {
+          throw err; // in-memory session — nothing to repair on disk
+        }
+        console.warn(`[pi-agent] tool-pairing error detected on session ${sessionFile} — attempting repair`);
+        const report = repairSessionFile(sessionFile);
+        if (!report.repaired) {
+          // File had no orphans but model still rejected — not our problem to fix.
+          console.warn(`[pi-agent] repair found no orphans; re-throwing original error`);
+          throw err;
+        }
+        console.warn(
+          `[pi-agent] repaired session: dropped ${report.droppedEntryIds.length} entries ` +
+          `(${report.droppedToolCallIds.length} toolCalls, ${report.droppedToolResultIds.length} toolResults). ` +
+          `Backup: ${report.backupPath}`
+        );
+        // Reload session so pi-ai re-reads the repaired file
+        const reloaded = await reloadSession(entry);
+        entry.session = reloaded.session;
+        await entry.session.prompt(text);
+      }
       await drainSessionEvents(entry.session);
 
       // Check for pending follow-up work AFTER drainSessionEvents — that's
@@ -138,6 +175,33 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     }
   }
 
+  /**
+   * Rebuild just the AgentSession for an existing SessionEntry. Used after
+   * on-disk session repair — we need pi-ai to re-read the fixed .jsonl, which
+   * means a fresh SessionManager + createAgentSession call.
+   *
+   * Intentionally does NOT re-run one-time setup (memory-capability detection,
+   * tool registration) — those belong to createSession(). This is a narrow
+   * "replace the pi session object" operation.
+   */
+  async function reloadSession(entry: SessionEntry): Promise<{ session: AgentSession }> {
+    const threadId = entry.threadId;
+    if (!threadId) {
+      throw new Error("reloadSession: entry has no threadId; cannot reload");
+    }
+    const dirName = threadIdToDir(threadId);
+    const threadDir = join(sessionsDir, dirName);
+    const sessionManager = SessionManager.continueRecent(cwd, threadDir);
+    console.log(`[pi-agent] reloaded session for ${threadId}: ${sessionManager.getSessionFile()}`);
+    const result = await createAgentSession({
+      cwd,
+      sessionManager,
+      authStorage,
+      modelRegistry,
+    });
+    return { session: result.session };
+  }
+
   async function createSession(threadId: string): Promise<SessionEntry> {
     const dirName = threadIdToDir(threadId);
     const threadDir = join(sessionsDir, dirName);
@@ -181,7 +245,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       console.log(`[pi-agent] model fallback: ${result.modelFallbackMessage}`);
     }
 
-    const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0 };
+    const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0, threadId };
     sessions.set(threadId, entry);
 
     // Detect memory capabilities from loaded extensions (first session only)
