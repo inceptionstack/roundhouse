@@ -26,6 +26,12 @@ import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, ha
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
+import {
+  type CommandDescriptor,
+  type CommandInvocation,
+  isPreTurn,
+  matchesDescriptor,
+} from "./command-registry";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
@@ -205,7 +211,22 @@ export class Gateway {
     // Per-thread lock to serialize prompts (concurrent mode lets /stop through)
     const threadLocks = this.threadLocks;
 
-    // ── Unified handler ────────────────────────────
+    // ── Build command descriptors ──────────────────────
+    // Each descriptor self-describes its triggers, dispatch stage, and
+    // optional inline-keyboard callbacks. The gateway iterates this list
+    // to wire everything — no more per-command if-blocks or onAction calls.
+    // Adding a new command = one more entry here + (optionally) a new module.
+    const allDescriptors = this.buildCommandDescriptors({
+      allowedUsers, allowedUserIds, verboseThreads, threadLocks, abortControllers,
+    });
+    const preTurnCommands = allDescriptors.filter(isPreTurn);
+    const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
+    const matchers = {
+      isCommand: (t: string, c: string) => _isCmd(t, c, _botUsername),
+      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, _botUsername),
+    };
+
+    // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
       let agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
       const userText = message.text ?? "";
@@ -230,38 +251,14 @@ export class Gateway {
       if (_isCmd(userText, "/start", _botUsername)) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
-      // ── Command dispatch (registry-based) ───
+      // ── Command dispatch (in-turn stage) ───
       const trimmed = userText.trim();
-
-      // Commands using standard CommandContext
-      const COMMAND_REGISTRY: Record<string, (ctx: CommandContext) => Promise<void>> = {
-        "/new": handleNew,
-        "/restart": handleRestart,
-        "/update": handleUpdate,
-        "/compact": handleCompact,
-        "/status": handleStatus,
-      };
-
-      for (const [cmd, handler] of Object.entries(COMMAND_REGISTRY)) {
-        if (_isCmd(trimmed, cmd, _botUsername)) {
-          await handler(this.buildCommandContext(thread, message, agentThreadId, authorName, allowedUsers, allowedUserIds, verboseThreads, threadLocks));
+      const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
+      for (const desc of inTurnCommands) {
+        if (matchesDescriptor(desc, trimmed, matchers)) {
+          await desc.invoke(inv);
           return;
         }
-      }
-
-      // Commands with custom context (accept args)
-      if (_isCmdArgs(trimmed, "/model", _botUsername) || _isCmd(trimmed, "/model", _botUsername)) {
-        await handleModel({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
-      }
-      if (_isCmdArgs(trimmed, "/later", _botUsername) || _isCmd(trimmed, "/later", _botUsername)) {
-        await handleLater({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
-      }
-
-      if (_isCmdArgs(trimmed, "/topic", _botUsername) || _isCmd(trimmed, "/topic", _botUsername)) {
-        await handleTopic({ thread, text: trimmed, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
       }
 
       // Dispatch to agent turn handler
@@ -270,32 +267,20 @@ export class Gateway {
 
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
-      let agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
+      const agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
       const text = (message.text ?? "").trim();
-      // /stop — abort the in-flight agent run immediately
-      if (_isCmd(text, "/stop", _botUsername)) {
-        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        await handleStop({ thread, agentThreadId, agent: this.router.resolve(agentThreadId), abortControllers });
-        return;
+
+      // Pre-turn commands fire before the main handler (and before the
+      // session-pressure gate), so /stop etc. still interrupt a mid-run
+      // agent. Allowlist is enforced here for all pre-turn handlers.
+      for (const desc of preTurnCommands) {
+        if (matchesDescriptor(desc, text, matchers)) {
+          if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
+          await desc.invoke({ thread, message, text, agentThreadId });
+          return;
+        }
       }
-      // /verbose — toggle verbose mode immediately
-      if (_isCmd(text, "/verbose", _botUsername)) {
-        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        await handleVerbose({ thread, agentThreadId, verboseThreads });
-        return;
-      }
-      // /doctor — run health checks immediately
-      if (_isCmd(text, "/doctor", _botUsername)) {
-        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        await handleDoctor({ thread, runDoctor, createDoctorContext, formatDoctorTelegram, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
-      }
-      // /crons manages scheduled jobs
-      if (_isCmdArgs(text, "/crons", _botUsername) || _isCmdArgs(text, "/jobs", _botUsername)) {
-        if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-        await handleCrons({ thread, text, cronScheduler: this.cronScheduler, postWithFallback: (t, txt) => this.postWithFallback(t, txt) });
-        return;
-      }
+
       await handle(thread, message);
     };
 
@@ -317,12 +302,15 @@ export class Gateway {
     loadPersona();
 
     // ── Handle inline keyboard callbacks ───
-    this.chat.onAction(MODEL_ACTION_ID, async (event: any) => {
-      await handleModelAction({ value: event.value, thread: event.thread });
-    });
-    this.chat.onAction(TOPIC_ACTION_ID, async (event: any) => {
-      await handleTopicAction({ value: event.value, thread: event.thread });
-    });
+    // ── Register inline-keyboard action handlers from all descriptors ───
+    for (const desc of allDescriptors) {
+      if (!desc.actions) continue;
+      for (const [actionId, handler] of Object.entries(desc.actions)) {
+        this.chat.onAction(actionId, async (event: any) => {
+          await handler({ value: event.value, thread: event.thread });
+        });
+      }
+    }
 
     await this.chat.initialize();
 
@@ -718,6 +706,111 @@ export class Gateway {
       postWithFallback: (t, text) => this.postWithFallback(t, text),
       stopGateway: () => this.stop(),
     };
+  }
+
+  /**
+   * Build the full list of command descriptors.
+   *
+   * Each descriptor self-describes its triggers, dispatch stage, argument
+   * acceptance, and optional inline-keyboard action handlers. The gateway
+   * iterates this list — no per-command branching in the message handler.
+   *
+   * Stage:
+   *   - "in-turn" (default): runs after allowlist + pairing inside handle()
+   *   - "pre-turn": runs first in handleOrAbort() so commands like /stop
+   *     can interrupt an in-flight agent turn
+   *
+   * Per-request state (thread, message, text) comes in via CommandInvocation;
+   * long-lived deps (cronScheduler, verboseThreads, abortControllers, …) are
+   * captured here from the surrounding start() closure.
+   */
+  private buildCommandDescriptors(deps: {
+    allowedUsers: string[];
+    allowedUserIds: number[];
+    verboseThreads: Set<string>;
+    threadLocks: Map<string, Promise<void>>;
+    abortControllers: Map<string, AbortController>;
+  }): CommandDescriptor[] {
+    const { allowedUsers, allowedUserIds, verboseThreads, threadLocks, abortControllers } = deps;
+    const post = (t: any, txt: string) => this.postWithFallback(t, txt);
+
+    // Shorthand: wrap a standard-CommandContext handler as a descriptor invoker.
+    const withCtx = (handler: (ctx: CommandContext) => Promise<void>) =>
+      async ({ thread, message, agentThreadId }: CommandInvocation) => {
+        const authorName = message.author?.userName ?? message.author?.userId ?? "?";
+        await handler(this.buildCommandContext(
+          thread, message, agentThreadId, authorName,
+          allowedUsers, allowedUserIds, verboseThreads, threadLocks,
+        ));
+      };
+
+    return [
+      // ── Standard CommandContext commands (in-turn, no args) ──
+      { triggers: ["/new"],     invoke: withCtx(handleNew) },
+      { triggers: ["/restart"], invoke: withCtx(handleRestart) },
+      { triggers: ["/update"],  invoke: withCtx(handleUpdate) },
+      { triggers: ["/compact"], invoke: withCtx(handleCompact) },
+      { triggers: ["/status"],  invoke: withCtx(handleStatus) },
+
+      // ── In-turn commands that accept args ──
+      {
+        triggers: ["/model"],
+        acceptsArgs: true,
+        invoke: ({ thread, text }) => handleModel({ thread, text, postWithFallback: post }),
+        actions: {
+          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value, thread: ev.thread }),
+        },
+      },
+      {
+        triggers: ["/later"],
+        acceptsArgs: true,
+        invoke: ({ thread, text }) => handleLater({ thread, text, postWithFallback: post }),
+      },
+      {
+        triggers: ["/topic"],
+        acceptsArgs: true,
+        invoke: ({ thread, text }) => handleTopic({ thread, text, postWithFallback: post }),
+        actions: {
+          [TOPIC_ACTION_ID]: (ev) => handleTopicAction({ value: ev.value, thread: ev.thread }),
+        },
+      },
+
+      // ── Pre-turn commands (abort-style; fire even during agent turn) ──
+      {
+        triggers: ["/stop"],
+        stage: "pre-turn",
+        invoke: ({ thread, agentThreadId }) => handleStop({
+          thread, agentThreadId,
+          agent: this.router.resolve(agentThreadId),
+          abortControllers,
+        }),
+      },
+      {
+        triggers: ["/verbose"],
+        stage: "pre-turn",
+        invoke: ({ thread, agentThreadId }) => handleVerbose({
+          thread, agentThreadId, verboseThreads,
+        }),
+      },
+      {
+        triggers: ["/doctor"],
+        stage: "pre-turn",
+        invoke: ({ thread }) => handleDoctor({
+          thread, runDoctor, createDoctorContext, formatDoctorTelegram,
+          postWithFallback: post,
+        }),
+      },
+      {
+        triggers: ["/crons", "/jobs"],
+        stage: "pre-turn",
+        acceptsArgs: true,
+        invoke: ({ thread, text }) => handleCrons({
+          thread, text,
+          cronScheduler: this.cronScheduler,
+          postWithFallback: post,
+        }),
+      },
+    ];
   }
 
   private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
