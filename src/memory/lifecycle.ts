@@ -279,9 +279,16 @@ export async function flushMemoryThenCompact(
     }
 
     const totalMs = Date.now() - t0;
-    // Only report flushModel as the compact model if we actually used it (i.e.
-    // the adapter exposed compactWithModel). If we fell back to agent.compact(),
-    // the model is whatever the adapter's default session model is.
+    // Telemetry nuance: if we called agent.compactWithModel(flushModel), that's
+    // what we *requested*. But per the AgentAdapter contract, a BaseAdapter-
+    // derived adapter may provide only a default `compactWithModel` shim that
+    // ignores modelId and delegates to compact() (see src/agents/base-adapter.ts).
+    // We cannot distinguish a real override from the shim at this layer
+    // without widening the adapter return type to include `modelUsed`.
+    // So `timing.model` is the requested model, not a guaranteed-used one.
+    // Follow-up: return {modelUsed} from compact/compactWithModel for precise
+    // telemetry. At minimum we correctly report "default" when no flushModel
+    // was even requested, or when compactWithModel is entirely absent.
     const timing = { flushMs, compactMs, totalMs, model: usedCompactModel ? flushModel! : "default" };
     console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens | flush=${flushMs}ms compact=${compactMs}ms total=${totalMs}ms model=${timing.model}`);
 
