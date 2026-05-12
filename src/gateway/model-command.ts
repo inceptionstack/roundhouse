@@ -11,6 +11,13 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  encodeCallbackData,
+  toKeyboardRows,
+  extractTelegramChatId,
+  type InlineButton,
+  type InlineKeyboard,
+} from "./inline-keyboard";
 
 /** Known model aliases → Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
@@ -40,9 +47,6 @@ export const MODEL_ACTION_ID = "model_select";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
-/** Callback data prefix used by @chat-adapter/telegram (coupled: if adapter changes this, buttons break) */
-const CALLBACK_PREFIX = "chat:";
-
 export interface ModelCommandContext {
   thread: any;
   text: string;
@@ -71,24 +75,16 @@ function getCurrentModel(settings: Record<string, any>): string {
   return `${model}`;
 }
 
-function encodeCallbackData(actionId: string, value: string): string {
-  return `${CALLBACK_PREFIX}${JSON.stringify({ a: actionId, v: value })}`;
-}
-
-function buildInlineKeyboard(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+function buildInlineKeyboard(): InlineKeyboard {
   // Layout: 2 buttons per row for compact display
-  const buttons = KEYBOARD_MODELS.map(alias => {
+  const buttons: InlineButton[] = KEYBOARD_MODELS.map(alias => {
     const info = MODEL_ALIASES[alias];
     return {
       text: info.label,
       callback_data: encodeCallbackData(MODEL_ACTION_ID, alias),
     };
   });
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let i = 0; i < buttons.length; i += 2) {
-    rows.push(buttons.slice(i, i + 2));
-  }
-  return { inline_keyboard: rows };
+  return toKeyboardRows(buttons);
 }
 
 export async function handleModel(ctx: ModelCommandContext): Promise<void> {
@@ -106,7 +102,7 @@ export async function handleModel(ctx: ModelCommandContext): Promise<void> {
     // Try to send with inline keyboard via telegramFetch
     const adapter = thread?.adapter;
     if (adapter?.telegramFetch) {
-      const chatId = thread?.platformThreadId?.split(":")?.[1] ?? thread?.id?.split(":")?.[1];
+      const chatId = extractTelegramChatId(thread);
       if (chatId) {
         try {
           await adapter.telegramFetch("sendMessage", {

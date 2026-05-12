@@ -20,13 +20,17 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from 
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ROUNDHOUSE_DIR } from "../config";
+import {
+  encodeCallbackData,
+  toKeyboardRows,
+  extractTelegramChatId,
+  type ChatThreadLike,
+  type InlineButton,
+  type InlineKeyboard,
+} from "./inline-keyboard";
 
 /** Action ID for topic-select inline-keyboard callbacks */
 export const TOPIC_ACTION_ID = "topic_select";
-
-/** Callback data prefix used by @chat-adapter/telegram. Coupled: if the
- *  adapter's prefix changes, buttons break silently. Mirrors model-command. */
-const CALLBACK_PREFIX = "chat:";
 
 /** Special sentinel value used by the "🏠 main (default)" button. */
 const MAIN_SENTINEL = "__main__";
@@ -91,23 +95,20 @@ export function listTopics(chatId: string): string[] {
 }
 
 export interface TopicCommandContext {
-  thread: any;
+  thread: ChatThreadLike;
   text: string;
-  postWithFallback: (thread: any, text: string) => Promise<void>;
-}
-
-function encodeCallbackData(actionId: string, value: string): string {
-  return `${CALLBACK_PREFIX}${JSON.stringify({ a: actionId, v: value })}`;
+  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>;
 }
 
 /** Build an inline keyboard listing all known topics + a "main" escape hatch. */
-function buildTopicKeyboard(topics: string[], current: string | undefined):
-  { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
-  const buttons: Array<{ text: string; callback_data: string }> = [];
+function buildTopicKeyboard(topics: string[], current: string | undefined): InlineKeyboard {
+  const onMain = !current;
+  const buttons: InlineButton[] = [];
 
-  // Always include "main (default)" first so users can escape back
+  // Always include "main (default)" first so users can escape back.
+  // ✓ appears when we're currently on main (i.e. no active topic).
   buttons.push({
-    text: current ? "🏠 main (default)" : "🏠 main (default) ✓",
+    text: onMain ? "🏠 main (default) ✓" : "🏠 main (default)",
     callback_data: encodeCallbackData(TOPIC_ACTION_ID, MAIN_SENTINEL),
   });
 
@@ -119,12 +120,7 @@ function buildTopicKeyboard(topics: string[], current: string | undefined):
     });
   }
 
-  // 2-column layout for compact display
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let i = 0; i < buttons.length; i += 2) {
-    rows.push(buttons.slice(i, i + 2));
-  }
-  return { inline_keyboard: rows };
+  return toKeyboardRows(buttons);
 }
 
 /** Normalize a topic name the same way as the command parser. */
@@ -158,9 +154,9 @@ export async function handleTopic(ctx: TopicCommandContext): Promise<void> {
 
 /** Show the current topic + inline keyboard (or text fallback). */
 async function showTopicMenu(
-  thread: any,
+  thread: ChatThreadLike,
   chatId: string,
-  postWithFallback: (thread: any, text: string) => Promise<void>,
+  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>,
 ): Promise<void> {
   const current = getActiveTopic(chatId);
   const currentDisplay = current ?? "main (default)";
@@ -168,12 +164,12 @@ async function showTopicMenu(
 
   // Try inline keyboard if we have any known topics and the adapter supports
   // raw Telegram calls. Otherwise fall back to text.
-  const adapter = thread?.adapter;
-  if (known.length > 0 && adapter?.telegramFetch) {
-    const tgChatId = thread?.platformThreadId?.split(":")?.[1] ?? thread?.id?.split(":")?.[1];
+  const telegramFetch = thread?.adapter?.telegramFetch;
+  if (known.length > 0 && telegramFetch) {
+    const tgChatId = extractTelegramChatId(thread);
     if (tgChatId) {
       try {
-        await adapter.telegramFetch("sendMessage", {
+        await telegramFetch("sendMessage", {
           chat_id: tgChatId,
           text: `📂 Current topic: <b>${currentDisplay}</b>\n\nTap a topic to switch:`,
           parse_mode: "HTML",
@@ -202,8 +198,8 @@ async function showTopicMenu(
 export async function applyTopicSelection(
   chatId: string,
   topicName: string,
-  thread: any,
-  postWithFallback: (thread: any, text: string) => Promise<void>,
+  thread: ChatThreadLike,
+  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>,
 ): Promise<void> {
   setActiveTopic(chatId, topicName);
   const isDefault = topicName === "main" || topicName === "off" || topicName === "";
@@ -221,7 +217,7 @@ export async function applyTopicSelection(
  */
 export async function handleTopicAction(event: {
   value?: string;
-  thread: any;
+  thread: ChatThreadLike;
 }): Promise<void> {
   const raw = event.value;
   if (!raw) return;
@@ -233,8 +229,8 @@ export async function handleTopicAction(event: {
   const topicName = raw === MAIN_SENTINEL ? "main" : normalizeTopicName(raw);
   if (!topicName && raw !== MAIN_SENTINEL) return;
 
-  const postFn = async (_t: any, text: string) => {
-    if (!thread) return;
+  const postFn = async (_t: ChatThreadLike, text: string) => {
+    if (!thread?.post) return;
     try { await thread.post({ markdown: text }); }
     catch { try { await thread.post(text); } catch { /* ignore */ } }
   };
