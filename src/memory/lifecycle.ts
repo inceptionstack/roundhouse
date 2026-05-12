@@ -227,20 +227,44 @@ export async function flushMemoryThenCompact(
   const effectiveLevel = level === "manual" ? "hard" : level;
   const t0 = Date.now();
 
+  // On "emergency" we skip the flush step entirely. Flush is a normal agent
+  // prompt turn routed through the live session (see PiAdapter.promptWithModel
+  // → entry.session.prompt). At emergency pressure the session is already at
+  // or above the model's context limit, so appending any turn — including the
+  // flush prompt — will be rejected by the provider (e.g. Bedrock returns
+  // "prompt is too long: N tokens > 200000 maximum"). Because the catch block
+  // below re-arms `pendingCompact`, this would loop forever on every user
+  // turn. pi-ai's `session.compact()` builds its own summarization payload
+  // from older history (keeping `keepRecentTokens` recent messages) and does
+  // NOT require the live session to fit under the limit — so skipping flush
+  // lets us recover. Facts-to-MEMORY.md (the whole point of flush) is a
+  // best-effort nicety that the next soft/hard flush can catch up on.
+  const skipFlush = effectiveLevel === "emergency";
+
   try {
-    // Step 1: flush
-    const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
-    console.log(`[memory] flushing memory for ${threadId} (level: ${level}${flushModel ? `, model: ${flushModel}` : ""})`);
-    await onProgress?.("💭 Flushing memory...");
-    await sendFlush(flushText);
-    const flushMs = Date.now() - t0;
+    let flushMs = 0;
+    if (!skipFlush) {
+      // Step 1: flush
+      const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
+      console.log(`[memory] flushing memory for ${threadId} (level: ${level}${flushModel ? `, model: ${flushModel}` : ""})`);
+      await onProgress?.("💭 Flushing memory...");
+      await sendFlush(flushText);
+      flushMs = Date.now() - t0;
+    } else {
+      console.log(`[memory] skipping flush for ${threadId} — emergency pressure, going straight to compact`);
+    }
 
     // Step 2: compact (use flush model if compactWithModel is available)
-    console.log(`[memory] compacting ${threadId} (flush took ${flushMs}ms)`);
-    await onProgress?.(`✂️ Compacting context... (flush took ${(flushMs / 1000).toFixed(1)}s)`);
+    const flushNote = skipFlush ? "flush skipped (emergency)" : `flush took ${flushMs}ms`;
+    console.log(`[memory] compacting ${threadId} (${flushNote})`);
+    const progressNote = skipFlush
+      ? "✂️ Compacting context... (emergency — skipping flush)"
+      : `✂️ Compacting context... (flush took ${(flushMs / 1000).toFixed(1)}s)`;
+    await onProgress?.(progressNote);
     const t1 = Date.now();
-    const result = flushModel && agent.compactWithModel
-      ? await agent.compactWithModel(threadId, flushModel)
+    const usedCompactModel = Boolean(flushModel && agent.compactWithModel);
+    const result = usedCompactModel
+      ? await agent.compactWithModel!(threadId, flushModel!)
       : await agent.compact!(threadId);
     const compactMs = Date.now() - t1;
     if (!result) return null;
@@ -255,7 +279,17 @@ export async function flushMemoryThenCompact(
     }
 
     const totalMs = Date.now() - t0;
-    const timing = { flushMs, compactMs, totalMs, model: flushModel ?? "default" };
+    // Telemetry nuance: if we called agent.compactWithModel(flushModel), that's
+    // what we *requested*. But per the AgentAdapter contract, a BaseAdapter-
+    // derived adapter may provide only a default `compactWithModel` shim that
+    // ignores modelId and delegates to compact() (see src/agents/base-adapter.ts).
+    // We cannot distinguish a real override from the shim at this layer
+    // without widening the adapter return type to include `modelUsed`.
+    // So `timing.model` is the requested model, not a guaranteed-used one.
+    // Follow-up: return {modelUsed} from compact/compactWithModel for precise
+    // telemetry. At minimum we correctly report "default" when no flushModel
+    // was even requested, or when compactWithModel is entirely absent.
+    const timing = { flushMs, compactMs, totalMs, model: usedCompactModel ? flushModel! : "default" };
     console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens | flush=${flushMs}ms compact=${compactMs}ms total=${totalMs}ms model=${timing.model}`);
 
     // Persist timing log for debugging (async, fire-and-forget)
