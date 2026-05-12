@@ -2,6 +2,30 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.25] — 2026-05-12
+
+### Fixed
+- **Emergency-compact loop** — when a pi session exceeded the model's context limit (e.g. Bedrock 200k), the memory-flush step sent a prompt through the already-overloaded session, which the provider rejected, leaving `pendingCompact = "emergency"` re-armed on every turn (infinite loop). Fix: on emergency pressure, skip flush entirely and go straight to `session.compact()`, which builds its own summarization payload from older history and does not require the live session to fit under the limit. (#122)
+- **Telemetry:** `timing.model` no longer mis-reports the flush model when the adapter lacks `compactWithModel`. Documented remaining BaseAdapter-shim ambiguity inline. (#122)
+- **Soft flush no longer blocks thread lock** — Haiku flush (30–120s) runs outside the lock; hard/emergency compact still inside for memory invariants. Removes 2-minute silent dead zones after user messages. (#110)
+- **Session auto-repair** — corrupted session history (orphan tool-call/result pairs from crashed tools) is now detected and the session file repaired on the fly, preventing permanent thread wedging. (#118)
+- **Sub-agent orphan recovery** — watcher checks stdout before marking a run failed on non-zero exit, so runs that produced output survive process crashes. (#109)
+- **Sub-agent completion on non-zero exit** — runs with stdout output treated as complete regardless of exit code. (#105)
+- **Sub-agents run with `--no-extensions --no-skills`** — prevents stale-context crashes on teardown. (#107)
+- **Boot turn** — synthetic thread now fully transport-agnostic via `transport.createThread()`. Fixes Telegram coupling and missing `handleStream`. (#100, #102, #103)
+
+### Added
+- **`/topic` inline keyboard** — tap-to-switch topic menu in private chats with `🏠 main` escape button; falls back to text list when no topics exist. Sentinel design: button value is `-main` so user input can never collide (leading `-` stripped by normalizer). (#120)
+- **Cron management notifications via IPC** — `roundhouse cron add/pause/resume/trigger/delete` now posts to the active transport without spawning an agent turn. (#114)
+- **Sub-agent completion injects result into parent agent** — synthetic agent turn fires with stdout, so the parent "hears" what the sub-agent did. (#108)
+- **Sub-agent launch notification** (🔬) via `onSpawn()` observer on the orchestrator interface. (#111, #112)
+
+### Changed
+- **Gateway notifications use markdown** — transport adapters convert to their native format (Telegram HTML, future Slack mrkdwn). Removed `parseMode` from the transport interface. (#113)
+- **Command dispatch: descriptor pattern** — each command declares `{triggers, stage, acceptsArgs, invoke, actions}` and the gateway iterates a single list. Replaces three branching dispatch loops. Adding a command is now one object literal. (#121)
+- **Clean code pass** on `cron-commands` + gateway (SRP/DRY extraction). (#115)
+- **Slack adapter design doc** added (Socket Mode, `pairedChannels`, DM-based pairing, progressive streaming). (#116, #117)
+
 ## [0.5.19] — 2026-05-10
 - Sub-agent orchestrator: spawn background Pi agents for review/research/scout/implementation
 - CLI: `roundhouse subagent spawn/status/list/abort`
