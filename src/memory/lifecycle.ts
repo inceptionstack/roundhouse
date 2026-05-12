@@ -262,8 +262,9 @@ export async function flushMemoryThenCompact(
       : `✂️ Compacting context... (flush took ${(flushMs / 1000).toFixed(1)}s)`;
     await onProgress?.(progressNote);
     const t1 = Date.now();
-    const result = flushModel && agent.compactWithModel
-      ? await agent.compactWithModel(threadId, flushModel)
+    const usedCompactModel = Boolean(flushModel && agent.compactWithModel);
+    const result = usedCompactModel
+      ? await agent.compactWithModel!(threadId, flushModel!)
       : await agent.compact!(threadId);
     const compactMs = Date.now() - t1;
     if (!result) return null;
@@ -278,7 +279,10 @@ export async function flushMemoryThenCompact(
     }
 
     const totalMs = Date.now() - t0;
-    const timing = { flushMs, compactMs, totalMs, model: flushModel ?? "default" };
+    // Only report flushModel as the compact model if we actually used it (i.e.
+    // the adapter exposed compactWithModel). If we fell back to agent.compact(),
+    // the model is whatever the adapter's default session model is.
+    const timing = { flushMs, compactMs, totalMs, model: usedCompactModel ? flushModel! : "default" };
     console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens | flush=${flushMs}ms compact=${compactMs}ms total=${totalMs}ms model=${timing.model}`);
 
     // Persist timing log for debugging (async, fire-and-forget)

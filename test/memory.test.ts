@@ -383,4 +383,47 @@ describe("flushMemoryThenCompact emergency path", () => {
     const state = await loadThreadMemoryState(threadId);
     expect(state.pendingCompact).toBe("emergency");
   });
+
+  it("emergency_whenOnlyCompactAvailable_fallsBackAndRecordsDefaultModel", async () => {
+    // Adapter exposes compact() but NOT compactWithModel() — exercise fallback branch.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-compact-only");
+    agent.compactWithModel = undefined;
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    const methods = agent.calls.map(c => c.method);
+    expect(methods).toContain("compact");
+    expect(methods).not.toContain("compactWithModel");
+    // Telemetry: model should reflect that the flush model was NOT used for compact.
+    expect(result?.timing?.model).toBe("default");
+  });
+
+  it("hard_whenOnlyPromptAvailable_usesPlainPrompt", async () => {
+    // Adapter lacks promptWithModel — exercise the fallback inside sendFlush.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("hard-prompt-fallback");
+    agent.promptWithModel = undefined;
+
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "hard");
+
+    const methods = agent.calls.map(c => c.method);
+    expect(methods).toContain("prompt");
+    expect(methods).not.toContain("promptWithModel");
+  });
+
+  it("hard_whenCompactReturnsNull_doesNotMutateState", async () => {
+    // Compact returns null (nothing to compact) — early-exit branch.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("hard-compact-null");
+    agent.compactWithModel = async () => null;
+    agent.compact = async () => null;
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "hard");
+    expect(result).toBeNull();
+    const state = await loadThreadMemoryState(threadId);
+    // Neither success (lastCompactAt) nor failure (pendingCompact) state recorded.
+    expect(state.lastCompactAt).toBeUndefined();
+    expect(state.pendingCompact).toBeUndefined();
+  });
 });
