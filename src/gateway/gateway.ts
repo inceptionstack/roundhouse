@@ -25,7 +25,7 @@ import { handleStreaming as _handleStream } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
-import { handleTopic, applyTopicOverride } from "./topic-command";
+import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
 import { TelegramAdapter } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
@@ -319,6 +319,9 @@ export class Gateway {
     // ── Handle inline keyboard callbacks ───
     this.chat.onAction(MODEL_ACTION_ID, async (event: any) => {
       await handleModelAction({ value: event.value, thread: event.thread });
+    });
+    this.chat.onAction(TOPIC_ACTION_ID, async (event: any) => {
+      await handleTopicAction({ value: event.value, thread: event.thread });
     });
 
     await this.chat.initialize();
