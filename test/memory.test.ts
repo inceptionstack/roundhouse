@@ -2,12 +2,19 @@
  * test/memory.test.ts — Unit tests for memory system
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } from "../src/memory/policy";
 import { buildMemoryInjection, injectMemoryIntoMessage } from "../src/memory/inject";
 import { buildFlushPrompt } from "../src/memory/prompts";
-import { determineMemoryMode } from "../src/memory/lifecycle";
+import { determineMemoryMode, flushMemoryThenCompact } from "../src/memory/lifecycle";
+import { loadThreadMemoryState } from "../src/memory/state";
+import { ROUNDHOUSE_DIR } from "../src/config";
+import { threadIdToDir } from "../src/util";
 import type { ThreadMemoryState, MemorySnapshot } from "../src/memory/types";
+import type { AgentAdapter, AgentResponse } from "../src/types";
 
 // ── Mode detection ───────────────────────────────────
 
@@ -254,5 +261,126 @@ describe("CompactResult", () => {
     const result: CompactResult = { tokensBefore: 80000, tokensAfter: 5000, timing };
     expect(result.timing!.flushMs).toBe(3000);
     expect(result.timing!.model).toBe("haiku");
+  });
+});
+
+// ── flushMemoryThenCompact: emergency skips flush ──────────────
+
+/**
+ * Regression tests for the emergency-compact loop bug:
+ * at emergency pressure the live session is already over the model's context
+ * limit, so sending a flush prompt through the same session would be rejected
+ * by the provider, set pendingCompact = "emergency", and loop forever.
+ * Fix: on emergency, skip flush and go straight to compact.
+ * See src/memory/lifecycle.ts flushMemoryThenCompact().
+ */
+describe("flushMemoryThenCompact emergency path", () => {
+  const createdThreads: string[] = [];
+
+  afterEach(async () => {
+    // Clean up any memory-state files the tests created.
+    for (const id of createdThreads.splice(0)) {
+      const path = resolve(ROUNDHOUSE_DIR, "memory-state", `${threadIdToDir(id)}.json`);
+      await rm(path, { force: true });
+    }
+  });
+
+  interface FakeAdapter extends AgentAdapter {
+    calls: { method: "promptWithModel" | "prompt" | "compactWithModel" | "compact"; args: unknown[] }[];
+  }
+
+  function makeFakeAdapter(): FakeAdapter {
+    const calls: FakeAdapter["calls"] = [];
+    const adapter: Partial<FakeAdapter> = {
+      name: "fake",
+      calls,
+      // Full mode (no built-in memory) so pendingCompact is cleared on success.
+      getInfo: () => ({ hasMemoryExtension: false }) as any,
+      async prompt(threadId, message): Promise<AgentResponse> {
+        calls.push({ method: "prompt", args: [threadId, message] });
+        return { text: "" };
+      },
+      async promptWithModel(threadId, message, modelId): Promise<AgentResponse> {
+        calls.push({ method: "promptWithModel", args: [threadId, message, modelId] });
+        return { text: "" };
+      },
+      async compact(threadId) {
+        calls.push({ method: "compact", args: [threadId] });
+        return { tokensBefore: 216000, tokensAfter: 5000 };
+      },
+      async compactWithModel(threadId, modelId) {
+        calls.push({ method: "compactWithModel", args: [threadId, modelId] });
+        return { tokensBefore: 216000, tokensAfter: 5000 };
+      },
+      promptStream: (() => { throw new Error("not used"); }) as any,
+      dispose: async () => {},
+    };
+    return adapter as FakeAdapter;
+  }
+
+  function uniqueThreadId(tag: string): string {
+    const id = `test:${tag}:${randomUUID()}`;
+    createdThreads.push(id);
+    return id;
+  }
+
+  it("emergency_doesNotSendFlushPrompt_callsCompactDirectly", async () => {
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-skip");
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    expect(result).not.toBeNull();
+    const flushCalls = agent.calls.filter(c => c.method === "prompt" || c.method === "promptWithModel");
+    expect(flushCalls).toHaveLength(0);
+    const compactCalls = agent.calls.filter(c => c.method === "compact" || c.method === "compactWithModel");
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("emergency_clearsPendingCompact_onSuccess", async () => {
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-clear");
+
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBeUndefined();
+    expect(state.lastCompactAt).toBeDefined();
+    expect(state.forceInjectReason).toBe("after-compact");
+  });
+
+  it("emergency_recordsZeroFlushMs_inTiming", async () => {
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-timing");
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+    expect(result?.timing?.flushMs).toBe(0);
+    expect(result?.timing?.compactMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("hard_sendsFlushPrompt_thenCompacts", async () => {
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("hard-normal");
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "hard");
+    expect(result).not.toBeNull();
+    const methodOrder = agent.calls.map(c => c.method);
+    // Expect flush (promptWithModel) to precede compact (compactWithModel)
+    const flushIdx = methodOrder.findIndex(m => m === "promptWithModel" || m === "prompt");
+    const compactIdx = methodOrder.findIndex(m => m === "compactWithModel" || m === "compact");
+    expect(flushIdx).toBeGreaterThanOrEqual(0);
+    expect(compactIdx).toBeGreaterThan(flushIdx);
+  });
+
+  it("emergency_whenCompactFails_rearmsPendingCompact", async () => {
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-compact-fails");
+    // Make compact throw to exercise the catch block
+    agent.compactWithModel = async () => { throw new Error("boom"); };
+    agent.compact = async () => { throw new Error("boom"); };
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+    expect(result).toBeNull();
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBe("emergency");
   });
 });
