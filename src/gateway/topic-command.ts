@@ -32,8 +32,15 @@ import {
 /** Action ID for topic-select inline-keyboard callbacks */
 export const TOPIC_ACTION_ID = "topic_select";
 
-/** Special sentinel value used by the "🏠 main (default)" button. */
-const MAIN_SENTINEL = "__main__";
+/**
+ * Special sentinel value used by the "🏠 main (default)" button.
+ *
+ * Must be a string that `normalizeTopicName()` can never emit, so that a user
+ * who creates a topic via `/topic <name>` can't accidentally collide with it.
+ * The normalizer strips leading/trailing `-`, so any sentinel starting or
+ * ending with `-` is unrepresentable as a user-created topic name.
+ */
+const MAIN_SENTINEL = "-main";
 
 const TOPICS_FILE = join(ROUNDHOUSE_DIR, "active-topics.json");
 

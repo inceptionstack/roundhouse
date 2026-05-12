@@ -193,8 +193,19 @@ describe("topic-command", () => {
         id: "telegram:555",
         post: async () => {},
       };
-      await handleTopicAction({ value: "__main__", thread });
+      await handleTopicAction({ value: "-main", thread });
       expect(getActiveTopic("555")).toBeUndefined();
+    });
+
+    it("treats a user-created topic named '__main__' as a real topic, not the sentinel", async () => {
+      // Regression: old sentinel was '__main__' which collides with a valid
+      // user-created topic name. New sentinel '-main' is unrepresentable.
+      const thread = {
+        id: "telegram:557",
+        post: async () => {},
+      };
+      await handleTopicAction({ value: "__main__", thread });
+      expect(getActiveTopic("557")).toBe("__main__");
     });
 
     it("ignores empty callback value", async () => {
