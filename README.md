@@ -216,6 +216,8 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/new` | Start a fresh conversation (resets the agent session for this chat) |
 | `/compact` | Compact session context to free up tokens |
 | `/verbose` | Toggle tool status messages on/off for this chat |
+| `/toggle-review` | Toggle the pi-hard-no auto code review on/off (persists; no restart needed) |
+| `/toggle-code-review` | Alias of `/toggle-review` |
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
 | `/stop` | Stop the current agent run (abort tools, LLM calls, compaction) |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
@@ -245,6 +247,12 @@ Toggles verbose mode for the current chat. When ON, shows tool call status messa
 ### `/stop`
 
 Aborts the current agent run for this chat — stops any in-progress tool calls, LLM generation, and compaction. The session is preserved; send another message to continue the conversation.
+
+### `/toggle-review`
+
+Flips the [pi-hard-no](https://github.com/inceptionstack/pi-hard-no) auto code review on/off and **persists** the state. Takes effect on the next agent turn — no session restart needed (pi-hard-no v1.3.0+ re-reads the setting at each turn).
+
+Writes to whichever settings file pi-hard-no reads: project-local `<cwd>/.hardno/settings.json` if present, otherwise global `~/.pi/.hardno/settings.json`. The reply indicates which file was updated. Alias: `/toggle-code-review`.
 
 ### Follow-up notifications
 

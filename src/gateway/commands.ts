@@ -12,6 +12,7 @@ import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, de
 // TODO: move progress into TransportAdapter when multi-transport lands
 import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
+import { toggleEnabled, readEnabled } from "./code-review-toggle";
 
 // ── Types ────────────────────────────────────────────
 
@@ -417,4 +418,63 @@ export async function handleCrons(ctx: CronsContext): Promise<void> {
     stopTyping();
   }
   console.log(`[roundhouse] /crons for thread=${thread.id}`);
+}
+
+
+// ── /toggle-review ───────────────────────────────────
+
+export interface ToggleReviewContext {
+  thread: any;
+  agentThreadId: string;
+  /** Agent cwd for local-vs-global settings routing. Optional; when absent,
+   * we write to global ~/.pi/.hardno/settings.json. */
+  agentCwd?: string;
+}
+
+/**
+ * Toggle the pi-hard-no auto code-review on/off persistently.
+ *
+ * Writes to whichever settings file pi-hard-no would read (local `.hardno/`
+ * in the agent's cwd if present, else global `~/.pi/.hardno/`). Takes effect
+ * on the NEXT agent turn — no session restart needed — because pi-hard-no
+ * v1.3.0+ re-reads this field at each agent_end.
+ *
+ * If pi-hard-no isn't installed, the write still succeeds (just a JSON file
+ * nobody reads). We can't reliably detect install state, so we don't try.
+ */
+export async function handleToggleReview(ctx: ToggleReviewContext): Promise<void> {
+  const { thread, agentThreadId, agentCwd } = ctx;
+  try {
+    const result = toggleEnabled({ cwd: agentCwd });
+    const state = result.enabled ? "on" : "off";
+    const icon = result.enabled ? "✅" : "🔕";
+    const scope = result.wroteLocal ? "project-local" : "global";
+    const firstTime = result.fileExisted ? "" : "\n_(First time — created settings file.)_";
+    await thread.post(
+      `${icon} Code review: *${state}*\n\n` +
+        `_Wrote to ${scope} config (\`${result.settingsPath}\`). ` +
+        `Takes effect on the next agent turn — no restart needed._` +
+        firstTime
+    );
+    console.log(
+      `[roundhouse] /toggle-review thread=${thread.id} agentThread=${agentThreadId} → enabled=${result.enabled} path=${result.settingsPath}`
+    );
+  } catch (err) {
+    const msg = (err as Error).message;
+    console.error(`[roundhouse] /toggle-review failed:`, err);
+    try {
+      await thread.post(`⚠️ Toggle failed: ${msg}`);
+    } catch {
+      /* best-effort notify */
+    }
+  }
+}
+
+/**
+ * Show current code review state without toggling. Read-only helper for UX.
+ */
+export function currentReviewState(agentCwd?: string): "on" | "off" | "default" {
+  const v = readEnabled({ cwd: agentCwd });
+  if (v === null) return "default";
+  return v ? "on" : "off";
 }
