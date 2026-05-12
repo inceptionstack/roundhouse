@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   isPreTurn,
   matchesDescriptor,
+  collectAndValidateActions,
   type CommandDescriptor,
   type CommandMatchers,
 } from "../src/gateway/command-registry";
@@ -83,6 +84,67 @@ describe("command-registry", () => {
       const d = makeDescriptor({ triggers: ["/cmd"] });
       matchesDescriptor(d, "/cmd", customMatchers);
       expect(customMatchers.isCommand).toHaveBeenCalledWith("/cmd", "/cmd");
+    });
+  });
+
+  describe("collectAndValidateActions", () => {
+    it("returns an empty list when no descriptor has actions", () => {
+      const result = collectAndValidateActions([
+        makeDescriptor({ triggers: ["/a"] }),
+        makeDescriptor({ triggers: ["/b"] }),
+      ]);
+      expect(result).toEqual([]);
+    });
+
+    it("collects all action ids in registration order", () => {
+      const h1 = vi.fn();
+      const h2 = vi.fn();
+      const h3 = vi.fn();
+      const result = collectAndValidateActions([
+        makeDescriptor({ triggers: ["/x"], actions: { action_a: h1, action_b: h2 } }),
+        makeDescriptor({ triggers: ["/y"], actions: { action_c: h3 } }),
+      ]);
+      expect(result.map(r => r.actionId)).toEqual(["action_a", "action_b", "action_c"]);
+    });
+
+    it("returns the owner's triggers alongside each handler", () => {
+      const result = collectAndValidateActions([
+        makeDescriptor({ triggers: ["/topic"], actions: { topic_select: vi.fn() } }),
+      ]);
+      expect(result[0]!.ownerTriggers).toEqual(["/topic"]);
+    });
+
+    it("throws on duplicate action ids across descriptors", () => {
+      expect(() => collectAndValidateActions([
+        makeDescriptor({ triggers: ["/first"], actions: { shared_id: vi.fn() } }),
+        makeDescriptor({ triggers: ["/second"], actions: { shared_id: vi.fn() } }),
+      ])).toThrow(/duplicate action id 'shared_id'/);
+    });
+
+    it("includes both owners' triggers in the error message for diagnosis", () => {
+      try {
+        collectAndValidateActions([
+          makeDescriptor({ triggers: ["/first"], actions: { shared_id: vi.fn() } }),
+          makeDescriptor({ triggers: ["/second", "/alt"], actions: { shared_id: vi.fn() } }),
+        ]);
+        expect.fail("should have thrown");
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).toContain("/first");
+        expect(msg).toContain("/second");
+        expect(msg).toContain("/alt");
+      }
+    });
+
+    it("allows the same action id on a single descriptor's multiple entries? no — JS object keys dedupe, but throws for two descriptors", () => {
+      // This is really just documenting behavior: one descriptor can't have
+      // the same key twice in its object literal (JS collapses them), so the
+      // only failure mode is across descriptors.
+      const h = vi.fn();
+      const result = collectAndValidateActions([
+        makeDescriptor({ triggers: ["/solo"], actions: { only_id: h } }),
+      ]);
+      expect(result).toHaveLength(1);
     });
   });
 });

@@ -29,6 +29,7 @@ import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } f
 import {
   type CommandDescriptor,
   type CommandInvocation,
+  collectAndValidateActions,
   isPreTurn,
   matchesDescriptor,
 } from "./command-registry";
@@ -228,7 +229,7 @@ export class Gateway {
 
     // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
-      let agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
+      const agentThreadId = applyTopicOverride(_resolveThread(thread, message), thread);
       const userText = message.text ?? "";
       const authorName = message.author?.userName ?? message.author?.userId ?? "?";
       const rawAttachments = message.attachments ?? [];
@@ -303,13 +304,13 @@ export class Gateway {
 
     // ── Handle inline keyboard callbacks ───
     // ── Register inline-keyboard action handlers from all descriptors ───
-    for (const desc of allDescriptors) {
-      if (!desc.actions) continue;
-      for (const [actionId, handler] of Object.entries(desc.actions)) {
-        this.chat.onAction(actionId, async (event: any) => {
-          await handler({ value: event.value, thread: event.thread });
-        });
-      }
+    // `collectAndValidateActions` throws if two descriptors claim the same
+    // action id — duplicates would silently misbehave on chat.onAction, so
+    // fail fast at startup.
+    for (const { actionId, handler } of collectAndValidateActions(allDescriptors)) {
+      this.chat.onAction(actionId, async (event: any) => {
+        await handler({ value: event.value, thread: event.thread });
+      });
     }
 
     await this.chat.initialize();

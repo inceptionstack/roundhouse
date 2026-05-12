@@ -122,3 +122,37 @@ export function matchesDescriptor(
   }
   return false;
 }
+
+/**
+ * Validate that no two descriptors claim the same action id.
+ *
+ * Why: duplicate registrations at `chat.onAction(actionId, …)` produce
+ * silent misbehavior — last-wins on some adapters, double-fire on others.
+ * Failing fast at startup makes the coupling surface explicit.
+ *
+ * Throws on the first collision with both owners' trigger lists for easy
+ * diagnosis. Returns the set of (actionId, handler) pairs in registration
+ * order so the caller can iterate without re-walking descriptors.
+ */
+export function collectAndValidateActions(
+  descriptors: readonly CommandDescriptor[],
+): Array<{ actionId: string; handler: NonNullable<CommandDescriptor["actions"]>[string]; ownerTriggers: readonly string[] }> {
+  const result: Array<{ actionId: string; handler: any; ownerTriggers: readonly string[] }> = [];
+  const ownerByAction = new Map<string, readonly string[]>();
+
+  for (const desc of descriptors) {
+    if (!desc.actions) continue;
+    for (const [actionId, handler] of Object.entries(desc.actions)) {
+      const prior = ownerByAction.get(actionId);
+      if (prior) {
+        throw new Error(
+          `[command-registry] duplicate action id '${actionId}': claimed by ` +
+          `[${prior.join(",")}] and [${desc.triggers.join(",")}]. Action IDs must be unique.`,
+        );
+      }
+      ownerByAction.set(actionId, desc.triggers);
+      result.push({ actionId, handler, ownerTriggers: desc.triggers });
+    }
+  }
+  return result;
+}
