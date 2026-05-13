@@ -426,4 +426,36 @@ describe("flushMemoryThenCompact emergency path", () => {
     expect(state.lastCompactAt).toBeUndefined();
     expect(state.pendingCompact).toBeUndefined();
   });
+
+  it("hard_whenStateHasPendingEmergency_skipsFlushAndCompacts", async () => {
+    // Stuck-in-emergency recovery: if a prior turn left pendingCompact = 'emergency',
+    // even a 'hard' or 'manual' (which maps to hard) call must skip flush, because
+    // the live session is still over the limit and the flush prompt will be rejected.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("hard-stuck-in-emergency");
+    const { saveThreadMemoryState } = await import("../src/memory/state");
+    await saveThreadMemoryState(threadId, { pendingCompact: "emergency" });
+
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "hard");
+    expect(result).not.toBeNull();
+
+    const flushCalls = agent.calls.filter(c => c.method === "prompt" || c.method === "promptWithModel");
+    expect(flushCalls).toHaveLength(0);
+    const compactCalls = agent.calls.filter(c => c.method === "compact" || c.method === "compactWithModel");
+    expect(compactCalls).toHaveLength(1);
+  });
+
+  it("manual_whenStateHasPendingEmergency_skipsFlushAndCompacts", async () => {
+    // /compact on a stuck-emergency thread — manual maps to hard, but stuckInEmergency
+    // also forces flush-skip. Same recovery semantics.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("manual-stuck-in-emergency");
+    const { saveThreadMemoryState } = await import("../src/memory/state");
+    await saveThreadMemoryState(threadId, { pendingCompact: "emergency" });
+
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "manual");
+
+    const flushCalls = agent.calls.filter(c => c.method === "prompt" || c.method === "promptWithModel");
+    expect(flushCalls).toHaveLength(0);
+  });
 });

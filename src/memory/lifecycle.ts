@@ -239,7 +239,15 @@ export async function flushMemoryThenCompact(
   // NOT require the live session to fit under the limit — so skipping flush
   // lets us recover. Facts-to-MEMORY.md (the whole point of flush) is a
   // best-effort nicety that the next soft/hard flush can catch up on.
-  const skipFlush = effectiveLevel === "emergency";
+  //
+  // We also skip flush when state already has pendingCompact === "emergency":
+  // a prior turn detected emergency pressure and could not complete (e.g. the
+  // current call was triggered by /compact while stuck). Even at "hard" or
+  // "manual" level, attempting the flush in that condition will hit the same
+  // 200k rejection. Deferring flush to a later (successful) turn is the safe
+  // recovery path.
+  const stuckInEmergency = (await loadThreadMemoryState(threadId)).pendingCompact === "emergency";
+  const skipFlush = effectiveLevel === "emergency" || stuckInEmergency;
 
   try {
     let flushMs = 0;
@@ -255,10 +263,12 @@ export async function flushMemoryThenCompact(
     }
 
     // Step 2: compact (use flush model if compactWithModel is available)
-    const flushNote = skipFlush ? "flush skipped (emergency)" : `flush took ${flushMs}ms`;
+    const flushNote = skipFlush
+      ? (effectiveLevel === "emergency" ? "flush skipped (emergency)" : "flush skipped (recovery from prior emergency)")
+      : `flush took ${flushMs}ms`;
     console.log(`[memory] compacting ${threadId} (${flushNote})`);
     const progressNote = skipFlush
-      ? "✂️ Compacting context... (emergency — skipping flush)"
+      ? `✂️ Compacting context... (${effectiveLevel === "emergency" ? "emergency — " : "recovery — "}skipping flush)`
       : `✂️ Compacting context... (flush took ${(flushMs / 1000).toFixed(1)}s)`;
     await onProgress?.(progressNote);
     const t1 = Date.now();

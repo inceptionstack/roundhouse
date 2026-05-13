@@ -439,6 +439,26 @@ export class Gateway {
 
       stopTyping = startTypingLoop(thread);
 
+      // Pre-turn recovery: if a prior turn failed to compact (state has
+      // pendingCompact === "emergency"), the live session is almost certainly
+      // still over the model's context limit, so calling agent.prompt() now
+      // will throw with "prompt is too long" before our post-turn pressure
+      // handler ever runs — perpetuating the loop. Run the pressure handler
+      // BEFORE the agent call to recover. Best-effort: if it fails, fall
+      // through to the normal turn (which will then post the error and let
+      // the user see something is wrong).
+      if (memoryPrepared?.pendingCompact === "emergency") {
+        console.log(`[roundhouse] pre-turn recovery: pendingCompact=emergency, compacting before agent.prompt for thread=${agentThreadId}`);
+        try {
+          await this.handleContextPressure(thread, agentThreadId, agent, memoryRoot, "emergency");
+          // Clear the pending flag in our prepared snapshot so the post-turn
+          // pressure logic doesn't double-up on a redundant emergency pass.
+          memoryPrepared.pendingCompact = undefined;
+        } catch (err) {
+          console.error(`[roundhouse] pre-turn emergency compact failed:`, (err as Error).message);
+        }
+      }
+
       let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
       try {
         let turnUsedTools = false;
