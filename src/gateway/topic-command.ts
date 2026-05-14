@@ -169,10 +169,10 @@ async function showTopicMenu(
   const currentDisplay = current ?? "main (default)";
   const known = listTopics(chatId);
 
-  // Try inline keyboard if we have any known topics and the adapter supports
-  // raw Telegram calls. Otherwise fall back to text.
+  // Try inline keyboard if the adapter supports raw Telegram calls.
+  // Always show keyboard (main is always available), even if no custom topics yet.
   const telegramFetch = thread?.adapter?.telegramFetch;
-  if (known.length > 0 && telegramFetch) {
+  if (telegramFetch) {
     const tgChatId = extractTelegramChatId(thread);
     if (tgChatId) {
       try {
