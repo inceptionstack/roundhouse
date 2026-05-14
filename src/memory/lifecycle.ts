@@ -20,6 +20,36 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+// ── Telemetry helper ─────────────────────────────────
+
+interface CompactLogEntry {
+  threadId: string;
+  level: string;
+  effectiveLevel: string;
+  flushSkipped: boolean;
+  tokensBefore: number | null;
+  tokensAfter: number | null;
+  flushMs: number;
+  compactMs: number;
+  totalMs: number;
+  model: string;
+  status: "ok" | "failed";
+  error: string | null;
+}
+
+/**
+ * Append a compact telemetry entry. Fire-and-forget.
+ * Schema is uniform across success/failure (status discriminator) so
+ * downstream parsers don't have to handle missing fields.
+ */
+function appendCompactLog(entry: CompactLogEntry): void {
+  const logDir = join(homedir(), ".roundhouse", "logs");
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+  mkdir(logDir, { recursive: true })
+    .then(() => appendFile(join(logDir, "compact-timing.jsonl"), line))
+    .catch((err) => console.warn(`[memory] timing log write failed:`, (err as Error).message));
+}
+
 // ── Memory mode detection ────────────────────────────
 
 /**
@@ -246,11 +276,16 @@ export async function flushMemoryThenCompact(
   // "manual" level, attempting the flush in that condition will hit the same
   // 200k rejection. Deferring flush to a later (successful) turn is the safe
   // recovery path.
-  const stuckInEmergency = (await loadThreadMemoryState(threadId)).pendingCompact === "emergency";
+  const stateBeforeCompact = await loadThreadMemoryState(threadId);
+  const stuckInEmergency = stateBeforeCompact.pendingCompact === "emergency";
   const skipFlush = effectiveLevel === "emergency" || stuckInEmergency;
 
+  // Hoisted so the catch block can report accurate flush vs compact timing
+  // (a failure during compact() would otherwise conflate the two phases).
+  let flushMs = 0;
+  let compactMs = 0;
+
   try {
-    let flushMs = 0;
     if (!skipFlush) {
       // Step 1: flush
       const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, effectiveLevel);
@@ -276,16 +311,18 @@ export async function flushMemoryThenCompact(
     const result = usedCompactModel
       ? await agent.compactWithModel!(threadId, flushModel!)
       : await agent.compact!(threadId);
-    const compactMs = Date.now() - t1;
+    compactMs = Date.now() - t1;
     if (!result) return null;
 
-    // Step 3: mark force re-inject (Full mode only)
+    // Step 3: mark force re-inject (Full mode only). Reuse the state we
+    // already loaded above; the compact step doesn't mutate memory-state
+    // (it mutates the pi session, a separate file), so the in-memory copy
+    // is still authoritative for our fields.
     if (mode !== "complement") {
-      const state = await loadThreadMemoryState(threadId);
-      state.forceInjectReason = "after-compact";
-      state.lastCompactAt = new Date().toISOString();
-      state.pendingCompact = undefined;
-      await saveThreadMemoryState(threadId, state);
+      stateBeforeCompact.forceInjectReason = "after-compact";
+      stateBeforeCompact.lastCompactAt = new Date().toISOString();
+      stateBeforeCompact.pendingCompact = undefined;
+      await saveThreadMemoryState(threadId, stateBeforeCompact);
     }
 
     const totalMs = Date.now() - t0;
@@ -302,30 +339,44 @@ export async function flushMemoryThenCompact(
     const timing = { flushMs, compactMs, totalMs, model: usedCompactModel ? flushModel! : "default" };
     console.log(`[memory] flush+compact done for ${threadId}: ${result.tokensBefore} → ${result.tokensAfter ?? "?"} tokens | flush=${flushMs}ms compact=${compactMs}ms total=${totalMs}ms model=${timing.model}`);
 
-    // Persist timing log for debugging (async, fire-and-forget)
-    const logDir = join(homedir(), ".roundhouse", "logs");
-    mkdir(logDir, { recursive: true })
-      .then(() => {
-        const entry = JSON.stringify({
-          ts: new Date().toISOString(),
-          threadId,
-          level,
-          tokensBefore: result.tokensBefore,
-          tokensAfter: result.tokensAfter,
-          ...timing,
-        });
-        return appendFile(join(logDir, "compact-timing.jsonl"), entry + "\n");
-      })
-      .catch((err) => console.warn(`[memory] timing log write failed:`, (err as Error).message));
+    // Persist timing log for debugging (async, fire-and-forget).
+    // Schema is intentionally uniform across success and failure entries
+    // (status discriminator + same field set) so jsonl parsers don't have
+    // to special-case missing fields.
+    appendCompactLog({
+      threadId,
+      level,
+      effectiveLevel,
+      flushSkipped: skipFlush,
+      tokensBefore: result.tokensBefore,
+      tokensAfter: result.tokensAfter ?? null,
+      ...timing,
+      status: "ok",
+      error: null,
+    });
 
     return { ...result, timing };
   } catch (err) {
-    console.error(`[memory] flush+compact failed for ${threadId}:`, (err as Error).message);
-    // Mark pending so we retry on next turn
+    const errMsg = (err as Error).message;
+    console.error(`[memory] flush+compact failed for ${threadId}:`, errMsg);
+    appendCompactLog({
+      threadId,
+      level,
+      effectiveLevel,
+      flushSkipped: skipFlush,
+      tokensBefore: null,
+      tokensAfter: null,
+      flushMs,    // accurate: 0 if skipped or failed before flush completed
+      compactMs,  // accurate: 0 if failed before/during compact
+      totalMs: Date.now() - t0,
+      model: flushModel ?? "default",
+      status: "failed",
+      error: errMsg.slice(0, 500),
+    });
+    // Mark pending so we retry on next turn. Reuse the state we already loaded.
     try {
-      const state = await loadThreadMemoryState(threadId);
-      state.pendingCompact = effectiveLevel;
-      await saveThreadMemoryState(threadId, state);
+      stateBeforeCompact.pendingCompact = effectiveLevel;
+      await saveThreadMemoryState(threadId, stateBeforeCompact);
     } catch {}
     return null;
   }

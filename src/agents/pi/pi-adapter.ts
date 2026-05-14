@@ -608,7 +608,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
         const agentState = (entry.session as any).agent?.state;
         let currentModel: any;
+        let currentThinkingLevel: any;
         let modelSwapped = false;
+        let thinkingSwapped = false;
 
         // Resolve and swap model for compact
         if (!agentState) {
@@ -627,6 +629,19 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             modelSwapped = true;
             console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
           }
+
+          // Force thinking off for compact regardless of agent's default.
+          // Summarization doesn't benefit from reasoning, costs more tokens,
+          // and complicates the maxTokens math (adjustMaxTokensForThinking adds
+          // up to 16k thinking budget). Direct state mutation matches the model
+          // swap above and avoids setThinkingLevel(), which would persist to
+          // settings.json.
+          if (agentState.thinkingLevel && agentState.thinkingLevel !== "off") {
+            currentThinkingLevel = agentState.thinkingLevel;
+            agentState.thinkingLevel = "off";
+            thinkingSwapped = true;
+            console.log(`[pi-agent] compact forcing thinkingLevel=off (was ${currentThinkingLevel})`);
+          }
         }
 
         try {
@@ -639,6 +654,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         } finally {
           if (modelSwapped) {
             agentState.model = currentModel;
+          }
+          if (thinkingSwapped) {
+            agentState.thinkingLevel = currentThinkingLevel;
           }
         }
       });
