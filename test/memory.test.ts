@@ -578,4 +578,76 @@ describe("flushMemoryThenCompact emergency path", () => {
     // Soft reset failed — pendingCompact must be re-armed so user gets retry next turn.
     expect(state.pendingCompact).toBe("emergency");
   });
+
+  it("emergency_whenSoftResetSucceeds_emitsCompletionProgressMessage", async () => {
+    // Arrange: overflow + successful soft-reset; capture onProgress calls.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-softreset-progress-ok");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = async () => ({ reset: true, entriesBefore: 626, entriesAfter: 17 });
+    const progress: string[] = [];
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency", undefined, (s) => { progress.push(s); });
+
+    // Assert: both start AND completion messages were emitted.
+    expect(progress.some(s => s.includes("Session overflowed"))).toBe(true);
+    const done = progress.find(s => s.includes("Soft-reset complete"));
+    expect(done).toBeDefined();
+    expect(done).toContain("626");
+    expect(done).toContain("17");
+  });
+
+  it("emergency_whenSoftResetReturnsNoOp_emitsNoOpProgressMessage", async () => {
+    // Arrange: overflow but soft-reset reports nothing to do.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-softreset-progress-noop");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = async () => ({ reset: false, reason: "already-trimmed" });
+    const progress: string[] = [];
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency", undefined, (s) => { progress.push(s); });
+
+    // Assert: user sees the no-op outcome with reason, not silence.
+    expect(progress.some(s => s.includes("Soft-reset no-op") && s.includes("already-trimmed"))).toBe(true);
+  });
+
+  it("emergency_whenSoftResetThrows_emitsFailureProgressMessage", async () => {
+    // Arrange: overflow + soft-reset itself errors.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-softreset-progress-fail");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = async () => { throw new Error("disk full"); };
+    const progress: string[] = [];
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency", undefined, (s) => { progress.push(s); });
+
+    // Assert: user sees the failure, not silence.
+    expect(progress.some(s => s.includes("Soft-reset failed") && s.includes("disk full"))).toBe(true);
+  });
+
+  it("emergency_whenSoftResetThrowsNonError_doesNotMaskWithTypeError", async () => {
+    // Regression: F1 review. If softReset throws a non-Error (string, plain object),
+    // the catch handler must not crash on `.message` access — that would mask the
+    // original failure with a TypeError and break the user-facing notification.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-softreset-throws-string");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    // eslint-disable-next-line @typescript-eslint/no-throw-literal
+    agent.softReset = async () => { throw "connection reset"; };
+    const progress: string[] = [];
+
+    // Act + Assert: doesn't throw, and emits a failure message containing the string.
+    const result = await flushMemoryThenCompact(
+      threadId, agent, "/tmp", "emergency", undefined, (s) => { progress.push(s); }
+    );
+    expect(result).toBeNull();
+    expect(progress.some(s => s.includes("Soft-reset failed") && s.includes("connection reset"))).toBe(true);
+  });
 });
