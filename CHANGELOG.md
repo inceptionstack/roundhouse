@@ -2,6 +2,17 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.31] — 2026-05-14
+
+### Internal
+- **Refactor: session-repair module split + DRY shared error-classifier helper.** Pure refactor, zero behavior change. Addresses 7 maintainability findings from the post-v0.5.30 review:
+  - Extracted `matchesErrorPatterns()` shared helper so `isContextOverflowError` and `isToolPairingError` no longer duplicate ~80% of their structure. Both classifiers now walk the `cause` chain (previously only the overflow classifier did — fixed divergent-change smell). Both share `looksLikeValidationError()` gating.
+  - Extracted `buildTrimmedEntries()` from `softResetSessionFile` and `attemptSoftResetRecovery()` from `flushMemoryThenCompact`. The lifecycle catch block is now ~25 lines of linear flow (classify → recover → log → persist) instead of ~60 lines with a nested try/catch.
+  - `MAX_CAUSE_CHAIN_DEPTH = 5` named constant.
+  - Split `src/agents/shared/session-repair.ts` (574 lines, two domains) into four focused files: `session-repair.ts` (81 lines, public surface), `session-soft-reset.ts`, `error-classifiers.ts`, `session-repair-internal.ts`. All public exports preserved via re-exports for backward compat.
+  - Introduced `SessionRepairResult` named type replacing anonymous `{entries, report}` shape (named to avoid collision with the existing `RepairResult` in `message-validator.ts`).
+- 2 new regression tests for `isToolPairingError`'s now-fixed cause-chain walking. **536 tests passing.**
+
 ## [0.5.30] — 2026-05-14
 
 ### Fixed
