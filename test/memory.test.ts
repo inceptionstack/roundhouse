@@ -126,6 +126,26 @@ describe("classifyContextPressure", () => {
     expect(classifyContextPressure({ contextTokens: 45000, contextWindow: 100000, contextPercent: 45 }, config))
       .toBe("hard");
   });
+
+  it("clamps absolute thresholds to window minus headroom on small-window models", () => {
+    // 128k window: default hardTokens=150_000 would exceed window. Clamp to
+    // window - 50k headroom = 78k. tokens=80k should fire hard via the
+    // clamped absolute threshold even though percent (62.5%) is also above
+    // the 50% hardPercent (so this also exercises the OR branch).
+    expect(classifyContextPressure({ contextTokens: 80_000, contextWindow: 128_000, contextPercent: 62 }))
+      .toBe("hard");
+    // tokens=75k on 128k window: percent ~58% → still hard via percent.
+    // Switch to a percent below hardPct to isolate the absolute clamp:
+    expect(classifyContextPressure({ contextTokens: 79_000, contextWindow: 128_000, contextPercent: 40 }))
+      .toBe("hard");
+  });
+
+  it("never reports hard threshold above window on tiny-window models", () => {
+    // 64k window: ceiling = max(0, 64_000 - 50_000) = 14_000.
+    // tokens=15k, percent=23% — below hardPct (50%), but above clamped hardTok.
+    expect(classifyContextPressure({ contextTokens: 15_000, contextWindow: 64_000, contextPercent: 23 }))
+      .toBe("hard");
+  });
 });
 
 // ── Cooldown ─────────────────────────────────────────
