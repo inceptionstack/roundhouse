@@ -246,44 +246,65 @@ export function inspectSessionFile(path: string): {
  *
  * @returns report describing what was repaired
  */
+/**
+ * Pure in-memory tool-pairing repair. Takes entries, returns repaired entries
+ * + a report. Does not touch the filesystem. Used directly by
+ * `softResetSessionFile` so trim + repair land as a single atomic write, and
+ * via a thin wrapper by `repairSessionFile` for on-disk repair.
+ */
+function repairEntriesInMemory(entries: SessionFileEntry[]): {
+  entries: SessionFileEntry[];
+  report: SessionRepairReport;
+} {
+  const { messages } = extractMessages(entries);
+  const validation = validateToolPairing(messages);
+
+  if (validation.isValid) {
+    return {
+      entries,
+      report: {
+        repaired: false,
+        droppedEntryIds: [],
+        droppedToolCallIds: [],
+        droppedToolResultIds: [],
+        totalEntries: entries.length,
+      },
+    };
+  }
+
+  const orphanedCalls = new Set(validation.orphanedToolCallIds);
+  const orphanedResults = new Set(validation.orphanedToolResultIds);
+  const { entriesToDrop, entriesToEdit } = findEntriesToDrop(entries, orphanedCalls, orphanedResults);
+  const edited = applyEntryEdits(entries, entriesToEdit);
+  const kept = reparentDroppedEntries(edited, entriesToDrop);
+
+  return {
+    entries: kept,
+    report: {
+      repaired: true,
+      droppedEntryIds: Array.from(entriesToDrop),
+      droppedToolCallIds: validation.orphanedToolCallIds,
+      droppedToolResultIds: validation.orphanedToolResultIds,
+      totalEntries: entries.length,
+    },
+  };
+}
+
 export function repairSessionFile(path: string): SessionRepairReport {
   if (!existsSync(path)) {
     throw new Error(`Session file not found: ${path}`);
   }
 
   const entries = parseSessionFile(path);
-  const { messages } = extractMessages(entries);
-  const validation = validateToolPairing(messages);
+  const { entries: repaired, report } = repairEntriesInMemory(entries);
 
-  if (validation.isValid) {
-    return {
-      repaired: false,
-      droppedEntryIds: [],
-      droppedToolCallIds: [],
-      droppedToolResultIds: [],
-      totalEntries: entries.length,
-    };
-  }
-
-  const orphanedCalls = new Set(validation.orphanedToolCallIds);
-  const orphanedResults = new Set(validation.orphanedToolResultIds);
-
-  const { entriesToDrop, entriesToEdit } = findEntriesToDrop(entries, orphanedCalls, orphanedResults);
-  const edited = applyEntryEdits(entries, entriesToEdit);
-  const kept = reparentDroppedEntries(edited, entriesToDrop);
+  if (!report.repaired) return report;
 
   const backupPath = backupFile(path);
-  const newContent = kept.map(e => JSON.stringify(e)).join('\n') + '\n';
+  const newContent = repaired.map(e => JSON.stringify(e)).join('\n') + '\n';
   atomicWrite(path, newContent);
 
-  return {
-    repaired: true,
-    droppedEntryIds: Array.from(entriesToDrop),
-    droppedToolCallIds: validation.orphanedToolCallIds,
-    droppedToolResultIds: validation.orphanedToolResultIds,
-    backupPath,
-    totalEntries: entries.length,
-  };
+  return { ...report, backupPath };
 }
 
 // ── Soft reset (recovery from already-overflowed sessions) ──────────────
@@ -323,12 +344,19 @@ export interface SoftResetReport {
 
 /**
  * Find a safe cut index in the entries array. Walk backwards from the end
- * looking for user message entries; the cut sits *just before* the Nth
- * most-recent user message we encounter. Returns the index of the first
- * entry to KEEP (i.e. all entries[0..cutIdx) are dropped).
+ * looking for user message entries; the cut sits *at* the Nth most-recent
+ * user message we encounter (so the kept tail starts on a user turn).
+ * Returns the index of the first entry to KEEP (i.e. all entries[0..cutIdx)
+ * are dropped).
  *
- * If we can't find enough user messages, returns 1 to keep everything except
- * the session header (which we preserve separately).
+ * Byte-cap path: if we exceed the byte budget before reaching N user turns,
+ * we still snap the cut to the most-recent user-message boundary we've seen.
+ * That guarantees the kept tail always starts with a user message — never an
+ * orphaned assistant reply or toolResult whose user prompt was dropped.
+ *
+ * If we can't find ANY user messages, returns entries.length (drop everything
+ * but header) so the caller produces a header-only no-op session rather than
+ * a malformed tail.
  */
 function findSoftResetCutIndex(
   entries: SessionFileEntry[],
@@ -337,24 +365,32 @@ function findSoftResetCutIndex(
 ): { cutIdx: number; reason: string } {
   let userTurnsSeen = 0;
   let bytesAccumulated = 0;
+  /** Most recent user-message index we've walked through, or -1 if none yet. */
+  let lastUserIdx = -1;
   // Scan tail-to-head, stop when we've collected enough user turns OR exceeded byte budget.
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
-    bytesAccumulated += JSON.stringify(e).length + 1; // +1 for newline
+    bytesAccumulated += Buffer.byteLength(JSON.stringify(e), 'utf8') + 1; // +1 for newline
     if (e.type === 'message' && e.message?.role === 'user') {
       userTurnsSeen++;
+      lastUserIdx = i;
       if (userTurnsSeen >= keepRecentUserTurns) {
         return { cutIdx: i, reason: `kept-${userTurnsSeen}-user-turns` };
       }
     }
     // Byte cap is a safety net for sessions where a single turn is enormous
-    // (e.g. one turn dumped a 200k file). Stop once we'd exceed the cap.
+    // (e.g. one turn dumped a 200k file). When we hit it we MUST snap the cut
+    // to the most recent user-message boundary — otherwise the kept tail could
+    // start mid-turn (assistant/toolResult with no user prompt above it), and
+    // tool-pairing repair won't fix that.
     if (bytesAccumulated > maxBytes && userTurnsSeen > 0) {
-      return { cutIdx: i + 1, reason: `byte-cap-${bytesAccumulated}b` };
+      return { cutIdx: lastUserIdx, reason: `byte-cap-${bytesAccumulated}b` };
     }
   }
-  // Not enough user turns in the file — keep everything except header.
-  // (Header is always at index 0 and is preserved by the writer separately.)
+  // Fewer user turns than target — treat as no-op. Soft-reset is recovery
+  // from overflow; if the session has fewer turns than our target it isn't
+  // overflowed and we shouldn't mutate it. Returning 1 means "keep everything
+  // after the header", which the caller's `cutIdx <= 1` gate maps to reset:false.
   return { cutIdx: 1, reason: 'fewer-turns-than-target' };
 }
 
@@ -418,24 +454,27 @@ export function softResetSessionFile(
   }
   const trimmed = [header, ...tail];
 
+  // Run tool-pair repair *in memory* on the trimmed entries before writing,
+  // so the on-disk update is a single atomic backup + atomic rename. Doing
+  // disk-write → repairSessionFile() (another disk-write) would mean a crash
+  // between the two leaves a partially-processed file AND a backup of the
+  // already-trimmed file rather than the true original.
+  const repaired = repairEntriesInMemory(trimmed);
+
   const backupPath = backupFile(path);
-  const newContent = trimmed.map(e => JSON.stringify(e)).join('\n') + '\n';
+  const newContent = repaired.entries.map(e => JSON.stringify(e)).join('\n') + '\n';
   atomicWrite(path, newContent);
 
-  // The cut may have orphaned tool pairs (e.g. toolResult kept but its
-  // toolCall is now in the dropped section). Run repair to clean those up.
-  const postRepair = repairSessionFile(path);
-
-  const bytesAfter = readFileSync(path).length;
+  const bytesAfter = Buffer.byteLength(newContent, 'utf8');
   return {
     reset: true,
     reason,
     entriesBefore: entries.length,
-    entriesAfter: trimmed.length - postRepair.droppedEntryIds.length,
+    entriesAfter: repaired.entries.length,
     bytesBefore,
     bytesAfter,
     backupPath,
-    postRepair,
+    postRepair: repaired.report,
   };
 }
 
@@ -447,10 +486,14 @@ export function softResetSessionFile(
  *
  * Triggers soft-reset recovery in the memory lifecycle. Intentionally narrow:
  * only matches the well-known overflow phrasings, not generic 4xx errors.
+ *
+ * Mirrors `isToolPairingError`'s nested-error handling: provider SDKs commonly
+ * wrap the useful text under `cause.message` or in serialized fields on
+ * Bedrock ValidationException. Stringify-search is gated on a 4xx / validation
+ * shape so we don't false-positive on noisy unrelated errors.
  */
 export function isContextOverflowError(err: unknown): boolean {
   if (!err) return false;
-  const msg = (err as { message?: string }).message ?? String(err);
   const patterns = [
     /prompt is too long/i,
     /tokens?\s*[>>]\s*\d+\s*maximum/i,
@@ -458,7 +501,35 @@ export function isContextOverflowError(err: unknown): boolean {
     /context length exceeded/i,
     /maximum context length/i,
   ];
-  return patterns.some(p => p.test(msg));
+
+  // 1. Top-level message.
+  const msg = (err as { message?: string }).message ?? String(err);
+  if (patterns.some(p => p.test(msg))) return true;
+
+  // 2. Walk the cause chain (a few hops — don't loop forever on circular).
+  let cur: unknown = (err as { cause?: unknown }).cause;
+  for (let hop = 0; hop < 5 && cur; hop++) {
+    const causeMsg = (cur as { message?: string }).message ?? String(cur);
+    if (patterns.some(p => p.test(causeMsg))) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+
+  // 3. Bedrock ValidationException sometimes carries the overflow text in
+  // nested SDK fields. Only stringify-search when the error LOOKS like a 4xx
+  // validation error — mirrors the gating in isToolPairingError.
+  const name = (err as { name?: string }).name ?? '';
+  const httpStatus =
+    (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  if (name === 'ValidationException' || httpStatus === 400) {
+    try {
+      const full = JSON.stringify(err);
+      if (patterns.some(p => p.test(full))) return true;
+    } catch {
+      /* circular structure — give up */
+    }
+  }
+
+  return false;
 }
 
 /**
