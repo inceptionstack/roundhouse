@@ -10,10 +10,9 @@ import {
   parseSessionFile,
   inspectSessionFile,
   repairSessionFile,
-  isToolPairingError,
-  softResetSessionFile,
-  isContextOverflowError,
 } from './session-repair';
+import { isToolPairingError, isContextOverflowError } from './error-classifiers';
+import { softResetSessionFile } from './session-soft-reset';
 
 // ---------- fixtures ----------
 
@@ -302,6 +301,24 @@ describe('session-repair', () => {
         name: 'ValidationException',
         $metadata: { httpStatusCode: 400 },
         cause: { message: 'messages.0: unmatched tool_use block' },
+      });
+      expect(isToolPairingError(err)).toBe(true);
+    });
+
+    it('matches wrapped Bedrock ValidationException through cause chain', () => {
+      const err = new Error('session resume failed', {
+        cause: Object.assign(new Error('Request failed with status 400'), {
+          name: 'ValidationException',
+          $metadata: { httpStatusCode: 400 },
+          cause: { message: 'messages.3: `tool_use` ids were found without `tool_result` blocks immediately after' },
+        }),
+      });
+      expect(isToolPairingError(err)).toBe(true);
+    });
+
+    it('matches wrapped tool pairing text from a nested cause without stringify fallback', () => {
+      const err = new Error('session resume failed', {
+        cause: new Error('toolUse id abc123 without matching toolResult'),
       });
       expect(isToolPairingError(err)).toBe(true);
     });
