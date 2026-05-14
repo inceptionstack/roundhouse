@@ -2,6 +2,11 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.28] — 2026-05-14
+
+### Fixed
+- **PR #126 actually shipped this time.** v0.5.26's CHANGELOG advertised the emergency-compact-loop fix, but the underlying PR (`fix/compact-loop-thresholds-and-thinking`) was still OPEN — only the version bump and self-update patch went out. Users on v0.5.26/v0.5.27 still hit `Summarization failed: prompt is too long: 212776 tokens > 200000 maximum` on overflowed sessions because `DEFAULT_HARD_TOKENS` was still 200k with no headroom clamp. This release contains the actual code change: `DEFAULT_HARD_TOKENS=150_000`, `DEFAULT_SOFT_TOKENS=130_000`, `COMPACT_HEADROOM_TOKENS=50_000`, plus `thinkingLevel='off'` forced inside `compactWithModel`. (#126)
+
 ## [0.5.27] — 2026-05-14
 
 ### Fixed
