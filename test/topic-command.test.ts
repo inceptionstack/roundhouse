@@ -145,7 +145,7 @@ describe("topic-command", () => {
       }
     });
 
-    it("falls back to text when no known topics exist", async () => {
+    it("shows inline keyboard with main button even when no custom topics exist", async () => {
       const telegramFetch = vi.fn(async () => ({ ok: true }));
       const thread = {
         id: "telegram:999",
@@ -156,10 +156,17 @@ describe("topic-command", () => {
 
       await handleTopic({ thread, text: "/topic", postWithFallback: post });
 
-      expect(telegramFetch).not.toHaveBeenCalled();
-      expect(post).toHaveBeenCalledTimes(1);
-      const msg = post.mock.calls[0]![1];
-      expect(msg).toContain("Current topic");
+      // Should use inline keyboard, not text fallback
+      expect(telegramFetch).toHaveBeenCalledTimes(1);
+      const [method, payload] = telegramFetch.mock.calls[0]!;
+      expect(method).toBe("sendMessage");
+      const p = payload as any;
+      expect(p.reply_markup?.inline_keyboard).toBeDefined();
+      // Should show at least the main button
+      const buttons = p.reply_markup.inline_keyboard.flat() as Array<{ text: string }>;
+      expect(buttons.some(b => b.text.includes("main (default)"))).toBe(true);
+      // Fallback should not be used
+      expect(post).not.toHaveBeenCalled();
     });
 
     it("rejects /topic in group chats", async () => {
