@@ -28,7 +28,9 @@ import {
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
-import { isToolPairingError, repairSessionFile, softResetSessionFile, type SoftResetReport } from "../shared/session-repair";
+import { isToolPairingError } from "../shared/error-classifiers";
+import { repairSessionFile } from "../shared/session-repair";
+import { softResetSessionFile, type SoftResetReport } from "../shared/session-soft-reset";
 import { SESSIONS_DIR } from "../../config";
 import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
