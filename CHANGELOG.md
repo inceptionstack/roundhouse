@@ -2,6 +2,13 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.29] — 2026-05-14
+
+### Added
+- **Soft-reset recovery for already-overflowed sessions.** When a session has grown past the model's context window, normal compact cannot recover — the summarizer prompt itself overflows and `compact()` throws `prompt is too long: N > max`. v0.5.28's threshold tuning prevents *new* sessions from hitting this; this release adds graceful recovery for sessions that already crossed the line. On context-overflow detection, the memory lifecycle calls a new `agent.softReset(threadId)` capability that trims the on-disk session jsonl to its most-recent N user turns (default 8, byte-capped at 250k), reloads the session, and queues a memory re-injection on the next turn. The agent loses verbatim message history for older turns but retains its durable context (MEMORY.md, daily front-page, soul.md). No more manual surgery on stuck sessions.
+- New module exports: `softResetSessionFile()` and `isContextOverflowError()` in `src/agents/shared/session-repair.ts`. New optional `softReset?(threadId)` method on `AgentAdapter` interface (no-op when not implemented — backward-compatible). PiAdapter implements it via the existing `reloadSession` path.
+- 20 new tests across `session-repair.test.ts` (file-level cut/preserve/repair semantics, error classifier) and `memory.test.ts` (lifecycle wiring — success/no-op/missing-capability/non-overflow-error/throws-during-recovery). 527 tests total.
+
 ## [0.5.28] — 2026-05-14
 
 ### Fixed

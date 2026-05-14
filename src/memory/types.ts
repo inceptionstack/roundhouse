@@ -56,7 +56,7 @@ export interface ThreadMemoryState {
   /** Local date when memory was last injected (detects day boundary) */
   lastSeenLocalDate?: string;
   /** Force re-injection on next turn */
-  forceInjectReason?: "new-session" | "after-compact" | "manual";
+  forceInjectReason?: "new-session" | "after-compact" | "after-soft-reset" | "manual";
   /** When last compaction happened */
   lastCompactAt?: string;
   /** Pending compaction level (from interrupted flush) */

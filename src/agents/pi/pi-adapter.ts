@@ -28,7 +28,7 @@ import {
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
-import { isToolPairingError, repairSessionFile } from "../shared/session-repair";
+import { isToolPairingError, repairSessionFile, softResetSessionFile, type SoftResetReport } from "../shared/session-repair";
 import { SESSIONS_DIR } from "../../config";
 import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
@@ -659,6 +659,58 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             agentState.thinkingLevel = currentThinkingLevel;
           }
         }
+      });
+    },
+
+    /**
+     * Soft-reset an overflowed session: trim the on-disk jsonl to its most
+     * recent N user turns, then reload the session in place. Used by the
+     * memory-lifecycle layer when compact fails with "prompt is too long"
+     * — the session has grown past the model's context window and the
+     * summarizer prompt itself can no longer fit.
+     *
+     * Returns the soft-reset report (or null if no session for threadId).
+     * Behavior:
+     *   - In-memory session: returns null (nothing to trim on disk).
+     *   - Already-trimmed session: report.reset === false, no reload.
+     *   - Otherwise: trims file, reloads session, returns report.
+     *
+     * On reload failure, the SessionEntry is dropped from the cache so the
+     * next prompt() recreates it cleanly.
+     */
+    async softReset(threadId: string): Promise<SoftResetReport | null> {
+      return enqueue(threadId, async () => {
+        const entry = sessions.get(threadId);
+        if (!entry) return null;
+        const sessionFile = entry.session.sessionFile;
+        if (!sessionFile) {
+          console.warn(`[pi-agent] softReset: ${threadId} has no on-disk session file, skipping`);
+          return null;
+        }
+
+        console.warn(`[pi-agent] softReset: trimming overflowed session ${sessionFile}`);
+        const report = softResetSessionFile(sessionFile);
+        if (!report.reset) {
+          console.log(`[pi-agent] softReset: nothing to trim (${report.reason})`);
+          return report;
+        }
+        console.warn(
+          `[pi-agent] softReset: ${report.entriesBefore} → ${report.entriesAfter} entries, ` +
+          `${report.bytesBefore} → ${report.bytesAfter} bytes (${report.reason}). Backup: ${report.backupPath}`
+        );
+
+        // Reload the session so pi-ai re-reads the trimmed file. Drop the
+        // cache entry on failure so the next prompt() recreates from scratch
+        // rather than running against the disposed session.
+        try {
+          const reloaded = await reloadSession(entry, sessionFile);
+          await entry.session.dispose();
+          entry.session = reloaded.session;
+        } catch (err) {
+          console.error(`[pi-agent] softReset reload failed for ${threadId}:`, (err as Error).message);
+          sessions.delete(threadId);
+        }
+        return report;
       });
     },
 

@@ -122,6 +122,17 @@ export interface AgentAdapter {
   /** Compact with a specific model. */
   compactWithModel?(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null>;
 
+  /**
+   * Soft-reset an overflowed session by trimming on-disk history to the
+   * most-recent few turns. Called by memory lifecycle when compact() fails
+   * because the session itself is too large for the model's context window.
+   *
+   * Returns a report describing what was trimmed (shape is adapter-specific
+   * but always has `reset: boolean`), or null if not applicable.
+   * Adapters without on-disk sessions (in-memory only) should return null.
+   */
+  softReset?(threadId: string): Promise<{ reset: boolean } | null>;
+
   /** Abort the current agent run for a thread. */
   abort?(threadId: string): Promise<void>;
 
