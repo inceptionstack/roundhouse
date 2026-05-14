@@ -11,6 +11,8 @@ import {
   inspectSessionFile,
   repairSessionFile,
   isToolPairingError,
+  softResetSessionFile,
+  isContextOverflowError,
 } from './session-repair';
 
 // ---------- fixtures ----------
@@ -374,5 +376,177 @@ describe('session-repair', () => {
       expect(u3).toBeDefined();
       expect(u3?.parentId).toBeNull();
     });
+  });
+});
+
+// ============================================================
+// softResetSessionFile
+// ============================================================
+
+describe('softResetSessionFile', () => {
+  function userTurn(idPrefix: string, parentId: string | null) {
+    // A user turn = user msg + assistant text reply (no tool calls, so cuts
+    // are clean; tool-pairing edge cases are covered by repair tests).
+    return [
+      userMsg(`${idPrefix}u`, parentId, `text-${idPrefix}`),
+      {
+        type: 'message',
+        id: `${idPrefix}a`,
+        parentId: `${idPrefix}u`,
+        timestamp: '2026-05-01T00:00:04Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: `reply-${idPrefix}` }],
+          api: 'bedrock-converse-stream',
+          provider: 'amazon-bedrock',
+          model: 'claude',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: 'endTurn',
+          timestamp: 4,
+        },
+      },
+    ];
+  }
+
+  it('softResetSessionFile_OnSessionWithMoreTurnsThanTarget_KeepsHeaderAndRecentTurns', () => {
+    // Arrange: 10 user turns, target keepRecentUserTurns=3.
+    const entries: object[] = [HEADER, MODEL_CHANGE];
+    let parent: string | null = 'mc-1';
+    for (let i = 1; i <= 10; i++) {
+      const turn = userTurn(`t${i}`, parent);
+      entries.push(...turn);
+      parent = `t${i}a`;
+    }
+    const path = tmpJsonl(entries);
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 3 });
+
+    // Assert: report indicates reset, file shrunk, header preserved, last 3 user msgs present.
+    expect(report.reset).toBe(true);
+    expect(report.entriesAfter).toBeLessThan(report.entriesBefore);
+    expect(report.bytesAfter).toBeLessThan(report.bytesBefore);
+    expect(report.backupPath).toBeDefined();
+    expect(existsSync(report.backupPath!)).toBe(true);
+
+    const trimmed = parseSessionFile(path);
+    // Header always preserved.
+    expect(trimmed[0].type).toBe('session');
+    // Last 3 user turns present.
+    const userIds = trimmed.filter(e => e.message?.role === 'user').map(e => e.id);
+    expect(userIds).toEqual(['t8u', 't9u', 't10u']);
+    // First kept entry's parentId reset to null (no dangling pointer).
+    const firstAfterHeader = trimmed[1];
+    expect(firstAfterHeader.parentId).toBeNull();
+  });
+
+  it('softResetSessionFile_OnSessionSmallerThanTarget_ReturnsResetFalseAndDoesNotMutate', () => {
+    // Arrange: 2 user turns, target keepRecentUserTurns=8.
+    const entries: object[] = [HEADER, MODEL_CHANGE, ...userTurn('a', 'mc-1'), ...userTurn('b', 'aa')];
+    const path = tmpJsonl(entries);
+    const before = readFileSync(path, 'utf8');
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 8 });
+
+    // Assert: no reset, file untouched, no backup.
+    expect(report.reset).toBe(false);
+    expect(report.backupPath).toBeUndefined();
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
+  it('softResetSessionFile_OnTinySession_ReturnsResetFalseWithReason', () => {
+    // Arrange: only header.
+    const path = tmpJsonl([HEADER]);
+
+    // Act
+    const report = softResetSessionFile(path);
+
+    // Assert
+    expect(report.reset).toBe(false);
+    expect(report.reason).toContain('too-small');
+  });
+
+  it('softResetSessionFile_OnSessionWithOrphanedToolPairsAfterCut_AlsoRunsRepair', () => {
+    // Arrange: a session where the tail contains a toolResult whose toolCall
+    // sits in the older (dropped) section. After the cut the toolResult is
+    // orphaned — soft-reset must clean it up via the post-cut repair.
+    const oldToolCall = assistantToolCall('a-old', 'mc-1', 'call-X');
+    const orphanedResult = {
+      type: 'message',
+      id: 'tr-1',
+      parentId: 'a-old',
+      timestamp: '2026-05-01T00:00:05Z',
+      message: { role: 'toolResult', toolCallId: 'call-X', content: 'ok', timestamp: 5 },
+    };
+    const entries: object[] = [HEADER, MODEL_CHANGE, userMsg('u-old', 'mc-1', 'old'), oldToolCall];
+    let parent: string | null = 'a-old';
+    // Push 5 fresh turns so the cut leaves us in tail.
+    for (let i = 1; i <= 5; i++) {
+      entries.push(...userTurn(`f${i}`, parent));
+      parent = `f${i}a`;
+    }
+    // Insert the orphaned result mid-tail (kept by cut, but call is dropped).
+    entries.splice(6, 0, orphanedResult);
+    const path = tmpJsonl(entries);
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 3 });
+
+    // Assert: reset succeeded AND post-cut repair fired.
+    expect(report.reset).toBe(true);
+    expect(report.postRepair).toBeDefined();
+    // Final file is internally consistent (no orphans).
+    expect(inspectSessionFile(path).hasOrphans).toBe(false);
+  });
+
+  it('softResetSessionFile_OnNonexistentFile_Throws', () => {
+    // Arrange/Act/Assert: documents the precondition.
+    expect(() => softResetSessionFile('/nonexistent/path.jsonl')).toThrow(/not found/);
+  });
+
+  it('softResetSessionFile_BytesCapHonored_StopsCutAtCap', () => {
+    // Arrange: each turn is small but we set a tiny byte cap so we cut early.
+    const entries: object[] = [HEADER, MODEL_CHANGE];
+    let parent: string | null = 'mc-1';
+    for (let i = 1; i <= 20; i++) {
+      entries.push(...userTurn(`t${i}`, parent));
+      parent = `t${i}a`;
+    }
+    const path = tmpJsonl(entries);
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 100, maxBytes: 800 });
+
+    // Assert: reset triggered by byte cap (we asked for 100 turns we don't have,
+    // but byte cap kicks in first).
+    expect(report.reset).toBe(true);
+    expect(report.reason).toMatch(/byte-cap|fewer-turns/);
+    expect(report.bytesAfter).toBeLessThan(report.bytesBefore);
+  });
+});
+
+// ============================================================
+// isContextOverflowError
+// ============================================================
+
+describe('isContextOverflowError', () => {
+  it.each([
+    ['prompt is too long: 212776 tokens > 200000 maximum', true],
+    ['Validation error: input is too long', true],
+    ['context length exceeded for this model', true],
+    ['maximum context length reached', true],
+    ['tokens > 200000 maximum', true],
+    ['toolUse without toolResult', false], // pairing error — different recovery
+    ['random network failure', false],
+    ['', false],
+  ])('classifies %p as overflow=%p', (msg, expected) => {
+    expect(isContextOverflowError(new Error(msg))).toBe(expected);
+  });
+
+  it('returns false for null/undefined/non-Error inputs', () => {
+    expect(isContextOverflowError(null)).toBe(false);
+    expect(isContextOverflowError(undefined)).toBe(false);
+    expect(isContextOverflowError({})).toBe(false);
   });
 });

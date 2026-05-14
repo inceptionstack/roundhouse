@@ -286,6 +286,181 @@ export function repairSessionFile(path: string): SessionRepairReport {
   };
 }
 
+// ── Soft reset (recovery from already-overflowed sessions) ──────────────
+
+/**
+ * When a session has grown past the model's context window, normal compact
+ * cannot recover — the summarizer prompt itself overflows. Soft reset trims
+ * the session jsonl on disk to its most-recent N user turns, drops everything
+ * older, and re-runs the tool-pairing repair so what's left is internally
+ * consistent.
+ *
+ * Trade-off: loses fidelity for older turns. The roundhouse memory layer
+ * (MEMORY.md, daily front-page) re-injects on the next turn, so the agent
+ * still has its durable context — just not the verbatim message history.
+ *
+ * Conservative defaults aim for ~30–40% of a 200k window so the next compact
+ * has ample room to summarize.
+ */
+export interface SoftResetOptions {
+  /** Keep at most this many user turns from the tail (default: 8). */
+  keepRecentUserTurns?: number;
+  /** Hard cap on jsonl bytes after trim (default: 250_000 ≈ 60–80k tokens). */
+  maxBytes?: number;
+}
+
+export interface SoftResetReport {
+  reset: boolean;
+  reason: string;
+  entriesBefore: number;
+  entriesAfter: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  backupPath?: string;
+  /** Tool-pairing repair report on the trimmed file (orphans created by the cut). */
+  postRepair?: SessionRepairReport;
+}
+
+/**
+ * Find a safe cut index in the entries array. Walk backwards from the end
+ * looking for user message entries; the cut sits *just before* the Nth
+ * most-recent user message we encounter. Returns the index of the first
+ * entry to KEEP (i.e. all entries[0..cutIdx) are dropped).
+ *
+ * If we can't find enough user messages, returns 1 to keep everything except
+ * the session header (which we preserve separately).
+ */
+function findSoftResetCutIndex(
+  entries: SessionFileEntry[],
+  keepRecentUserTurns: number,
+  maxBytes: number,
+): { cutIdx: number; reason: string } {
+  let userTurnsSeen = 0;
+  let bytesAccumulated = 0;
+  // Scan tail-to-head, stop when we've collected enough user turns OR exceeded byte budget.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    bytesAccumulated += JSON.stringify(e).length + 1; // +1 for newline
+    if (e.type === 'message' && e.message?.role === 'user') {
+      userTurnsSeen++;
+      if (userTurnsSeen >= keepRecentUserTurns) {
+        return { cutIdx: i, reason: `kept-${userTurnsSeen}-user-turns` };
+      }
+    }
+    // Byte cap is a safety net for sessions where a single turn is enormous
+    // (e.g. one turn dumped a 200k file). Stop once we'd exceed the cap.
+    if (bytesAccumulated > maxBytes && userTurnsSeen > 0) {
+      return { cutIdx: i + 1, reason: `byte-cap-${bytesAccumulated}b` };
+    }
+  }
+  // Not enough user turns in the file — keep everything except header.
+  // (Header is always at index 0 and is preserved by the writer separately.)
+  return { cutIdx: 1, reason: 'fewer-turns-than-target' };
+}
+
+/**
+ * Soft-reset a pi-ai session jsonl: keep the most-recent N user turns + their
+ * surrounding messages, drop everything older. Always preserves the session
+ * header (entries[0]). Re-parents the first kept entry to null so the tree
+ * remains valid. Re-runs tool-pairing repair on the trimmed file because
+ * the cut likely orphaned some toolCall/toolResult pairs.
+ *
+ * Atomic + backup: same safety pattern as repairSessionFile.
+ *
+ * @returns report describing what was reset, or `{reset:false}` if nothing to do.
+ */
+export function softResetSessionFile(
+  path: string,
+  options: SoftResetOptions = {},
+): SoftResetReport {
+  if (!existsSync(path)) {
+    throw new Error(`Session file not found: ${path}`);
+  }
+
+  const keepRecentUserTurns = options.keepRecentUserTurns ?? 8;
+  const maxBytes = options.maxBytes ?? 250_000;
+
+  const entries = parseSessionFile(path);
+  const bytesBefore = readFileSync(path).length;
+
+  // Need at least header + a couple of messages to be worth resetting.
+  if (entries.length < 4) {
+    return {
+      reset: false,
+      reason: 'session-too-small',
+      entriesBefore: entries.length,
+      entriesAfter: entries.length,
+      bytesBefore,
+      bytesAfter: bytesBefore,
+    };
+  }
+
+  const { cutIdx, reason } = findSoftResetCutIndex(entries, keepRecentUserTurns, maxBytes);
+
+  // No-op if cut is already at the start (nothing to drop besides header).
+  if (cutIdx <= 1) {
+    return {
+      reset: false,
+      reason: `cut-at-start (${reason})`,
+      entriesBefore: entries.length,
+      entriesAfter: entries.length,
+      bytesBefore,
+      bytesAfter: bytesBefore,
+    };
+  }
+
+  // Build trimmed entries: header + tail.
+  // Re-parent the first kept tail entry to null so the tree root is intact.
+  const header = entries[0];
+  const tail = entries.slice(cutIdx);
+  if (tail.length > 0 && tail[0].parentId !== undefined) {
+    tail[0] = { ...tail[0], parentId: null };
+  }
+  const trimmed = [header, ...tail];
+
+  const backupPath = backupFile(path);
+  const newContent = trimmed.map(e => JSON.stringify(e)).join('\n') + '\n';
+  atomicWrite(path, newContent);
+
+  // The cut may have orphaned tool pairs (e.g. toolResult kept but its
+  // toolCall is now in the dropped section). Run repair to clean those up.
+  const postRepair = repairSessionFile(path);
+
+  const bytesAfter = readFileSync(path).length;
+  return {
+    reset: true,
+    reason,
+    entriesBefore: entries.length,
+    entriesAfter: trimmed.length - postRepair.droppedEntryIds.length,
+    bytesBefore,
+    bytesAfter,
+    backupPath,
+    postRepair,
+  };
+}
+
+// ── Error classifiers ────────────────────────────────────────────────────
+
+/**
+ * Detect whether an error from pi-ai / the model provider indicates the
+ * session has grown past the model's context window (input > max).
+ *
+ * Triggers soft-reset recovery in the memory lifecycle. Intentionally narrow:
+ * only matches the well-known overflow phrasings, not generic 4xx errors.
+ */
+export function isContextOverflowError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err as { message?: string }).message ?? String(err);
+  const patterns = [
+    /prompt is too long/i,
+    /tokens?\s*[>>]\s*\d+\s*maximum/i,
+    /input is too long/i,
+    /context length exceeded/i,
+    /maximum context length/i,
+  ];
+  return patterns.some(p => p.test(msg));
+}
+
 /**
  * Detect whether an error from pi-ai / the model provider indicates a
  * tool-pairing mismatch that can be recovered by session repair.

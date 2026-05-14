@@ -306,7 +306,7 @@ describe("flushMemoryThenCompact emergency path", () => {
   });
 
   interface FakeAdapter extends AgentAdapter {
-    calls: { method: "promptWithModel" | "prompt" | "compactWithModel" | "compact"; args: unknown[] }[];
+    calls: { method: "promptWithModel" | "prompt" | "compactWithModel" | "compact" | "softReset"; args: unknown[] }[];
   }
 
   function makeFakeAdapter(): FakeAdapter {
@@ -331,6 +331,10 @@ describe("flushMemoryThenCompact emergency path", () => {
       async compactWithModel(threadId, modelId) {
         calls.push({ method: "compactWithModel", args: [threadId, modelId] });
         return { tokensBefore: 216000, tokensAfter: 5000 };
+      },
+      async softReset(threadId) {
+        calls.push({ method: "softReset", args: [threadId] });
+        return { reset: true };
       },
       promptStream: (() => { throw new Error("not used"); }) as any,
       dispose: async () => {},
@@ -477,5 +481,101 @@ describe("flushMemoryThenCompact emergency path", () => {
 
     const flushCalls = agent.calls.filter(c => c.method === "prompt" || c.method === "promptWithModel");
     expect(flushCalls).toHaveLength(0);
+  });
+
+  // ── Soft-reset recovery on context overflow ──────────────────────────
+
+  function makeOverflowError(): Error {
+    return new Error(
+      "Summarization failed: Validation error: The model returned the following errors: prompt is too long: 212776 tokens > 200000 maximum"
+    );
+  }
+
+  it("emergency_whenCompactOverflows_callsSoftResetAndClearsPendingCompact", async () => {
+    // Arrange: compact throws context-overflow; adapter has softReset that succeeds.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-overflow-recover");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+
+    // Act
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    // Assert: soft reset was called, pendingCompact cleared, force re-inject queued.
+    expect(result).toBeNull();
+    const softResetCalls = agent.calls.filter(c => c.method === "softReset");
+    expect(softResetCalls).toHaveLength(1);
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBeUndefined();
+    expect(state.forceInjectReason).toBe("after-soft-reset");
+  });
+
+  it("emergency_whenSoftResetReturnsNoOp_rearmsPendingCompact", async () => {
+    // Arrange: compact overflows, but softReset reports nothing to do (already trim).
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-overflow-noop");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = async () => ({ reset: false });
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    // Assert: pendingCompact still re-armed for next-turn retry.
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBe("emergency");
+    expect(state.forceInjectReason).toBeUndefined();
+  });
+
+  it("emergency_whenAdapterHasNoSoftReset_rearmsPendingCompactAsBefore", async () => {
+    // Arrange: legacy adapter without softReset capability.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-overflow-nosoftreset");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = undefined;
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    // Assert: falls back to prior behavior — re-arm pendingCompact, no soft-reset call.
+    const softResetCalls = agent.calls.filter(c => c.method === "softReset");
+    expect(softResetCalls).toHaveLength(0);
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBe("emergency");
+  });
+
+  it("emergency_whenNonOverflowError_doesNotCallSoftReset", async () => {
+    // Arrange: compact throws something unrelated (network, auth, etc).
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-non-overflow");
+    agent.compactWithModel = async () => { throw new Error("network unreachable"); };
+    agent.compact = async () => { throw new Error("network unreachable"); };
+
+    // Act
+    await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+
+    // Assert: soft reset NOT called (it's not the right recovery for this error).
+    const softResetCalls = agent.calls.filter(c => c.method === "softReset");
+    expect(softResetCalls).toHaveLength(0);
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.pendingCompact).toBe("emergency");
+  });
+
+  it("emergency_whenSoftResetItselfThrows_rearmsPendingCompactAndDoesNotCrash", async () => {
+    // Arrange: pathological case — the recovery path itself fails.
+    const agent = makeFakeAdapter();
+    const threadId = uniqueThreadId("emergency-softreset-throws");
+    agent.compactWithModel = async () => { throw makeOverflowError(); };
+    agent.compact = async () => { throw makeOverflowError(); };
+    agent.softReset = async () => { throw new Error("disk full"); };
+
+    // Act + Assert: doesn't throw out of flushMemoryThenCompact.
+    const result = await flushMemoryThenCompact(threadId, agent, "/tmp", "emergency");
+    expect(result).toBeNull();
+
+    const state = await loadThreadMemoryState(threadId);
+    // Soft reset failed — pendingCompact must be re-armed so user gets retry next turn.
+    expect(state.pendingCompact).toBe("emergency");
   });
 });

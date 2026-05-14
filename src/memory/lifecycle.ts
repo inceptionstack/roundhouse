@@ -16,6 +16,7 @@ import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } fr
 import { buildMemoryInjection, injectMemoryIntoMessage } from "./inject";
 import { buildFlushPrompt } from "./prompts";
 import { bootstrapMemoryFiles } from "./bootstrap";
+import { isContextOverflowError } from "../agents/shared/session-repair";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -359,6 +360,35 @@ export async function flushMemoryThenCompact(
   } catch (err) {
     const errMsg = (err as Error).message;
     console.error(`[memory] flush+compact failed for ${threadId}:`, errMsg);
+
+    // Recovery path: when the session has grown past the model's context
+    // window, the summarizer prompt itself overflows and compact() throws
+    // "prompt is too long". Threshold tuning prevents *new* sessions from
+    // hitting this, but does nothing for sessions already past the line.
+    // Trim the on-disk session jsonl to its most recent N user turns and
+    // mark the next turn for a fresh memory injection. We do NOT retry
+    // compact inline — that would extend the thread lock for another long
+    // operation. The trimmed session is small enough that the next user
+    // turn proceeds normally; any soft pressure from injected memory will
+    // trigger a regular compact later.
+    let softResetAttempted = false;
+    let softResetSucceeded = false;
+    if (isContextOverflowError(err) && agent.softReset) {
+      softResetAttempted = true;
+      try {
+        await onProgress?.("♻️ Session overflowed — soft-resetting to recent turns...");
+        const report = await agent.softReset(threadId);
+        if (report?.reset) {
+          softResetSucceeded = true;
+          console.warn(`[memory] soft-reset recovered ${threadId} from overflow`);
+        } else {
+          console.warn(`[memory] soft-reset returned no-op for ${threadId} (${(report as { reason?: string } | null)?.reason ?? "unknown"})`);
+        }
+      } catch (resetErr) {
+        console.error(`[memory] soft-reset failed for ${threadId}:`, (resetErr as Error).message);
+      }
+    }
+
     appendCompactLog({
       threadId,
       level,
@@ -371,11 +401,22 @@ export async function flushMemoryThenCompact(
       totalMs: Date.now() - t0,
       model: flushModel ?? "default",
       status: "failed",
-      error: errMsg.slice(0, 500),
+      error: (softResetAttempted
+        ? `${softResetSucceeded ? "soft-reset-recovered" : "soft-reset-failed"}: ${errMsg}`
+        : errMsg).slice(0, 500),
     });
-    // Mark pending so we retry on next turn. Reuse the state we already loaded.
+
     try {
-      stateBeforeCompact.pendingCompact = effectiveLevel;
+      if (softResetSucceeded) {
+        // Soft reset cleared the overflow. Mark the next turn for memory
+        // re-injection so the agent has its durable context, and clear the
+        // pendingCompact flag — there's nothing left to compact now.
+        stateBeforeCompact.forceInjectReason = "after-soft-reset";
+        stateBeforeCompact.pendingCompact = undefined;
+      } else {
+        // Re-arm pendingCompact so the next turn retries.
+        stateBeforeCompact.pendingCompact = effectiveLevel;
+      }
       await saveThreadMemoryState(threadId, stateBeforeCompact);
     } catch {}
     return null;
