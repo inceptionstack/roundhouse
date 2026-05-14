@@ -2,6 +2,16 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.30] — 2026-05-14
+
+### Fixed
+- **Soft-reset robustness fixes from codex review of v0.5.29:**
+  - **P1 — byte-cap could cut mid-turn.** When `findSoftResetCutIndex()` hit the byte budget before reaching `keepRecentUserTurns`, it returned `i + 1` which could land on an assistant reply or toolResult whose user prompt was about to be dropped. The kept tail then started mid-turn and tool-pairing repair didn't fix that (only orphans, not turn boundaries). Fixed: byte-cap path now snaps to the most-recent user-message boundary we've walked through.
+  - **P2 — byte cap measured in JS code units, not real bytes.** `JSON.stringify(e).length` counts UTF-16 code units; non-ASCII content (emoji, CJK) overshot the advertised 250k ceiling 2–3x. Now uses `Buffer.byteLength(..., 'utf8')` end-to-end so reported `bytesAfter` and the cap decision both reflect actual file bytes.
+  - **P2 — trim + repair was not atomic end-to-end.** Old flow wrote the trimmed file, then called `repairSessionFile()` which re-backed-up the *already-trimmed* file and rewrote it again. A crash between the two writes left a partial state and lost the true original. Refactored: extracted `repairEntriesInMemory()` so trim + tool-pair repair compose in memory and land as a single backup + atomic rename.
+  - **P2 — `isContextOverflowError()` only inspected top-level `.message`.** Wrapped provider errors (`err.cause.message`, Bedrock `ValidationException` carrying overflow text in nested SDK fields) fell through to re-arming `pendingCompact` instead of triggering recovery. Now mirrors `isToolPairingError()`'s nested handling: walks the `cause` chain (bounded, cycle-safe) and stringify-searches gated on a 4xx/`ValidationException` shape so we don't false-positive on unrelated 5xx noise.
+- 7 regression tests added (534 total passing): byte-cap user-boundary snap, UTF-8 byte accounting, single-atomic-write backup integrity, wrapped-cause classification, Bedrock validation classification, false-positive gating, circular-cause safety.
+
 ## [0.5.29] — 2026-05-14
 
 ### Added

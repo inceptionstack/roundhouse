@@ -505,6 +505,104 @@ describe('softResetSessionFile', () => {
     expect(() => softResetSessionFile('/nonexistent/path.jsonl')).toThrow(/not found/);
   });
 
+  it('softResetSessionFile_ByteCapHit_SnapsToUserTurnBoundary_NeverStartsMidTurn', () => {
+    // Regression test for codex P1: byte-cap path used to return `i + 1`
+    // which could land mid-turn (assistant reply or toolResult with no user
+    // prompt above it). Fixed to snap to the most-recent user-message index.
+    // Arrange: many small turns, byte cap forces an early cut.
+    const entries: object[] = [HEADER, MODEL_CHANGE];
+    let parent: string | null = 'mc-1';
+    for (let i = 1; i <= 30; i++) {
+      entries.push(...userTurn(`t${i}`, parent));
+      parent = `t${i}a`;
+    }
+    const path = tmpJsonl(entries);
+
+    // Act: very tight byte budget so cap fires before keepRecentUserTurns reached.
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 100, maxBytes: 600 });
+
+    // Assert: reset happened AND first kept entry is a user message.
+    expect(report.reset).toBe(true);
+    const trimmed = parseSessionFile(path);
+    expect(trimmed[0].type).toBe('session');           // header preserved
+    expect(trimmed[1].message?.role).toBe('user');     // first kept = user turn
+    expect(trimmed[1].parentId).toBeNull();            // re-parented
+  });
+
+  it('softResetSessionFile_NonAsciiContent_ReportedBytesMatchActualFileBytes', () => {
+    // Regression test for codex P2: trim used JSON.stringify(e).length
+    // (UTF-16 code units) but reported bytesAfter from real file bytes.
+    // After fix, both use Buffer.byteLength(..., 'utf8').
+    // Arrange: turns containing multi-byte UTF-8 (each emoji = 4 bytes,
+    // length 2 in code units — 2x discrepancy).
+    const entries: object[] = [HEADER, MODEL_CHANGE];
+    const emojis = '🚀🔥🎉✨💡'.repeat(20); // ~100 bytes per turn
+    let parent: string | null = 'mc-1';
+    for (let i = 1; i <= 20; i++) {
+      entries.push(
+        userMsg(`t${i}u`, parent, `${emojis} text-${i}`),
+        {
+          type: 'message', id: `t${i}a`, parentId: `t${i}u`,
+          timestamp: '2026-05-01T00:00:04Z',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: `${emojis} reply-${i}` }],
+            api: 'bedrock-converse-stream', provider: 'amazon-bedrock', model: 'claude',
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: 'endTurn', timestamp: 4,
+          },
+        },
+      );
+      parent = `t${i}a`;
+    }
+    const path = tmpJsonl(entries);
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 100, maxBytes: 2000 });
+
+    // Assert: reported bytesAfter matches actual file bytes (true UTF-8 size).
+    expect(report.reset).toBe(true);
+    const actualBytes = readFileSync(path).length;
+    expect(report.bytesAfter).toBe(actualBytes);
+    // And we honored the cap (allow some slack for snap-to-user-boundary).
+    expect(report.bytesAfter).toBeLessThan(4000);
+  });
+
+  it('softResetSessionFile_OnSingleAtomicWrite_OriginalBackupIsRecoverable', () => {
+    // Regression test for codex P2: previously trim wrote once, then
+    // repairSessionFile() wrote again with its OWN backup of the
+    // already-trimmed file. After fix, only one backup exists and it's
+    // the true original.
+    // Arrange: session with orphaned tool pair so post-cut repair fires.
+    const oldToolCall = assistantToolCall('a-old', 'mc-1', 'call-X');
+    const orphanedResult = {
+      type: 'message', id: 'tr-1', parentId: 'a-old',
+      timestamp: '2026-05-01T00:00:05Z',
+      message: { role: 'toolResult', toolCallId: 'call-X', content: 'ok', timestamp: 5 },
+    };
+    const entries: object[] = [HEADER, MODEL_CHANGE, userMsg('u-old', 'mc-1', 'old'), oldToolCall];
+    let parent: string | null = 'a-old';
+    for (let i = 1; i <= 5; i++) {
+      entries.push(...userTurn(`f${i}`, parent));
+      parent = `f${i}a`;
+    }
+    entries.splice(6, 0, orphanedResult);
+    const path = tmpJsonl(entries);
+    const originalBytes = readFileSync(path);
+
+    // Act
+    const report = softResetSessionFile(path, { keepRecentUserTurns: 3 });
+
+    // Assert: backup contents = TRUE original (pre-trim, pre-repair),
+    // not an intermediate trimmed-but-unrepaired state.
+    expect(report.reset).toBe(true);
+    expect(report.backupPath).toBeDefined();
+    const backup = readFileSync(report.backupPath!);
+    expect(backup.equals(originalBytes)).toBe(true);
+    // Final on-disk file is internally consistent.
+    expect(inspectSessionFile(path).hasOrphans).toBe(false);
+  });
+
   it('softResetSessionFile_BytesCapHonored_StopsCutAtCap', () => {
     // Arrange: each turn is small but we set a tiny byte cap so we cut early.
     const entries: object[] = [HEADER, MODEL_CHANGE];
@@ -548,5 +646,47 @@ describe('isContextOverflowError', () => {
     expect(isContextOverflowError(null)).toBe(false);
     expect(isContextOverflowError(undefined)).toBe(false);
     expect(isContextOverflowError({})).toBe(false);
+  });
+
+  it('classifies overflow when text lives in err.cause.message (wrapped SDK error)', () => {
+    // Regression test for codex P2: wrapped provider errors used to fall
+    // through to re-arming pendingCompact. After fix, cause-chain is walked.
+    const inner = new Error('prompt is too long: 212776 tokens > 200000 maximum');
+    const outer = new Error('Summarization failed');
+    (outer as { cause?: unknown }).cause = inner;
+    expect(isContextOverflowError(outer)).toBe(true);
+  });
+
+  it('classifies overflow on Bedrock ValidationException with nested overflow text', () => {
+    // Regression test: Bedrock SDK can carry the useful text in nested
+    // $metadata or stringify-only fields. We only stringify-search when
+    // the error LOOKS like a 4xx validation (mirrors isToolPairingError).
+    const err = Object.assign(new Error('validation failed'), {
+      name: 'ValidationException',
+      $metadata: { httpStatusCode: 400 },
+      detail: { reason: 'prompt is too long' },
+    });
+    expect(isContextOverflowError(err)).toBe(true);
+  });
+
+  it('does NOT stringify-search arbitrary errors that contain overflow keywords', () => {
+    // Negative case: gating prevents false-positives on unrelated 5xx errors
+    // whose payload happens to contain trigger phrases.
+    const err = Object.assign(new Error('internal error'), {
+      name: 'InternalServerError',
+      $metadata: { httpStatusCode: 500 },
+      diagnostics: 'log line: prompt is too long check disabled',
+    });
+    expect(isContextOverflowError(err)).toBe(false);
+  });
+
+  it('does not loop forever on circular cause chains', () => {
+    // Safety: cause walk is bounded.
+    const a = new Error('outer');
+    const b = new Error('inner');
+    (a as { cause?: unknown }).cause = b;
+    (b as { cause?: unknown }).cause = a; // cycle
+    expect(() => isContextOverflowError(a)).not.toThrow();
+    expect(isContextOverflowError(a)).toBe(false);
   });
 });
