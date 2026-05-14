@@ -24,4 +24,5 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "doctor", description: "Run diagnostics" },
   { command: "crons", description: "List scheduled cron jobs" },
   { command: "jobs", description: "Show running jobs" },
+  { command: "toggle-enforce-branches", description: "Toggle branch-protection enforcement" },
 ];

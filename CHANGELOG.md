@@ -2,6 +2,17 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.34] — 2026-05-14
+
+### Added
+- **`/toggle-enforce-branches`** — immediate runtime kill-switch for `pi-branch-enforcer`
+  - `/toggle-enforce-branches` — toggle (on ↔ off)
+  - `/toggle-enforce-branches on|off|status` — explicit / query
+  - Persists across agent restarts (writes `~/.pi-branch-enforcer/disabled` marker file)
+  - **Effect is immediate** — next bash tool call sees the new state, no `/restart` needed
+  - Requires `@inceptionstack/pi-branch-enforcer` >= 3.3.0 (which honors the marker)
+  - 10 unit tests covering toggle/explicit/status/aliases/idempotence/unknown-arg paths
+
 ## [0.5.32] — 2026-05-14
 
 ### Fixed
