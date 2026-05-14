@@ -1,5 +1,5 @@
 /**
- * commands/update.ts — Handle the /update command
+ * cli/update.ts — Handle the /update command
  *
  * Transport-agnostic: receives a ProgressReporter interface,
  * not a Telegram-specific thread object.
@@ -15,6 +15,28 @@ const GLOBAL_PI_EXTENSION_PACKAGES = [
   "@inceptionstack/pi-branch-enforcer",
 ];
 
+const SELF_PACKAGE = "@inceptionstack/roundhouse";
+
+/**
+ * Read globally-installed version of a package from disk.
+ * Returns empty string if the package is not installed or query fails.
+ *
+ * Used both for pre-install version checks and for post-failure verification
+ * (mise/nvm/npm reshim hooks can fail with exit 127 even after `npm install -g`
+ * actually wrote the new version to disk — see PR fix/self-update-verify-on-failure).
+ */
+function getInstalledVersion(pkg: string): string {
+  try {
+    const out = execSync(`npm list -g ${pkg} --json --depth=0 2>/dev/null`, {
+      timeout: 10_000,
+      encoding: "utf8",
+    });
+    return JSON.parse(out)?.dependencies?.[pkg]?.version ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export interface UpdateProgress {
   update(text: string): Promise<void>;
 }
@@ -28,14 +50,11 @@ export interface UpdateResult {
 
 export async function updateExtensions(progress: UpdateProgress): Promise<void> {
   for (const extensionPackage of GLOBAL_PI_EXTENSION_PACKAGES) {
+    let latestExtVersion = "";
     try {
       // Check if already at latest
-      const installed = execSync(`npm list -g ${extensionPackage} --json 2>/dev/null`, {
-        timeout: 10_000,
-        encoding: "utf8",
-      });
-      const installedVersion = JSON.parse(installed)?.dependencies?.[extensionPackage]?.version ?? "";
-      const latestExtVersion = execSync(`npm view ${extensionPackage} version 2>/dev/null`, {
+      const installedVersion = getInstalledVersion(extensionPackage);
+      latestExtVersion = execSync(`npm view ${extensionPackage} version 2>/dev/null`, {
         timeout: 10_000,
         encoding: "utf8",
       }).trim();
@@ -57,6 +76,14 @@ export async function updateExtensions(progress: UpdateProgress): Promise<void> 
       await progress.update(`✅ ${extensionPackage} updated`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // Verify-after-fail: post-install reshim hooks (mise/nvm) can exit non-zero
+      // even when the package landed on disk correctly.
+      const onDisk = getInstalledVersion(extensionPackage);
+      if (onDisk && (!latestExtVersion || onDisk === latestExtVersion)) {
+        console.warn(`[roundhouse] ${extensionPackage} install reported failure but v${onDisk} is on disk — treating as success:`, msg);
+        await progress.update(`✅ ${extensionPackage} updated to v${onDisk} (post-install hook warned, ignored)`);
+        continue;
+      }
       console.warn(`[roundhouse] failed to update extension ${extensionPackage}:`, msg);
       await progress.update(`⚠️ Failed to update ${extensionPackage}: ${msg.slice(0, 150)}`);
     }
@@ -71,13 +98,20 @@ export async function updateSelf(
   await progress.update(`📦 Updating v${currentVersion} → v${latestVersion}...`);
 
   try {
-    execSync("npm install -g @inceptionstack/roundhouse@latest 2>&1", {
+    execSync(`npm install -g ${SELF_PACKAGE}@latest 2>&1`, {
       timeout: 120_000,
       encoding: "utf8",
     });
     return undefined;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // Verify-after-fail: mise/nvm post-install reshim can exit 127 even when
+    // npm wrote the new version to disk. Trust the on-disk state over the exit code.
+    const onDisk = getInstalledVersion(SELF_PACKAGE);
+    if (onDisk === latestVersion) {
+      console.warn(`[roundhouse] self-update install reported failure but v${onDisk} is on disk — treating as success:`, msg);
+      return undefined;
+    }
     console.warn("[roundhouse] self-update failed:", msg);
     return `Self-update failed: ${msg}`;
   }
@@ -106,7 +140,7 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
 
   let latestVersion: string;
   try {
-    latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
+    latestVersion = execSync(`npm view ${SELF_PACKAGE} version 2>/dev/null`, {
       timeout: 30_000,
       encoding: "utf8",
     }).trim();
