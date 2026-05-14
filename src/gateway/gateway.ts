@@ -26,6 +26,7 @@ import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, ha
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
+import { handleToggleEnforceBranches } from "./toggle-enforce-branches-command";
 import {
   type CommandDescriptor,
   type CommandInvocation,
@@ -786,6 +787,13 @@ export class Gateway {
         triggers: ["/later"],
         acceptsArgs: true,
         invoke: ({ thread, text }) => handleLater({ thread, text, postWithFallback: post }),
+      },
+      {
+        triggers: ["/toggle-enforce-branches"],
+        acceptsArgs: true,
+        invoke: ({ thread, text }) => handleToggleEnforceBranches({
+          thread, text, postWithFallback: post,
+        }),
       },
       {
         triggers: ["/topic"],
