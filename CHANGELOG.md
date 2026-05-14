@@ -2,6 +2,15 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.32] — 2026-05-14
+
+### Fixed
+- **Soft-reset progress: emit completion message, not just start.** Before, the user saw `♻️ Session overflowed — soft-resetting to recent turns...` and then silence — success/failure outcomes only went to stderr. Now the user always sees a follow-up:
+  - ✅ `Soft-reset complete (N → M entries). Durable memory will re-inject on next turn.` on success
+  - ⚠️ `Soft-reset no-op (<reason>). Will retry compact next turn.` when nothing to trim
+  - ❌ `Soft-reset failed: <msg>. Will retry next turn.` when recovery itself errors
+- 3 new tests verifying onProgress emissions for all three outcomes (`emergency_whenSoftResetSucceeds_emitsCompletionProgressMessage`, `..._emitsNoOpProgressMessage`, `..._emitsFailureProgressMessage`), plus 1 regression test (`..._doesNotMaskWithTypeError`) for non-Error throws inside the recovery catch. **540 tests passing.**
+
 ## [0.5.31] — 2026-05-14
 
 ### Internal

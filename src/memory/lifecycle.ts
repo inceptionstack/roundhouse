@@ -66,13 +66,22 @@ async function attemptSoftResetRecovery(
     const report = await agent.softReset(threadId);
     if (report?.reset) {
       console.warn(`[memory] soft-reset recovered ${threadId} from overflow`);
+      const { entriesBefore, entriesAfter } = (report as { entriesBefore?: number; entriesAfter?: number });
+      const detail = typeof entriesBefore === "number" && typeof entriesAfter === "number"
+        ? ` (${entriesBefore} → ${entriesAfter} entries)`
+        : "";
+      await onProgress?.(`✅ Soft-reset complete${detail}. Durable memory will re-inject on next turn.`);
       return { attempted: true, succeeded: true };
     }
 
-    console.warn(`[memory] soft-reset returned no-op for ${threadId} (${(report as { reason?: string } | null)?.reason ?? "unknown"})`);
+    const reason = (report as { reason?: string } | null)?.reason ?? "unknown";
+    console.warn(`[memory] soft-reset returned no-op for ${threadId} (${reason})`);
+    await onProgress?.(`⚠️ Soft-reset no-op (${reason}). Will retry compact next turn.`);
     return { attempted: true, succeeded: false };
   } catch (resetErr) {
-    console.error(`[memory] soft-reset failed for ${threadId}:`, (resetErr as Error).message);
+    const msg = resetErr instanceof Error ? resetErr.message : String(resetErr);
+    console.error(`[memory] soft-reset failed for ${threadId}:`, msg);
+    await onProgress?.(`❌ Soft-reset failed: ${msg.slice(0, 200)}. Will retry next turn.`);
     return { attempted: true, succeeded: false };
   }
 }
