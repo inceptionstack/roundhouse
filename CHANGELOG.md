@@ -2,6 +2,20 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.27] — 2026-05-14
+
+### Fixed
+- **Self-update no longer falsely fails on mise/nvm hosts** — on systems where Node is managed by mise (or nvm), `npm install -g` triggers a post-install reshim hook that exits 127 when its tool isn't on PATH, causing `execSync` to throw even though the package was written to disk correctly. The user-visible bug: "Self-update failed: Command failed: npm install -g …" plus `/status` continuing to show the old version forever (because the gateway never restarted). Fix: when the install command throws, consult `npm list -g <pkg>` and trust the on-disk version. If it matches the target, treat the install as successful. Same logic applied to extension updates. (#128)
+- **Side effect:** `/update` now fires its existing 'restarting…' branch on this case, so `/status` reflects the new version on next boot.
+
+### Changed
+- **DRY in `cli/update.ts`:** extracted `getInstalledVersion()` helper used by both pre-install version check and post-failure verification; introduced `SELF_PACKAGE` constant; fixed stale `commands/update.ts` header comment.
+
+## [0.5.26] — 2026-05-14
+
+### Fixed
+- **Emergency compact loop — output-cap mismatch + summarization input overflow.** Two compounding bugs caused infinite emergency-compact loops on Haiku 4.5 sessions near the context limit. (1) `reserveTokens=150000` + Haiku's 64k output cap produced `maxTokens=120000`, which Bedrock rejected. (2) `hardTokens=200k`/`softTokens=180k` against a 200k window left no headroom for the summarizer prompt itself. Fix: lower thresholds to 150k/130k, add `COMPACT_HEADROOM_TOKENS=50k`, force `thinkingLevel:off` in `compactWithModel`, drop `reserveTokens` to 78k. State is now loaded once and reused; phase timing is hoisted; telemetry is accurate on failure. (#126)
+
 ## [0.5.25] — 2026-05-12
 
 ### Fixed
