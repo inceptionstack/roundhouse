@@ -1,5 +1,5 @@
 /**
- * commands/update.ts — Handle the /update command
+ * cli/update.ts — Handle the /update command
  *
  * Transport-agnostic: receives a ProgressReporter interface,
  * not a Telegram-specific thread object.
@@ -140,7 +140,7 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
 
   let latestVersion: string;
   try {
-    latestVersion = execSync("npm view @inceptionstack/roundhouse version 2>/dev/null", {
+    latestVersion = execSync(`npm view ${SELF_PACKAGE} version 2>/dev/null`, {
       timeout: 30_000,
       encoding: "utf8",
     }).trim();
