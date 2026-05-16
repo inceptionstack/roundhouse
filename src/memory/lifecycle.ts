@@ -16,75 +16,13 @@ import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } fr
 import { buildMemoryInjection, injectMemoryIntoMessage } from "./inject";
 import { buildFlushPrompt } from "./prompts";
 import { bootstrapMemoryFiles } from "./bootstrap";
-import { isContextOverflowError } from "../agents/shared/error-classifiers";
-import { appendFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { recoverFromContextOverflow } from "../agents/shared/overflow-recovery";
+import { appendCompactLog, type CompactLogEntry } from "./telemetry";
 
-// ── Telemetry helper ─────────────────────────────────
-
-interface CompactLogEntry {
-  threadId: string;
-  level: string;
-  effectiveLevel: string;
-  flushSkipped: boolean;
-  tokensBefore: number | null;
-  tokensAfter: number | null;
-  flushMs: number;
-  compactMs: number;
-  totalMs: number;
-  model: string;
-  status: "ok" | "failed";
-  error: string | null;
-}
-
-/**
- * Append a compact telemetry entry. Fire-and-forget.
- * Schema is uniform across success/failure (status discriminator) so
- * downstream parsers don't have to handle missing fields.
- */
-function appendCompactLog(entry: CompactLogEntry): void {
-  const logDir = join(homedir(), ".roundhouse", "logs");
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
-  mkdir(logDir, { recursive: true })
-    .then(() => appendFile(join(logDir, "compact-timing.jsonl"), line))
-    .catch((err) => console.warn(`[memory] timing log write failed:`, (err as Error).message));
-}
-
-async function attemptSoftResetRecovery(
-  err: unknown,
-  threadId: string,
-  agent: AgentAdapter,
-  onProgress?: (step: string) => void | Promise<void>,
-): Promise<{ attempted: boolean; succeeded: boolean }> {
-  if (!isContextOverflowError(err) || !agent.softReset) {
-    return { attempted: false, succeeded: false };
-  }
-
-  try {
-    await onProgress?.("♻️ Session overflowed — soft-resetting to recent turns...");
-    const report = await agent.softReset(threadId);
-    if (report?.reset) {
-      console.warn(`[memory] soft-reset recovered ${threadId} from overflow`);
-      const { entriesBefore, entriesAfter } = (report as { entriesBefore?: number; entriesAfter?: number });
-      const detail = typeof entriesBefore === "number" && typeof entriesAfter === "number"
-        ? ` (${entriesBefore} → ${entriesAfter} entries)`
-        : "";
-      await onProgress?.(`✅ Soft-reset complete${detail}. Durable memory will re-inject on next turn.`);
-      return { attempted: true, succeeded: true };
-    }
-
-    const reason = (report as { reason?: string } | null)?.reason ?? "unknown";
-    console.warn(`[memory] soft-reset returned no-op for ${threadId} (${reason})`);
-    await onProgress?.(`⚠️ Soft-reset no-op (${reason}). Will retry compact next turn.`);
-    return { attempted: true, succeeded: false };
-  } catch (resetErr) {
-    const msg = resetErr instanceof Error ? resetErr.message : String(resetErr);
-    console.error(`[memory] soft-reset failed for ${threadId}:`, msg);
-    await onProgress?.(`❌ Soft-reset failed: ${msg.slice(0, 200)}. Will retry next turn.`);
-    return { attempted: true, succeeded: false };
-  }
-}
+// Re-export for backwards compatibility with any consumers that imported
+// these from lifecycle. New code should import from `./telemetry`.
+export { appendCompactLog };
+export type { CompactLogEntry };
 
 // ── Memory mode detection ────────────────────────────
 
@@ -395,7 +333,9 @@ export async function flushMemoryThenCompact(
   } catch (err) {
     const errMsg = (err as Error).message;
     console.error(`[memory] flush+compact failed for ${threadId}:`, errMsg);
-    const recovery = await attemptSoftResetRecovery(err, threadId, agent, onProgress);
+    const recovery = await recoverFromContextOverflow(err, threadId, agent, onProgress);
+    const recoveryAttempted = recovery.kind !== "not-overflow" && recovery.kind !== "unsupported";
+    const recoverySucceeded = recovery.kind === "recovered";
 
     appendCompactLog({
       threadId,
@@ -409,13 +349,13 @@ export async function flushMemoryThenCompact(
       totalMs: Date.now() - t0,
       model: flushModel ?? "default",
       status: "failed",
-      error: (recovery.attempted
-        ? `${recovery.succeeded ? "soft-reset-recovered" : "soft-reset-failed"}: ${errMsg}`
+      error: (recoveryAttempted
+        ? `${recoverySucceeded ? "soft-reset-recovered" : "soft-reset-failed"}: ${errMsg}`
         : errMsg).slice(0, 500),
     });
 
     try {
-      if (recovery.succeeded) {
+      if (recoverySucceeded) {
         // Soft reset cleared the overflow. Mark the next turn for memory
         // re-injection so the agent has its durable context, and clear the
         // pendingCompact flag — there's nothing left to compact now.

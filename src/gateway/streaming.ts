@@ -13,6 +13,29 @@ import { READ_ONLY_TOOLS } from "../memory/types";
 import { isTelegramThread, handleTelegramHtmlStream } from "../transports/telegram/html";
 import { DEBUG_STREAM } from "../util";
 import { toolIcon } from "./helpers";
+import { isContextOverflowError } from "../agents/shared/error-classifiers";
+
+/**
+ * Thrown from `handleStreaming` when a `model_error` stream event carries a
+ * provider-classified context-overflow message (`prompt is too long`, etc.).
+ *
+ * Background: pi-ai's streaming converts provider errors into `model_error`
+ * EVENTS rather than thrown exceptions. Without this class, the for-await
+ * would post the raw error inline and return normally, bypassing the
+ * gateway's `recoverFromAgentTurnOverflow` catch path. Throwing here
+ * routes streamed-overflow into the same recovery surface used for
+ * synchronous `agent.prompt()` overflow.
+ *
+ * Non-overflow `model_error` events still post `⚠️ Agent error: ...` inline
+ * and let the stream continue — only context-overflow is escalated to a
+ * thrown exception.
+ */
+export class StreamModelOverflowError extends Error {
+  override readonly name = "StreamModelOverflowError";
+  constructor(message: string) {
+    super(message);
+  }
+}
 
 // ── Text Stream Factory ──────────────────────────────
 
@@ -70,6 +93,13 @@ export interface StreamContext {
 
 export interface StreamResult {
   usedTools: boolean;
+  /**
+   * True if at least one non-empty text_delta was buffered to the chat
+   * during this turn (i.e. the user saw partial assistant text before
+   * the stream ended). Used by the gateway catch path to choose between
+   * "please resend" vs "response was interrupted" recovery copy.
+   */
+  hadVisibleText: boolean;
 }
 
 /**
@@ -117,6 +147,7 @@ export async function handleStreaming(
 
   let hasTextInCurrentTurn = false;
   let hasContentThisTurn = false;
+  let hasVisibleText = false;
   let modelErrorPosted = false;
   let eventCount = 0;
   let drainingNotified = false;
@@ -141,6 +172,7 @@ export async function handleStreaming(
       case "text_delta": {
         ensureStream();
         currentPush!(event.text);
+        if (event.text.length > 0) hasVisibleText = true;
         hasTextInCurrentTurn = true;
         hasContentThisTurn = true;
         break;
@@ -175,6 +207,14 @@ export async function handleStreaming(
         await flushCurrentStream();
         hasTextInCurrentTurn = false;
         hasContentThisTurn = true;
+        // Context-overflow is recoverable — escalate to the gateway catch
+        // (recoverFromAgentTurnOverflow), suppress the raw inline post, and
+        // abort the stream. Recovery posts its own ♻️/✅/⚠️ messaging.
+        // Non-overflow errors keep today's inline post + continue-loop.
+        if (isContextOverflowError({ message: event.message })) {
+          console.warn(`[roundhouse] streamed model_error: context overflow — escalating to gateway recovery`);
+          throw new StreamModelOverflowError(event.message);
+        }
         modelErrorPosted = true;
         const safeMsg = event.message.split("\n")[0].slice(0, 400);
         console.warn(`[roundhouse] model error: ${safeMsg}`);
@@ -231,5 +271,5 @@ export async function handleStreaming(
     try { await thread.post("\u26a0\ufe0f Agent returned no response. Check roundhouse logs."); } catch {}
   }
 
-  return { usedTools: usedFileModifyingTools };
+  return { usedTools: usedFileModifyingTools, hadVisibleText: hasVisibleText };
 }

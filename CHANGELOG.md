@@ -2,6 +2,70 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.38] — 2026-05-16
+
+### Fixed
+- **Soft-reset pre-turn gap.** Idle sessions that grew via background work
+  (cron jobs, boot turn, sub-agent results) could cross the provider's context
+  limit without ever tripping the proactive `softTokens`/`hardTokens`
+  thresholds while live. The next user turn called `agent.prompt()` directly
+  and overflowed; the gateway catch posted the raw `prompt is too long: N >
+  200000` error with no classification or recovery, and the loop persisted
+  until manual surgery on the jsonl. The v0.5.29–v0.5.32 soft-reset machinery
+  only fired from `flushMemoryThenCompact`'s catch (i.e. when *compact itself*
+  overflowed), not from a normal user-prompt overflow. Concrete evidence on
+  the maintainer's machine: `~/.roundhouse/sessions/main` jsonl reached 2.8 MB
+  with zero `"main"` entries in `compact-timing.jsonl` between
+  2026-05-14 and 2026-05-16.
+- **Fix:** classify `agent.prompt()` / `agent.promptStream()` exceptions in the
+  gateway catch via the existing `isContextOverflowError`. On overflow, call
+  `agent.softReset(threadId)` (extracted into a shared
+  `recoverFromContextOverflow` helper, also used by the v0.5.32 compact-time
+  path). On success, set `forceInjectReason="after-soft-reset"` and clear
+  `pendingCompact`; on no-op or failure with `agent.compact` available, arm
+  `pendingCompact="emergency"` so the existing pre-turn branch fires on the
+  user's next message. UX is deferred-retry only — same-turn replay would
+  duplicate streamed text and re-execute side-effecting tools. Background
+  turns (boot/subagent) get distinct copy that doesn't ask a user to
+  resend. Telemetry: one line per gateway-side recovery in
+  `compact-timing.jsonl` with `level: "gateway-overflow"`.
+- **Streaming path coverage (post-review F1).** pi-ai's streaming surfaces
+  provider errors as `model_error` *events*, not thrown exceptions — so the
+  initial fix above only caught synchronous-throw overflow. On Telegram
+  (streaming-default), streamed `prompt is too long` still bypassed recovery:
+  `gateway/streaming.ts` posted the raw error and the for-await loop returned
+  normally. Per codex-cli design (option a, refined): classify the
+  `model_error` message in `streaming.ts`. Non-overflow keeps today's inline
+  `⚠️ Agent error:` post + continue-loop. Overflow flushes, suppresses the
+  inline raw post, and throws a typed `StreamModelOverflowError` so the
+  gateway catch routes through `recoverFromAgentTurnOverflow` exactly like
+  synchronous-throw overflow. Single recovery surface, no duplicate posts,
+  no flag plumbed through the `StreamResult` contract.
+- **Code-review polish (F2–F6).** Removed dead `"cron"` from the `TurnSource`
+  union (cron jobs run via `cron/runner.ts` in their own session and never
+  reach `Gateway.handleAgentTurn`). Replaced the raw provider error in the
+  `unsupported`-recovery branch with explicit guidance (`⚠️ Session full —
+  adapter doesn't support automatic recovery. Run /compact manually or
+  restart session.`). Extracted `appendCompactLog` + `CompactLogEntry` to a
+  new `src/memory/telemetry.ts` to remove the gateway→memory cross-domain
+  import; `lifecycle.ts` re-exports for back-compat. De-duplicated
+  `MAX_ERROR_PREVIEW = 200` (gateway.ts copy was unused after the v0.5.38
+  catch refactor; deleted). Replaced bare `slice(0, 100)` magic number with
+  `MAX_FAILURE_REASON_PREVIEW`.
+- 26 new tests across `test/overflow-recovery.test.ts` (helper-level
+  classify/recover/no-op/failed/cause-chain),
+  `test/gateway-overflow-recovery.test.ts` (gateway-level state writes,
+  pendingCompact arming, streaming partial-text branch, background-turn
+  copy, post-throw resilience, F3 unsupported-guidance regression), and
+  `test/streaming-overflow.test.ts` (F1: model_error overflow throws,
+  non-overflow inline post regression, end-to-end streaming→recovery for
+  both clean and partial-text turns). **591 tests passing** (+26 net).
+- Design doc: `docs/design/v0.5.38-soft-reset-pre-turn-gap.md` (codex-cli
+  Alternative D — shared reactive recovery helper, deferred retry,
+  pendingCompact fallback).
+- F1 design: `~/.roundhouse/workspace/softreset-f1-codex-design.md`
+  (codex-cli option (a) refined — typed `StreamModelOverflowError`).
+
 ## [0.5.37] — 2026-05-16
 
 ### Fixed
