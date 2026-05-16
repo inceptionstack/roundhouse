@@ -2,6 +2,16 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.35] — 2026-05-16
+
+### Rich UI Surface
+- **RichResponse + TransportAdapter.postRich** — commands now return data, transports render. `/model`, `/topic`, `/crons` migrated. Adding a new menu command no longer requires Telegram-specific code.
+- **Thread-routing fix** — `/topic` from inside a named-topic session no longer falls back to text. Routing preserves the original transport thread by construction (only rewrites the agent-session id separately). Mutation-tested regression.
+- **`buildSelectableMenu()` helper** — shared picker UI for `/model` and `/topic`. Handles current marker, sentinel buttons (e.g. "main (default)"), and text fallback.
+- **`/crons trigger` edit-in-place** — "⏳ Triggering…" → "✅ queued" via `transport.progress()` instead of two separate bubbles.
+- **`safePostText` 3-tier fallback** — postRich never-throws contract now correctly degrades to `thread.post()` for non-Telegram thread shapes (was dropping confirmations on synthetic threads).
+- 561 tests green (+9 net).
+
 ## [0.5.32] — 2026-05-14
 
 ### Fixed
