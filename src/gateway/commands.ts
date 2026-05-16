@@ -6,11 +6,10 @@
  */
 
 import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
+import type { ChatThread, RichResponse, ProgressMessage } from "../transports";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
-// TODO: move progress into TransportAdapter when multi-transport lands
-import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
 
 // ── Types ────────────────────────────────────────────
@@ -27,6 +26,8 @@ export interface CommandContext {
   verboseThreads: Set<string>;
   threadLocks: Map<string, Promise<void>>;
   postWithFallback: (thread: any, text: string) => Promise<void>;
+  /** Open a transport-rendered progress message (post + edit-in-place). */
+  progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
   stopGateway: () => Promise<void>;
 }
 
@@ -77,7 +78,7 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
     writeFileSync(join(ROUNDHOUSE_DIR, ".last-version"), ROUNDHOUSE_VERSION + "\n");
   } catch {}
   console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
-  const progress = await createProgressMessage(thread, "📦 Checking for updates...");
+  const progress = await ctx.progress(thread, "📦 Checking for updates...");
   try {
     const { performUpdate } = await import("../cli/update");
     const result = await performUpdate(progress);
@@ -117,7 +118,7 @@ export async function handleCompact(ctx: CommandContext): Promise<void> {
   threadLocks.set(agentThreadId, lockPromise);
   if (prevLock) await prevLock;
 
-  const progress = await createProgressMessage(thread, "📝 Saving memory and compacting...");
+  const progress = await ctx.progress(thread, "📝 Saving memory and compacting...");
   const stopTyping = startTypingLoop(thread);
   try {
     const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
@@ -356,15 +357,22 @@ export interface CronsContext {
   thread: any;
   text: string;
   cronScheduler: any | null;
-  postWithFallback: (thread: any, text: string) => Promise<void>;
+  /**
+   * Transport-rendered progress message factory. Used by `/crons trigger`
+   * for the eager "queued…" → "✅ queued" two-phase update so adapters
+   * that support edit-in-place don't post two separate bubbles.
+   * Adapters that can't edit fall back to a single post + no-op updates.
+   */
+  progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
 }
 
-export async function handleCrons(ctx: CronsContext): Promise<void> {
-  const { thread, text, cronScheduler, postWithFallback } = ctx;
+export async function handleCrons(ctx: CronsContext): Promise<RichResponse | void> {
+  const { thread, text, cronScheduler } = ctx;
   const { startTypingLoop } = await import("../util");
   const { isBuiltinJob } = await import("../cron/helpers");
   const { formatSchedule, formatRunCounts, jobEnabledIcon } = await import("../cron/format");
 
+  // Typing indicator while we look up scheduler state. Best-effort.
   const stopTyping = startTypingLoop(thread);
   try {
     const parts = text.split(/\s+/).slice(1);
@@ -372,49 +380,73 @@ export async function handleCrons(ctx: CronsContext): Promise<void> {
     const id = parts[1];
 
     if (!cronScheduler) {
-      await thread.post("⚠️ Cron scheduler not running.");
-    } else if (sub === "trigger" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
-      else { await thread.post(`⏳ Triggering ${id}...`); await cronScheduler.trigger(id); await thread.post(`✅ ${id} queued.`); }
-    } else if (sub === "pause" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
-      else { await cronScheduler.pauseJob(id); await thread.post(`⏸️ ${id} paused.`); }
-    } else if (sub === "resume" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
-      else { await cronScheduler.resumeJob(id); await thread.post(`▶️ ${id} resumed.`); }
-    } else {
-      // Default: list jobs
-      const items = await cronScheduler.listJobs();
-      if (items.length === 0) {
-        await thread.post("No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`");
-      } else {
-        const lines = ["🕓 *Scheduled Jobs*", ""];
-        for (const { job, state } of items) {
-          const icon = jobEnabledIcon(job.enabled);
-          const sched = formatSchedule(job.schedule);
-          lines.push(`${icon} *${job.id}*`);
-          lines.push(`   📅 ${sched}`);
-          if (job.description) lines.push(`   📝 ${job.description}`);
-          if (state.totalRuns > 0) {
-            lines.push(`   📊 ${formatRunCounts(state)}`);
-            if (state.lastFinishedAt) {
-              const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
-              const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
-              lines.push(`   ⏱ Last run: ${agoStr}`);
-            }
-          } else {
-            lines.push(`   📊 No runs yet`);
-          }
-          lines.push("");
-        }
-        lines.push(`_${items.length} job(s) configured_`);
-        await postWithFallback(thread, lines.join("\n"));
-      }
+      return { text: "⚠️ Cron scheduler not running." };
     }
+
+    if (sub === "trigger" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be triggered manually.` };
+      // Edit-in-place via transport.progress(): "⏳ Triggering…" → "✅ queued"
+      // (or "❌ failed") so we don't litter the chat with two bubbles.
+      // Adapters without edit support degrade to a single post + no-op update.
+      //
+      // We deliberately do NOT rethrow on failure: progress.update(❌) has
+      // already communicated the failure to the user, and rethrowing would
+      // surface a *second* generic error from the gateway's catch-all.
+      // Mirrors the rest of handleCrons returning RichResponse for failures.
+      const progress = await ctx.progress(thread, `⏳ Triggering ${id}...`);
+      try {
+        await ctx.cronScheduler.trigger(id);
+        await progress.update(`✅ ${id} queued.`);
+      } catch (err) {
+        console.error(`[roundhouse] /crons trigger ${id} failed:`, (err as Error).message);
+        await progress.update(`❌ ${id} failed: ${(err as Error).message}`);
+      }
+      return; // void — progress already posted final state
+    }
+
+    if (sub === "pause" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be paused.` };
+      await cronScheduler.pauseJob(id);
+      return { text: `⏸️ ${id} paused.` };
+    }
+
+    if (sub === "resume" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be resumed.` };
+      await cronScheduler.resumeJob(id);
+      return { text: `▶️ ${id} resumed.` };
+    }
+
+    // Default: list jobs.
+    const items = await cronScheduler.listJobs();
+    if (items.length === 0) {
+      return { text: "No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`" };
+    }
+
+    const lines = ["🕓 *Scheduled Jobs*", ""];
+    for (const { job, state } of items) {
+      const icon = jobEnabledIcon(job.enabled);
+      const sched = formatSchedule(job.schedule);
+      lines.push(`${icon} *${job.id}*`);
+      lines.push(`   📅 ${sched}`);
+      if (job.description) lines.push(`   📝 ${job.description}`);
+      if (state.totalRuns > 0) {
+        lines.push(`   📊 ${formatRunCounts(state)}`);
+        if (state.lastFinishedAt) {
+          const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
+          const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
+          lines.push(`   ⏱ Last run: ${agoStr}`);
+        }
+      } else {
+        lines.push(`   📊 No runs yet`);
+      }
+      lines.push("");
+    }
+    lines.push(`_${items.length} job(s) configured_`);
+    return { text: lines.join("\n") };
   } catch (err) {
-    try { await thread.post(`⚠️ Cron error: ${(err as Error).message}`); } catch {}
+    return { text: `⚠️ Cron error: ${(err as Error).message}` };
   } finally {
     stopTyping();
+    console.log(`[roundhouse] /crons for thread=${thread.id}`);
   }
-  console.log(`[roundhouse] /crons for thread=${thread.id}`);
 }

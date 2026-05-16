@@ -5,12 +5,26 @@
  * utility modules (format, html, progress, notify, bot-commands).
  */
 
-import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult } from "../types";
+import type {
+  TransportAdapter,
+  ChatThread,
+  IncomingMessage,
+  PairingResult,
+  RichResponse,
+  ProgressMessage,
+} from "../types";
 import { isTelegramThread, postTelegramHtml } from "./html";
 import { markdownToTelegramHtml } from "./format";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
+import { toTelegramInlineKeyboard } from "./rich-ui";
+import { createProgressMessage } from "./progress";
+
+/** Extract the numeric Telegram chat id from a thread's id string. */
+function extractTelegramChatId(thread: { id?: string; platformThreadId?: string }): string | undefined {
+  return thread.platformThreadId?.split(":")?.[1] ?? thread.id?.split(":")?.[1];
+}
 
 const TELEGRAM_FORMAT_HINT = "[Format your final answer to be telegram-friendly.]";
 
@@ -26,6 +40,108 @@ export class TelegramAdapter implements TransportAdapter {
       throw new Error("TelegramAdapter.postMessage called with non-Telegram thread");
     }
     await postTelegramHtml(thread as any, text);
+  }
+
+  /**
+   * Render a RichResponse as a Telegram message.
+   *
+   * - No menu → plain text via postMessage (HTML-formatted).
+   * - With menu → inline keyboard via raw `sendMessage` if the thread
+   *   exposes `adapter.telegramFetch`. Falls back to plain text on any
+   *   error or missing handle.
+   *
+   * One `as any` cast: ChatThread is a transport-neutral interface, but
+   * `@chat-adapter/telegram` decorates threads with `adapter.telegramFetch`
+   * and `platformThreadId` at runtime. We narrow at the boundary instead
+   * of polluting ChatThread with Telegram-only fields.
+   */
+  async postRich(thread: ChatThread, response: RichResponse): Promise<void> {
+    if (!response.menu) {
+      // Text-only response: still go through a guarded post so the
+      // never-throws contract holds even if postMessage rejects.
+      await this.safePostText(thread, response.text);
+      return;
+    }
+
+    // Narrow at the transport boundary. See doc above.
+    const telegramThread = thread as unknown as {
+      id?: string;
+      platformThreadId?: string;
+      adapter?: { telegramFetch?: (method: string, payload: Record<string, unknown>) => Promise<unknown> };
+    };
+    const telegramFetch = telegramThread.adapter?.telegramFetch;
+    const chatId = extractTelegramChatId(telegramThread);
+
+    if (!telegramFetch || !chatId) {
+      await this.safePostText(thread, response.text);
+      return;
+    }
+
+    try {
+      // text formatting: response.text is already markdown-ish from commands.
+      // We pass it through markdownToTelegramHtml so bold/code render natively.
+      const html = markdownToTelegramHtml(response.text);
+      await telegramFetch("sendMessage", {
+        chat_id: chatId,
+        text: html,
+        parse_mode: "HTML",
+        reply_markup: toTelegramInlineKeyboard(response.menu),
+      });
+    } catch (err) {
+      console.warn(
+        "[roundhouse] telegram postRich failed, falling back to text:",
+        (err as Error).message,
+      );
+      await this.safePostText(thread, response.text);
+    }
+  }
+
+  /**
+   * Post `text` via postMessage, swallowing any error so callers (chiefly
+   * postRich) can satisfy their never-throws contract.
+   *
+   * Tier 1: try Telegram-native postMessage (HTML formatting, splitting).
+   * Tier 2: fall back to thread.post(text) if available — this catches
+   *         callback/invocation threads that lack `adapter.telegramFetch`
+   *         or a `telegram:` id shape but still expose a generic post().
+   * Tier 3: log + give up (degradation contract: never throw).
+   */
+  private async safePostText(thread: ChatThread, text: string): Promise<void> {
+    try {
+      await this.postMessage(thread, text);
+      return;
+    } catch (err) {
+      console.warn(
+        "[roundhouse] telegram safePostText: postMessage failed, trying thread.post:",
+        (err as Error).message,
+      );
+    }
+    // Tier 2: generic thread.post() if the thread exposes one.
+    const genericPost = (thread as { post?: (t: string) => Promise<void> | void }).post;
+    if (typeof genericPost === "function") {
+      try {
+        await genericPost.call(thread, text);
+        return;
+      } catch (err) {
+        console.error(
+          "[roundhouse] telegram safePostText: thread.post also failed:",
+          (err as Error).message,
+        );
+      }
+    } else {
+      console.error(
+        "[roundhouse] telegram safePostText: thread has no post() method; message dropped",
+      );
+    }
+  }
+
+  /**
+   * Open an editable progress message. Delegates to the existing
+   * `createProgressMessage` helper which already handles non-Telegram
+   * threads by degrading to a single post + no-op updates.
+   */
+  progress(thread: ChatThread, initialText: string): Promise<ProgressMessage> {
+    return createProgressMessage(thread, initialText);
   }
 
   async registerCommands(token: string): Promise<void> {

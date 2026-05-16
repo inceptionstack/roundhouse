@@ -29,7 +29,25 @@
  * owns which action id.
  */
 
-import type { ChatThreadLike } from "./inline-keyboard";
+import type { RichResponse, MinimalThread } from "../transports";
+
+/**
+ * Minimal thread shape an action handler reads. Intentionally narrow so
+ * the registry doesn't depend on Chat SDK or transport-specific types.
+ * The transport adapter does the heavy lifting downstream.
+ */
+export interface ActionThreadLike {
+  id?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * What a command's `invoke()` or action handler may return.
+ *
+ * - `void`: the handler did its own posting (legacy path).
+ * - `RichResponse`: gateway dispatches to `transport.postRich(thread, result)`.
+ */
+export type CommandResult = void | RichResponse;
 
 /** Dispatch stages — see module doc. */
 export type CommandStage = "pre-turn" | "in-turn";
@@ -40,10 +58,10 @@ export type CommandStage = "pre-turn" | "in-turn";
  * from the gateway's `buildCommandContext()`.
  */
 export interface CommandInvocation {
-  /** The chat thread (subscribed). */
-  thread: any;
+  /** The chat thread (subscribed). Narrow shape — commands only need id + post. */
+  thread: MinimalThread;
   /** The raw incoming message object from the Chat SDK. */
-  message: any;
+  message: { text?: string; [key: string]: unknown };
   /** The already-trimmed text of the message. */
   text: string;
   /** The resolved agent thread id (post topic-override). */
@@ -56,7 +74,7 @@ export interface CommandInvocation {
  */
 export interface ActionInvocation {
   value?: string;
-  thread: ChatThreadLike;
+  thread: ActionThreadLike;
 }
 
 /**
@@ -81,10 +99,11 @@ export interface CommandDescriptor {
   stage?: CommandStage;
   /** If true, `/cmd arg1 arg2` also matches. Default false. */
   acceptsArgs?: boolean;
-  /** Do the work. Return (or resolve) when done — gateway will skip further dispatch. */
-  invoke: (inv: CommandInvocation) => Promise<void> | void;
-  /** Optional inline-keyboard callback handlers keyed by action id. */
-  actions?: Record<string, (inv: ActionInvocation) => Promise<void> | void>;
+  /** Do the work. Return (or resolve) when done — gateway will skip further dispatch.
+   *  May return a RichResponse for the gateway to render via the active transport. */
+  invoke: (inv: CommandInvocation) => Promise<CommandResult> | CommandResult;
+  /** Optional inline-keyboard callback handlers keyed by action id. May return a RichResponse. */
+  actions?: Record<string, (inv: ActionInvocation) => Promise<CommandResult> | CommandResult>;
 }
 
 /**
@@ -137,7 +156,8 @@ export function matchesDescriptor(
 export function collectAndValidateActions(
   descriptors: readonly CommandDescriptor[],
 ): Array<{ actionId: string; handler: NonNullable<CommandDescriptor["actions"]>[string]; ownerTriggers: readonly string[] }> {
-  const result: Array<{ actionId: string; handler: any; ownerTriggers: readonly string[] }> = [];
+  type ActionHandler = NonNullable<CommandDescriptor["actions"]>[string];
+  const result: Array<{ actionId: string; handler: ActionHandler; ownerTriggers: readonly string[] }> = [];
   const ownerByAction = new Map<string, readonly string[]>();
 
   for (const desc of descriptors) {

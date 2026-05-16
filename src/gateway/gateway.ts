@@ -17,8 +17,7 @@ import { IpcServer, createIpcHandler } from "../ipc";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
-// TODO: move progress into TransportAdapter when multi-transport lands
-import { createProgressMessage } from "../transports/telegram/progress";
+// progress messages now flow through the transport via this.transport.progress().
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
@@ -29,6 +28,7 @@ import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } f
 import {
   type CommandDescriptor,
   type CommandInvocation,
+  type CommandResult,
   collectAndValidateActions,
   isPreTurn,
   matchesDescriptor,
@@ -254,12 +254,8 @@ export class Gateway {
 
       // ── Command dispatch (in-turn stage) ───
       const trimmed = userText.trim();
-      const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
-      for (const desc of inTurnCommands) {
-        if (matchesDescriptor(desc, trimmed, matchers)) {
-          await desc.invoke(inv);
-          return;
-        }
+      if (await this.dispatchInTurnCommand(inTurnCommands, matchers, thread, message, trimmed, agentThreadId)) {
+        return;
       }
 
       // Dispatch to agent turn handler
@@ -277,7 +273,8 @@ export class Gateway {
       for (const desc of preTurnCommands) {
         if (matchesDescriptor(desc, text, matchers)) {
           if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-          await desc.invoke({ thread, message, text, agentThreadId });
+          const result = await desc.invoke({ thread, message, text, agentThreadId });
+          await this.postCommandResult(thread, result);
           return;
         }
       }
@@ -309,7 +306,8 @@ export class Gateway {
     // fail fast at startup.
     for (const { actionId, handler } of collectAndValidateActions(allDescriptors)) {
       this.chat.onAction(actionId, async (event: any) => {
-        await handler({ value: event.value, thread: event.thread });
+        const result = await handler({ value: event.value, thread: event.thread });
+        await this.postCommandResult(event.thread, result);
       });
     }
 
@@ -393,6 +391,7 @@ export class Gateway {
     if (prevLock) await prevLock;
 
     let stopTyping: (() => void) | null = null;
+    let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
     try {
       console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
@@ -459,7 +458,10 @@ export class Gateway {
         }
       }
 
-      let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
+      // Note: deferredSoftFlush is hoisted to the outer try-finally above
+      // so the post-finally `if (deferredSoftFlush) { ... }` block (line ~530)
+      // can still see it. Earlier versions declared it here, then read it
+      // OUTSIDE the enclosing try block — a scoping bug that tsc surfaced.
       try {
         let turnUsedTools = false;
         if (agent.promptStream) {
@@ -682,7 +684,7 @@ export class Gateway {
     // Hard or emergency: flush + compact
     try {
       const prefix = pressure === "emergency" ? "⚠️ Context nearly full! " : "";
-      const progress = await createProgressMessage(thread, `📝 ${prefix}Saving memory and compacting...`);
+      const progress = await this.transport.progress(thread, `📝 ${prefix}Saving memory and compacting...`);
       const result = await flushMemoryThenCompact(
         agentThreadId, agent, memoryRoot, pressure, this.config.memory,
         (step) => progress.update(step),
@@ -725,6 +727,7 @@ export class Gateway {
       verboseThreads,
       threadLocks,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
+      progress: (t, initialText) => this.transport.progress(t, initialText),
       stopGateway: () => this.stop(),
     };
   }
@@ -758,9 +761,12 @@ export class Gateway {
     // Shorthand: wrap a standard-CommandContext handler as a descriptor invoker.
     const withCtx = (handler: (ctx: CommandContext) => Promise<void>) =>
       async ({ thread, message, agentThreadId }: CommandInvocation) => {
-        const authorName = message.author?.userName ?? message.author?.userId ?? "?";
+        // CommandInvocation.message is loosely typed (`text` + index sig);
+        // narrow to the shape we read here.
+        const authorish = message as { author?: { userName?: string; userId?: string | number } };
+        const authorName = authorish.author?.userName ?? authorish.author?.userId ?? "?";
         await handler(this.buildCommandContext(
-          thread, message, agentThreadId, authorName,
+          thread, message, agentThreadId, String(authorName),
           allowedUsers, allowedUserIds, verboseThreads, threadLocks,
         ));
       };
@@ -777,9 +783,9 @@ export class Gateway {
       {
         triggers: ["/model"],
         acceptsArgs: true,
-        invoke: ({ thread, text }) => handleModel({ thread, text, postWithFallback: post }),
+        invoke: ({ text }) => handleModel({ text }),
         actions: {
-          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value, thread: ev.thread }),
+          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value }),
         },
       },
       {
@@ -790,7 +796,7 @@ export class Gateway {
       {
         triggers: ["/topic"],
         acceptsArgs: true,
-        invoke: ({ thread, text }) => handleTopic({ thread, text, postWithFallback: post }),
+        invoke: ({ thread, text }) => handleTopic({ thread, text }),
         actions: {
           [TOPIC_ACTION_ID]: (ev) => handleTopicAction({ value: ev.value, thread: ev.thread }),
         },
@@ -828,7 +834,7 @@ export class Gateway {
         invoke: ({ thread, text }) => handleCrons({
           thread, text,
           cronScheduler: this.cronScheduler,
-          postWithFallback: post,
+          progress: (t, initialText) => this.transport.progress(t, initialText),
         }),
       },
     ];
@@ -841,6 +847,58 @@ export class Gateway {
       signal,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
     });
+  }
+
+  /**
+   * Walk the in-turn descriptor list, invoking the first matching command
+   * and forwarding its result via postCommandResult.
+   *
+   * Extracted so tests can exercise the *live* dispatch path (and prove
+   * that the original transport thread reaches transport.postRich, not a
+   * synthetic one rewritten with the agent thread id) without booting a
+   * real Chat SDK instance.
+   *
+   * @returns true if a command matched and was handled, false otherwise.
+   */
+  private async dispatchInTurnCommand(
+    inTurnCommands: readonly CommandDescriptor[],
+    matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
+    thread: any, message: unknown, trimmed: string, agentThreadId: string,
+  ): Promise<boolean> {
+    const inv: CommandInvocation = { thread, message: message as { text?: string; [key: string]: unknown }, text: trimmed, agentThreadId };
+    for (const desc of inTurnCommands) {
+      if (matchesDescriptor(desc, trimmed, matchers)) {
+        const result = await desc.invoke(inv);
+        await this.postCommandResult(thread, result);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Dispatch a command's result to the active transport.
+   *
+   * - `void` return: the command handled its own posting (legacy path).
+   * - `RichResponse`: render via `transport.postRich()`.
+   *
+   * Centralising this means a new menu-style command only has to return
+   * data — it never imports a transport package directly.
+   *
+   * **Trust the postRich never-throws contract.** `TransportAdapter.postRich`
+   * is documented to never throw; adapters degrade gracefully internally
+   * (Telegram does this via `safePostText`). We don't add a fallback
+   * `thread.post(text)` here — if an adapter ever does throw, the error
+   * propagates and surfaces as a bug rather than being silently swallowed.
+   *
+   * `thread: any` mirrors the rest of the gateway: the chat SDK Thread<TRaw>
+   * type doesn't flow cleanly through this surface yet (would require a
+   * bigger generic-threading refactor across helpers/streaming), so we
+   * keep this loose. The transport adapter narrows again in postRich.
+   */
+  private async postCommandResult(thread: any, result: CommandResult): Promise<void> {
+    if (!result) return;
+    await this.transport.postRich(thread, result);
   }
 
   /** Post text with markdown, falling back to plain text */

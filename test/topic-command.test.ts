@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   getActiveTopic,
   setActiveTopic,
@@ -54,9 +54,9 @@ describe("topic-command", () => {
     });
   });
 
-  describe("handleTopic (no args)", () => {
-    it("uses inline keyboard when adapter supports telegramFetch and topics exist", async () => {
-      // Seed a memory-state file so listTopics() returns a real topic.
+  describe("handleTopic (no args) returns RichResponse menu", () => {
+    it("returns menu with main button + known topics", async () => {
+      // Seed a memory-state file so listTopics() returns real topics.
       // Filename encoding: topic_c<chatId>_c<topicName>.json (matches threadIdToDir).
       const { ROUNDHOUSE_DIR } = await import("../src/config");
       const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
@@ -72,38 +72,25 @@ describe("topic-command", () => {
         mkdirSync(stateDir, { recursive: true });
         for (const f of seededFiles) writeFileSync(f, "{}");
 
-        const telegramFetch = vi.fn(async () => ({ ok: true }));
-        const thread = {
-          id: `telegram:${chatId}`,
-          platformThreadId: `telegram:${chatId}`,
-          adapter: { telegramFetch },
-        };
-        const post = vi.fn(async () => {});
+        const result = handleTopic({
+          thread: { id: `telegram:${chatId}` },
+          text: "/topic",
+        });
 
-        await handleTopic({ thread, text: "/topic", postWithFallback: post });
+        expect(result).toBeDefined();
+        expect(result.menu).toBeDefined();
+        expect(result.menu!.sections).toHaveLength(1);
 
-        expect(telegramFetch).toHaveBeenCalledTimes(1);
-        const [method, payload] = telegramFetch.mock.calls[0]!;
-        expect(method).toBe("sendMessage");
-        const p = payload as any;
-        expect(p.chat_id).toBe(chatId);
-        expect(p.parse_mode).toBe("HTML");
-        expect(p.reply_markup?.inline_keyboard).toBeDefined();
+        const buttons = result.menu!.sections[0].buttons;
+        const labels = buttons.map(b => b.label);
+        expect(labels.some(l => l.includes("main (default)"))).toBe(true);
+        expect(labels.some(l => l.includes("deploy"))).toBe(true);
+        expect(labels.some(l => l.includes("debug"))).toBe(true);
 
-        // Flatten rows, confirm main + both seeded topics are present
-        const buttons = p.reply_markup.inline_keyboard.flat() as Array<{ text: string; callback_data: string }>;
-        const texts = buttons.map(b => b.text);
-        expect(texts.some(t => t.includes("main (default)"))).toBe(true);
-        expect(texts.some(t => t.includes("deploy"))).toBe(true);
-        expect(texts.some(t => t.includes("debug"))).toBe(true);
-
-        // Callback data must use shared inline-keyboard encoding
+        // Every button uses the topic_select action id
         for (const btn of buttons) {
-          expect(btn.callback_data).toMatch(/^chat:\{"a":"topic_select","v":".+"\}$/);
+          expect(btn.actionId).toBe(TOPIC_ACTION_ID);
         }
-
-        // Post fallback must NOT have been used when keyboard succeeded
-        expect(post).not.toHaveBeenCalled();
       } finally {
         for (const f of seededFiles) {
           try { rmSync(f); } catch { /* ignore */ }
@@ -111,7 +98,7 @@ describe("topic-command", () => {
       }
     });
 
-    it("marks main with ✓ when no topic is active", async () => {
+    it("marks main with selected=true when no topic is active", async () => {
       const { ROUNDHOUSE_DIR } = await import("../src/config");
       const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
       const { join } = await import("node:path");
@@ -126,100 +113,112 @@ describe("topic-command", () => {
         // Ensure no active topic for this chat
         setActiveTopic(chatId, "main");
 
-        const telegramFetch = vi.fn(async () => ({ ok: true }));
-        await handleTopic({
-          thread: {
-            id: `telegram:${chatId}`,
-            platformThreadId: `telegram:${chatId}`,
-            adapter: { telegramFetch },
-          },
+        const result = handleTopic({
+          thread: { id: `telegram:${chatId}` },
           text: "/topic",
-          postWithFallback: async () => {},
         });
-
-        const buttons = (telegramFetch.mock.calls[0]![1] as any).reply_markup.inline_keyboard.flat();
-        const mainBtn = buttons.find((b: any) => b.text.includes("main (default)"));
-        expect(mainBtn?.text).toContain("✓");
+        const buttons = result.menu!.sections[0].buttons;
+        const mainBtn = buttons.find(b => b.label.includes("main (default)"));
+        expect(mainBtn?.selected).toBe(true);
       } finally {
         try { rmSync(seed); } catch { /* ignore */ }
       }
     });
 
-    it("shows inline keyboard with main button even when no custom topics exist", async () => {
-      const telegramFetch = vi.fn(async () => ({ ok: true }));
-      const thread = {
-        id: "telegram:999",
-        platformThreadId: "telegram:999",
-        adapter: { telegramFetch },
-      };
-      const post = vi.fn(async () => {});
-
-      await handleTopic({ thread, text: "/topic", postWithFallback: post });
-
-      // Should use inline keyboard, not text fallback
-      expect(telegramFetch).toHaveBeenCalledTimes(1);
-      const [method, payload] = telegramFetch.mock.calls[0]!;
-      expect(method).toBe("sendMessage");
-      const p = payload as any;
-      expect(p.reply_markup?.inline_keyboard).toBeDefined();
-      // Should show at least the main button
-      const buttons = p.reply_markup.inline_keyboard.flat() as Array<{ text: string }>;
-      expect(buttons.some(b => b.text.includes("main (default)"))).toBe(true);
-      // Fallback should not be used
-      expect(post).not.toHaveBeenCalled();
+    it("returns menu with main button even when no custom topics exist", () => {
+      const result = handleTopic({
+        thread: { id: "telegram:999" },
+        text: "/topic",
+      });
+      expect(result.menu).toBeDefined();
+      const labels = result.menu!.sections[0].buttons.map(b => b.label);
+      expect(labels.some(l => l.includes("main (default)"))).toBe(true);
     });
 
-    it("rejects /topic in group chats", async () => {
-      const post = vi.fn(async () => {});
-      await handleTopic({
+    it("rejects /topic in group chats with text-only response", () => {
+      const result = handleTopic({
         thread: { id: "telegram:-100123" },
         text: "/topic",
-        postWithFallback: post,
       });
-      expect(post).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("only works in private"));
+      expect(result.menu).toBeUndefined();
+      expect(result.text).toContain("only works in private");
+    });
+
+    // Regression: when called from inside a named-topic agent session the
+    // *transport* thread still has the user's chat id (e.g. "telegram:42").
+    // Only the agent thread id was rewritten to "topic:42:deploy". /topic
+    // must still return a menu \u2014 not a text-only fallback.
+    it("returns a menu when invoked from inside a named-topic session (regression)", async () => {
+      const { ROUNDHOUSE_DIR } = await import("../src/config");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const chatId = "topicregress1";
+      // Sanity: simulate the user being on the "deploy" topic.
+      setActiveTopic(chatId, "deploy");
+      // Seed memory-state files for two topics so listTopics() finds them.
+      const stateDir = join(ROUNDHOUSE_DIR, "memory-state");
+      const seeds = [
+        join(stateDir, `topic_c${chatId}_cdeploy.json`),
+        join(stateDir, `topic_c${chatId}_cdebug.json`),
+      ];
+      try {
+        mkdirSync(stateDir, { recursive: true });
+        for (const f of seeds) writeFileSync(f, "{}");
+
+        // Confirm the routing rule: applyTopicOverride rewrites the agent
+        // session id, not the transport thread.
+        const transportThreadId = `telegram:${chatId}`;
+        const agentThreadId = applyTopicOverride("main", { id: transportThreadId });
+        expect(agentThreadId).toBe(`topic:${chatId}:deploy`);
+
+        // Command receives the *transport* thread \u2014 the one with the chat id.
+        const result = handleTopic({
+          thread: { id: transportThreadId },
+          text: "/topic",
+        });
+
+        expect(result.menu).toBeDefined();
+        const buttons = result.menu!.sections[0].buttons;
+        const labels = buttons.map(b => b.label);
+        expect(labels.some(l => l.includes("main (default)"))).toBe(true);
+        expect(labels.some(l => l.includes("deploy"))).toBe(true);
+        expect(labels.some(l => l.includes("debug"))).toBe(true);
+
+        // Active topic must be reflected as selected on its button.
+        const deployBtn = buttons.find(b => b.label.includes("deploy"));
+        expect(deployBtn?.selected).toBe(true);
+      } finally {
+        // Reset
+        setActiveTopic(chatId, "main");
+        for (const f of seeds) { try { rmSync(f); } catch { /* ignore */ } }
+      }
     });
   });
 
   describe("handleTopicAction", () => {
-    it("switches to the selected topic via callback value", async () => {
-      const posts: string[] = [];
-      const thread = {
-        id: "telegram:555",
-        post: async (arg: any) => {
-          posts.push(typeof arg === "string" ? arg : arg.markdown);
-        },
-      };
-      await handleTopicAction({ value: "deploy", thread });
+    it("switches to the selected topic via callback value", () => {
+      const result = handleTopicAction({ value: "deploy", thread: { id: "telegram:555" } });
       expect(getActiveTopic("555")).toBe("deploy");
-      expect(posts[0]).toContain("deploy");
+      expect(result?.text).toContain("deploy");
     });
 
-    it("clears active topic when main sentinel is selected", async () => {
+    it("clears active topic when main sentinel is selected", () => {
       setActiveTopic("555", "deploy");
-      const thread = {
-        id: "telegram:555",
-        post: async () => {},
-      };
-      await handleTopicAction({ value: "-main", thread });
+      handleTopicAction({ value: "-main", thread: { id: "telegram:555" } });
       expect(getActiveTopic("555")).toBeUndefined();
     });
 
-    it("treats a user-created topic named '__main__' as a real topic, not the sentinel", async () => {
+    it("treats a user-created topic named '__main__' as a real topic, not the sentinel", () => {
       // Regression: old sentinel was '__main__' which collides with a valid
       // user-created topic name. New sentinel '-main' is unrepresentable.
-      const thread = {
-        id: "telegram:557",
-        post: async () => {},
-      };
-      await handleTopicAction({ value: "__main__", thread });
+      handleTopicAction({ value: "__main__", thread: { id: "telegram:557" } });
       expect(getActiveTopic("557")).toBe("__main__");
     });
 
-    it("ignores empty callback value", async () => {
-      const thread = { id: "telegram:555", post: vi.fn() };
-      await handleTopicAction({ value: undefined, thread });
-      // Nothing happened
-      expect(thread.post).not.toHaveBeenCalled();
+    it("ignores empty callback value", () => {
+      const result = handleTopicAction({ value: undefined, thread: { id: "telegram:555" } });
+      expect(result).toBeUndefined();
     });
 
     it("exports a stable action id", () => {
