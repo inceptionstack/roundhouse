@@ -15,6 +15,7 @@ import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
 import { IpcServer, createIpcHandler } from "../ipc";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
+import { recoverFromAgentTurnOverflow, type TurnSource } from "./overflow";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
 // progress messages now flow through the transport via this.transport.progress().
@@ -43,6 +44,9 @@ import { readFile } from "node:fs/promises";
 import { injectToolsSection } from "./tools-inject";
 import { injectPersonaSection, loadPersona } from "./persona-inject";
 import { checkVersionChange } from "./whats-new";
+
+/** Origin of an agent turn — used for recovery copy and telemetry. */
+export type { TurnSource };
 
 /** Limits */
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
@@ -375,6 +379,7 @@ export class Gateway {
   private async handleAgentTurn(
     thread: any, agentThreadId: string, userText: string, rawAttachments: any[],
     verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>, abortControllers: Map<string, AbortController>,
+    turnSource: TurnSource = "user",
   ): Promise<void> {
     // Prepare message (save attachments, build AgentMessage)
     const result = await this.prepareAgentMessage(thread, agentThreadId, userText, rawAttachments);
@@ -462,6 +467,10 @@ export class Gateway {
       // so the post-finally `if (deferredSoftFlush) { ... }` block (line ~530)
       // can still see it. Earlier versions declared it here, then read it
       // OUTSIDE the enclosing try block — a scoping bug that tsc surfaced.
+      // streamHadVisibleText is hoisted for the same reason: the catch below
+      // needs to know whether the user already saw partial assistant text
+      // when picking gateway-overflow recovery copy.
+      let streamHadVisibleText = false;
       try {
         let turnUsedTools = false;
         if (agent.promptStream) {
@@ -470,6 +479,7 @@ export class Gateway {
           try {
             const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
             turnUsedTools = streamResult.usedTools;
+            streamHadVisibleText = streamResult.hadVisibleText;
           } finally {
             abortControllers.delete(agentThreadId);
           }
@@ -506,12 +516,10 @@ export class Gateway {
           console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
         }
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const safeMsg = errMsg.split('\n')[0].slice(0, MAX_ERROR_PREVIEW);
-        console.error(`[roundhouse] agent error:`, err);
-        try {
-          await thread.post(`⚠️ Error: ${safeMsg}`);
-        } catch {}
+        await recoverFromAgentTurnOverflow(thread, agentThreadId, agent, err, {
+          turnSource,
+          hadVisibleText: streamHadVisibleText,
+        });
       } finally {
         if (stopTyping) stopTyping();
       }
@@ -840,7 +848,7 @@ export class Gateway {
     ];
   }
 
-  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean }> {
+  private async handleStreaming(thread: any, stream: AsyncIterable<AgentStreamEvent>, verbose: boolean, signal?: AbortSignal): Promise<{ usedTools: boolean; hadVisibleText: boolean }> {
     return _handleStream(stream, {
       thread,
       verbose,
@@ -1014,7 +1022,7 @@ export class Gateway {
     const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
 
     try {
-      await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers);
+      await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers, "boot");
     } catch (err) {
       console.error("[roundhouse] boot turn failed:", (err as Error).message);
     }
@@ -1070,7 +1078,7 @@ export class Gateway {
         : `[Sub-agent ${status.role} ${status.status} — no output]`;
 
       const syntheticThread = this.transport.createThread(chatId);
-      await this.handleAgentTurn(syntheticThread, "main", resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers);
+      await this.handleAgentTurn(syntheticThread, "main", resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers, "subagent");
     } catch (err) {
       console.error("[roundhouse] sub-agent result injection failed:", err);
     }

@@ -70,6 +70,13 @@ export interface StreamContext {
 
 export interface StreamResult {
   usedTools: boolean;
+  /**
+   * True if at least one non-empty text_delta was buffered to the chat
+   * during this turn (i.e. the user saw partial assistant text before
+   * the stream ended). Used by the gateway catch path to choose between
+   * "please resend" vs "response was interrupted" recovery copy.
+   */
+  hadVisibleText: boolean;
 }
 
 /**
@@ -117,6 +124,7 @@ export async function handleStreaming(
 
   let hasTextInCurrentTurn = false;
   let hasContentThisTurn = false;
+  let hasVisibleText = false;
   let modelErrorPosted = false;
   let eventCount = 0;
   let drainingNotified = false;
@@ -141,6 +149,7 @@ export async function handleStreaming(
       case "text_delta": {
         ensureStream();
         currentPush!(event.text);
+        if (event.text.length > 0) hasVisibleText = true;
         hasTextInCurrentTurn = true;
         hasContentThisTurn = true;
         break;
@@ -231,5 +240,5 @@ export async function handleStreaming(
     try { await thread.post("\u26a0\ufe0f Agent returned no response. Check roundhouse logs."); } catch {}
   }
 
-  return { usedTools: usedFileModifyingTools };
+  return { usedTools: usedFileModifyingTools, hadVisibleText: hasVisibleText };
 }
