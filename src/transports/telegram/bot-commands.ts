@@ -17,7 +17,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "later", description: "Save an idea for later" },
   { command: "topic", description: "Switch conversation topic" },
   { command: "verbose", description: "Toggle verbose tool output" },
-  { command: "stop", description: "Stop the current agent run" },
+  { command: "cancel", description: "Cancel the current agent run" },
   { command: "restart", description: "Restart agent process" },
   { command: "update", description: "Update roundhouse and restart" },
   { command: "status", description: "Show system status" },

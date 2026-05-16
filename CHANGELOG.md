@@ -432,7 +432,7 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ### Added
 - Gateway with Telegram adapter, per-thread agent sessions
-- `/new`, `/restart`, `/status`, `/compact`, `/verbose`, `/stop`, `/doctor` commands
+- `/new`, `/restart`, `/status`, `/compact`, `/verbose`, `/cancel`, `/doctor` commands
 - Auto-register bot commands with Telegram on startup
 - Draining/drain_complete notification system
 - Context token usage with progress bar

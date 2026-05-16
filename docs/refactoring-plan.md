@@ -84,7 +84,7 @@
 | 4.7 | *Run tests* | Green bar |
 | 4.8 | *Extract Module: notifications* | Move `notifyStartup`, `postWithFallback`, `registerBotCommands` → `src/gateway/notifications.ts` |
 | 4.9 | *Run tests* | Green bar |
-| 4.10 | *Extract Module: command-router* | Move Telegram command handlers (`/status`, `/compact`, `/update`, `/crons`, `/stop`, `/verbose`, `/doctor`) → `src/gateway/command-router.ts` as a handler map |
+| 4.10 | *Extract Module: command-router* | Move Telegram command handlers (`/status`, `/compact`, `/update`, `/crons`, `/cancel`, `/verbose`, `/doctor`) → `src/gateway/command-router.ts` as a handler map |
 | 4.11 | *Run tests* | Green bar |
 | 4.12 | *Thin Gateway class* | `Gateway` becomes orchestrator importing from sub-modules (~100 lines) |
 | 4.13 | *Move file* | Rename `src/gateway.ts` → `src/gateway/index.ts`, update imports |

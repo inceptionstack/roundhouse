@@ -284,25 +284,25 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
   console.log(`[roundhouse] /status for thread=${thread.id} agentThread=${agentThreadId}`);
 }
 
-// ── /stop ────────────────────────────────────────────
+// ── /cancel ────────────────────────────────────────────
 
-export interface StopContext {
+export interface CancelContext {
   thread: any;
   agentThreadId: string;
   agent: AgentAdapter;
   abortControllers: Map<string, AbortController>;
 }
 
-export async function handleStop(ctx: StopContext): Promise<void> {
+export async function handleCancel(ctx: CancelContext): Promise<void> {
   const { thread, agentThreadId, agent, abortControllers } = ctx;
   if (agent.abort) {
     await agent.abort(agentThreadId);
     abortControllers.get(agentThreadId)?.abort();
-    try { await thread.post("⏹️ Stopped."); } catch {}
+    try { await thread.post("⏹️ Cancelled."); } catch {}
   } else {
     try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
   }
-  console.log(`[roundhouse] /stop for thread=${thread.id} agentThread=${agentThreadId}`);
+  console.log(`[roundhouse] /cancel for thread=${thread.id} agentThread=${agentThreadId}`);
 }
 
 // ── /verbose ─────────────────────────────────────────

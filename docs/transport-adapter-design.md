@@ -66,7 +66,7 @@ export interface TransportAdapter {
 - Agent adapter lifecycle (create, prompt, stream)
 - Thread queue / concurrency management
 - Memory system (flush, compact, pressure)
-- Command routing (/new, /stop, /status, etc.)
+- Command routing (/new, /cancel, /status, etc.)
 - Config loading
 - Allowed user authorization
 

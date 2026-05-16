@@ -217,7 +217,7 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/compact` | Compact session context to free up tokens |
 | `/verbose` | Toggle tool status messages on/off for this chat |
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
-| `/stop` | Stop the current agent run (abort tools, LLM calls, compaction) |
+| `/cancel` | Stop the current agent run (abort tools, LLM calls, compaction) |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
 | `/doctor` | Run health checks and show system status |
 | `/crons` | Manage scheduled jobs (list, trigger, pause, resume) |
@@ -242,7 +242,7 @@ Manually triggers context compaction for the current chat's session. Shows befor
 
 Toggles verbose mode for the current chat. When ON, shows tool call status messages (e.g. "⚡ Running `bash`…"). When OFF (default), tool calls execute silently — you only see the agent's text responses. State shown in `/status`.
 
-### `/stop`
+### `/cancel`
 
 Aborts the current agent run for this chat — stops any in-progress tool calls, LLM generation, and compaction. The session is preserved; send another message to continue the conversation.
 

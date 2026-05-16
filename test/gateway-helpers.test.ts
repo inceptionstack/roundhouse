@@ -24,7 +24,7 @@ describe("gateway/helpers", () => {
     });
 
     it("rejects non-matching command", () => {
-      expect(isCommand("/stop", "/start", "mybot")).toBe(false);
+      expect(isCommand("/cancel", "/start", "mybot")).toBe(false);
     });
   });
 
