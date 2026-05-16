@@ -81,6 +81,9 @@ function getCurrentModelLabel(settings: Record<string, any>): string {
 function buildModelMenu(currentLabel: string): RichResponse {
   // Map our label-based "current" semantics into the helper's key-based
   // semantics by finding the alias whose label matches.
+  // TODO: introduce getCurrentModelAlias() upstream so the round-trip
+  // (alias → label → alias) goes away. With 8 models the O(n) lookup is
+  // negligible; the smell is purely about clarity.
   const currentAlias = KEYBOARD_MODELS.find(
     (alias) => MODEL_ALIASES[alias].label === currentLabel,
   );

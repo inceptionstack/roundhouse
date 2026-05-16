@@ -109,9 +109,10 @@ export function listTopics(chatId: string): string[] {
 }
 
 /**
- * Minimal thread shape this module reads. Transport details are not its
- * concern. Compatible with `MinimalThread` from transports/types but with
- * an optional id (some callers synthesize threads without one yet).
+ * Minimal thread shape this module reads. Narrower than `MinimalThread`
+ * from transports/types: `id` may be absent for synthetic callers that
+ * haven't constructed one yet (e.g. boot turns), and we don't depend on
+ * `post`. Read-only — we never mutate or write to the thread here.
  */
 export interface TopicThread {
   id?: string;

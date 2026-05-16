@@ -388,13 +388,18 @@ export async function handleCrons(ctx: CronsContext): Promise<RichResponse | voi
       // Edit-in-place via transport.progress(): "⏳ Triggering…" → "✅ queued"
       // (or "❌ failed") so we don't litter the chat with two bubbles.
       // Adapters without edit support degrade to a single post + no-op update.
+      //
+      // We deliberately do NOT rethrow on failure: progress.update(❌) has
+      // already communicated the failure to the user, and rethrowing would
+      // surface a *second* generic error from the gateway's catch-all.
+      // Mirrors the rest of handleCrons returning RichResponse for failures.
       const progress = await ctx.progress(thread, `⏳ Triggering ${id}...`);
       try {
         await ctx.cronScheduler.trigger(id);
         await progress.update(`✅ ${id} queued.`);
       } catch (err) {
+        console.error(`[roundhouse] /crons trigger ${id} failed:`, (err as Error).message);
         await progress.update(`❌ ${id} failed: ${(err as Error).message}`);
-        throw err;
       }
       return; // void — progress already posted final state
     }
