@@ -6,7 +6,7 @@
  */
 
 import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
-import type { RichResponse, ProgressMessage } from "../transports";
+import type { ChatThread, RichResponse, ProgressMessage } from "../transports";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
@@ -27,7 +27,7 @@ export interface CommandContext {
   threadLocks: Map<string, Promise<void>>;
   postWithFallback: (thread: any, text: string) => Promise<void>;
   /** Open a transport-rendered progress message (post + edit-in-place). */
-  progress: (thread: any, initialText: string) => Promise<ProgressMessage>;
+  progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
   stopGateway: () => Promise<void>;
 }
 

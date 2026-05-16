@@ -118,7 +118,7 @@ export class TelegramAdapter implements TransportAdapter {
    * threads by degrading to a single post + no-op updates.
    */
   progress(thread: ChatThread, initialText: string): Promise<ProgressMessage> {
-    return createProgressMessage(thread as any, initialText);
+    return createProgressMessage(thread, initialText);
   }
 
   async registerCommands(token: string): Promise<void> {

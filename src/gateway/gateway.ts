@@ -254,13 +254,8 @@ export class Gateway {
 
       // ── Command dispatch (in-turn stage) ───
       const trimmed = userText.trim();
-      const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
-      for (const desc of inTurnCommands) {
-        if (matchesDescriptor(desc, trimmed, matchers)) {
-          const result = await desc.invoke(inv);
-          await this.postCommandResult(thread, result);
-          return;
-        }
+      if (await this.dispatchInTurnCommand(inTurnCommands, matchers, thread, message, trimmed, agentThreadId)) {
+        return;
       }
 
       // Dispatch to agent turn handler
@@ -396,6 +391,7 @@ export class Gateway {
     if (prevLock) await prevLock;
 
     let stopTyping: (() => void) | null = null;
+    let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
     try {
       console.log(`[roundhouse] → ${agent.name} | thread=${agentThreadId}`);
 
@@ -462,7 +458,10 @@ export class Gateway {
         }
       }
 
-      let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
+      // Note: deferredSoftFlush is hoisted to the outer try-finally above
+      // so the post-finally `if (deferredSoftFlush) { ... }` block (line ~530)
+      // can still see it. Earlier versions declared it here, then read it
+      // OUTSIDE the enclosing try block — a scoping bug that tsc surfaced.
       try {
         let turnUsedTools = false;
         if (agent.promptStream) {
@@ -847,6 +846,33 @@ export class Gateway {
   }
 
   /**
+   * Walk the in-turn descriptor list, invoking the first matching command
+   * and forwarding its result via postCommandResult.
+   *
+   * Extracted so tests can exercise the *live* dispatch path (and prove
+   * that the original transport thread reaches transport.postRich, not a
+   * synthetic one rewritten with the agent thread id) without booting a
+   * real Chat SDK instance.
+   *
+   * @returns true if a command matched and was handled, false otherwise.
+   */
+  private async dispatchInTurnCommand(
+    inTurnCommands: readonly CommandDescriptor[],
+    matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
+    thread: any, message: any, trimmed: string, agentThreadId: string,
+  ): Promise<boolean> {
+    const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
+    for (const desc of inTurnCommands) {
+      if (matchesDescriptor(desc, trimmed, matchers)) {
+        const result = await desc.invoke(inv);
+        await this.postCommandResult(thread, result);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Dispatch a command's result to the active transport.
    *
    * - `void` return: the command handled its own posting (legacy path).
@@ -855,6 +881,11 @@ export class Gateway {
    *
    * Centralising this means a new menu-style command only has to return
    * data — it never imports a transport package directly.
+   *
+   * `thread: any` mirrors the rest of the gateway: the chat SDK Thread<TRaw>
+   * type doesn't flow cleanly through this surface yet (would require a
+   * bigger generic-threading refactor across helpers/streaming), so we
+   * keep this loose. The transport adapter narrows again in postRich.
    */
   private async postCommandResult(thread: any, result: CommandResult): Promise<void> {
     if (!result) return;
