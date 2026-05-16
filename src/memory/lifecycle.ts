@@ -17,42 +17,12 @@ import { buildMemoryInjection, injectMemoryIntoMessage } from "./inject";
 import { buildFlushPrompt } from "./prompts";
 import { bootstrapMemoryFiles } from "./bootstrap";
 import { recoverFromContextOverflow } from "../agents/shared/overflow-recovery";
-import { appendFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { appendCompactLog, type CompactLogEntry } from "./telemetry";
 
-// ── Telemetry helper ─────────────────────────────────
-
-interface CompactLogEntry {
-  threadId: string;
-  level: string;
-  effectiveLevel: string;
-  flushSkipped: boolean;
-  tokensBefore: number | null;
-  tokensAfter: number | null;
-  flushMs: number;
-  compactMs: number;
-  totalMs: number;
-  model: string;
-  status: "ok" | "failed";
-  error: string | null;
-}
-
-/**
- * Append a compact telemetry entry. Fire-and-forget.
- * Schema is uniform across success/failure (status discriminator) so
- * downstream parsers don't have to handle missing fields.
- *
- * Exported so the gateway can record gateway-side overflow recoveries
- * (level="gateway-overflow") into the same jsonl.
- */
-export function appendCompactLog(entry: CompactLogEntry): void {
-  const logDir = join(homedir(), ".roundhouse", "logs");
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
-  mkdir(logDir, { recursive: true })
-    .then(() => appendFile(join(logDir, "compact-timing.jsonl"), line))
-    .catch((err) => console.warn(`[memory] timing log write failed:`, (err as Error).message));
-}
+// Re-export for backwards compatibility with any consumers that imported
+// these from lifecycle. New code should import from `./telemetry`.
+export { appendCompactLog };
+export type { CompactLogEntry };
 
 // ── Memory mode detection ────────────────────────────
 

@@ -51,7 +51,6 @@ export type { TurnSource };
 /** Limits */
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
 const MAX_MESSAGE_CHUNK = 4000;
-const MAX_ERROR_PREVIEW = 200;
 
 /** Bot username for command suffix validation (set during gateway init) */
 let _botUsername = "";

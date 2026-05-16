@@ -23,7 +23,7 @@ import { isContextOverflowError } from "../agents/shared/error-classifiers";
 import { recoverFromContextOverflow } from "../agents/shared/overflow-recovery";
 import type { OverflowRecoveryOutcome } from "../agents/shared/overflow-recovery";
 import { loadThreadMemoryState, saveThreadMemoryState } from "../memory/state";
-import { appendCompactLog } from "../memory/lifecycle";
+import { appendCompactLog } from "../memory/telemetry";
 
 /** Origin of an agent turn — drives recovery copy and telemetry.
  *
