@@ -21,7 +21,7 @@ import type { PressureLevel } from "../memory/types";
 // progress messages now flow through the transport via this.transport.progress().
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
-import { handleStreaming as _handleStream } from "./streaming";
+import { handleStreaming as _handleStream, StreamModelOverflowError } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
@@ -515,9 +515,11 @@ export class Gateway {
           console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
         }
       } catch (err) {
+        // Extract hadVisibleText from StreamModelOverflowError if present
+        const errorHadVisibleText = err instanceof StreamModelOverflowError ? err.hadVisibleText : streamHadVisibleText;
         await recoverFromAgentTurnOverflow(thread, agentThreadId, agent, err, {
           turnSource,
-          hadVisibleText: streamHadVisibleText,
+          hadVisibleText: errorHadVisibleText,
         });
       } finally {
         if (stopTyping) stopTyping();

@@ -244,25 +244,20 @@ describe("streaming-overflow → gateway recovery (F1 end-to-end)", () => {
     let caught: unknown;
     let hadVisibleText = false;
     try {
-      // We can't read the StreamResult after a throw; the gateway tracks
-      // hadVisibleText separately via a hoisted local that's updated only
-      // on the success path. Simulate that by inspecting whether the stream
-      // produced visible text before the throw.
       const r = await handleStreaming(stream, ctxFor(thread));
       hadVisibleText = r.hadVisibleText;
-    } catch (e) { caught = e; }
-
-    // In the gateway, `streamHadVisibleText` is set only on the success
-    // assignment — but the production gateway actually tracks it across the
-    // throw via the hoisted-local pattern in handleAgentTurn. To validate
-    // the recovery copy here we set hadVisibleText=true to mirror the
-    // gateway's behavior after a partial-text emit (see gateway.ts comment).
-    // The pure-streaming visible-text path is covered by other tests.
-    void hadVisibleText;
+    } catch (e) {
+      caught = e;
+      // StreamModelOverflowError now carries hadVisibleText from the stream.
+      // In production gateway.ts, this is extracted and passed to recovery.
+      if (e instanceof StreamModelOverflowError) {
+        hadVisibleText = e.hadVisibleText;
+      }
+    }
 
     const result = await recoverFromAgentTurnOverflow(thread, tid, agent, caught, {
       turnSource: "user",
-      hadVisibleText: true,
+      hadVisibleText,
     });
 
     expect(result.outcome?.kind).toBe("recovered");
