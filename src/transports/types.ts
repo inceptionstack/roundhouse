@@ -74,10 +74,14 @@ export interface RichMenuSection {
  * Commands return menus as data; transports render them. Telegram maps
  * sections to inline-keyboard rows; text-only adapters ignore the menu and
  * fall back to RichResponse.text.
+ *
+ * Note: header/body text lives on `RichResponse.text` rather than on the
+ * menu itself — the Telegram inline-keyboard renderer doesn't have a
+ * separate slot for it. When a transport with a real card layout (Slack
+ * Block Kit, Discord embeds) lands, add structured fields back with a
+ * matching renderer.
  */
 export interface RichMenu {
-  title?: string;
-  body?: string;
   sections: RichMenuSection[];
 }
 
