@@ -35,7 +35,7 @@ export async function createProgressMessage(thread: ChatThread, initialText: str
   // Narrow at the transport boundary — same pattern as TelegramAdapter.postRich.
   const tg = thread as unknown as {
     id?: string;
-    adapter?: { telegramFetch?: (m: string, p: Record<string, unknown>) => Promise<any> };
+    adapter?: { telegramFetch?: (m: string, p: Record<string, unknown>) => Promise<unknown> };
   };
   const isTelegram =
     typeof tg.adapter?.telegramFetch === "function" &&
@@ -62,8 +62,8 @@ export async function createProgressMessage(thread: ChatThread, initialText: str
     const result = await tg.adapter!.telegramFetch!("sendMessage", {
       ...basePayload,
       text: initialText,
-    });
-    messageId = result.message_id;
+    }) as { message_id?: number } | null | undefined;
+    messageId = result?.message_id ?? null;
     lastText = initialText;
   } catch {
     // Fallback: use thread.post (can't edit later)

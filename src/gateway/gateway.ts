@@ -859,7 +859,7 @@ export class Gateway {
   private async dispatchInTurnCommand(
     inTurnCommands: readonly CommandDescriptor[],
     matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
-    thread: any, message: any, trimmed: string, agentThreadId: string,
+    thread: any, message: unknown, trimmed: string, agentThreadId: string,
   ): Promise<boolean> {
     const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
     for (const desc of inTurnCommands) {
