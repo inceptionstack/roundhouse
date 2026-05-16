@@ -2,6 +2,11 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.37] — 2026-05-16
+
+### Fixed
+- **`/model` and `/topic` no longer show redundant option list above the keyboard.** When the inline keyboard renders, the buttons already enumerate the options — the verbose `*Available:*` text was just noise. Added optional `RichResponse.menuCaption` for concise body next to menus; transports prefer it when rendering, fall back to `text` (verbose) when caption absent or menu can't render.
+
 ## [0.5.36] — 2026-05-16
 
 ### Fixed
