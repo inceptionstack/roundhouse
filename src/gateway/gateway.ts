@@ -22,7 +22,7 @@ import type { PressureLevel } from "../memory/types";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream, StreamModelOverflowError } from "./streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleStop, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleCancel, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
@@ -209,10 +209,10 @@ export class Gateway {
     // Per-thread verbose toggle (shows tool_start messages)
     const verboseThreads = this.verboseThreads;
 
-    // Per-thread abort signal for /stop
+    // Per-thread abort signal for /cancel
     const abortControllers = this.abortControllers;
 
-    // Per-thread lock to serialize prompts (concurrent mode lets /stop through)
+    // Per-thread lock to serialize prompts (concurrent mode lets /cancel through)
     const threadLocks = this.threadLocks;
 
     // ── Build command descriptors ──────────────────────
@@ -271,7 +271,7 @@ export class Gateway {
       const text = (message.text ?? "").trim();
 
       // Pre-turn commands fire before the main handler (and before the
-      // session-pressure gate), so /stop etc. still interrupt a mid-run
+      // session-pressure gate), so /cancel etc. still interrupt a mid-run
       // agent. Allowlist is enforced here for all pre-turn handlers.
       for (const desc of preTurnCommands) {
         if (matchesDescriptor(desc, text, matchers)) {
@@ -387,7 +387,7 @@ export class Gateway {
 
     const agent = this.router.resolve(agentThreadId);
 
-    // Serialize prompts per-thread (concurrent mode allows /stop to bypass)
+    // Serialize prompts per-thread (concurrent mode allows /cancel to bypass)
     const prevLock = threadLocks.get(agentThreadId);
     let releaseLock: () => void;
     const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
@@ -750,7 +750,7 @@ export class Gateway {
    *
    * Stage:
    *   - "in-turn" (default): runs after allowlist + pairing inside handle()
-   *   - "pre-turn": runs first in handleOrAbort() so commands like /stop
+   *   - "pre-turn": runs first in handleOrAbort() so commands like /cancel
    *     can interrupt an in-flight agent turn
    *
    * Per-request state (thread, message, text) comes in via CommandInvocation;
@@ -813,9 +813,9 @@ export class Gateway {
 
       // ── Pre-turn commands (abort-style; fire even during agent turn) ──
       {
-        triggers: ["/stop"],
+        triggers: ["/cancel"],
         stage: "pre-turn",
-        invoke: ({ thread, agentThreadId }) => handleStop({
+        invoke: ({ thread, agentThreadId }) => handleCancel({
           thread, agentThreadId,
           agent: this.router.resolve(agentThreadId),
           abortControllers,
