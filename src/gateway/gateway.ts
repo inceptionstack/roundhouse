@@ -516,7 +516,7 @@ export class Gateway {
         }
       } catch (err) {
         // Extract hadVisibleText from StreamModelOverflowError if present
-        const errorHadVisibleText = err instanceof Error && 'hadVisibleText' in err ? (err as any).hadVisibleText : streamHadVisibleText;
+        const errorHadVisibleText = err instanceof StreamModelOverflowError ? err.hadVisibleText : streamHadVisibleText;
         await recoverFromAgentTurnOverflow(thread, agentThreadId, agent, err, {
           turnSource,
           hadVisibleText: errorHadVisibleText,
