@@ -98,16 +98,39 @@ export class TelegramAdapter implements TransportAdapter {
 
   /**
    * Post `text` via postMessage, swallowing any error so callers (chiefly
-   * postRich) can satisfy their never-throws contract. The error is
-   * logged so it isn't silently lost.
+   * postRich) can satisfy their never-throws contract.
+   *
+   * Tier 1: try Telegram-native postMessage (HTML formatting, splitting).
+   * Tier 2: fall back to thread.post(text) if available — this catches
+   *         callback/invocation threads that lack `adapter.telegramFetch`
+   *         or a `telegram:` id shape but still expose a generic post().
+   * Tier 3: log + give up (degradation contract: never throw).
    */
   private async safePostText(thread: ChatThread, text: string): Promise<void> {
     try {
       await this.postMessage(thread, text);
+      return;
     } catch (err) {
-      console.error(
-        "[roundhouse] telegram safePostText failed (text fallback also unavailable):",
+      console.warn(
+        "[roundhouse] telegram safePostText: postMessage failed, trying thread.post:",
         (err as Error).message,
+      );
+    }
+    // Tier 2: generic thread.post() if the thread exposes one.
+    const genericPost = (thread as { post?: (t: string) => Promise<void> | void }).post;
+    if (typeof genericPost === "function") {
+      try {
+        await genericPost.call(thread, text);
+        return;
+      } catch (err) {
+        console.error(
+          "[roundhouse] telegram safePostText: thread.post also failed:",
+          (err as Error).message,
+        );
+      }
+    } else {
+      console.error(
+        "[roundhouse] telegram safePostText: thread has no post() method; message dropped",
       );
     }
   }

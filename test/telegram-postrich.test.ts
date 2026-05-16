@@ -140,4 +140,20 @@ describe("TelegramAdapter.postRich", () => {
     expect(postMessageSpy).toHaveBeenCalledTimes(1);
     expect(postMessageSpy.mock.calls[0][1]).toBe("hello");
   });
+
+  it("falls back to thread.post when postMessage rejects (non-Telegram thread shape)", async () => {
+    // Simulates a thread that lacks adapter.telegramFetch / telegram: id
+    // shape (e.g. callback/invocation thread synthesized upstream) —
+    // postMessage throws "non-Telegram thread", but thread.post() works.
+    const post = vi.fn(async () => undefined);
+    const thread = { id: "synthetic:1", post } as unknown as ChatThread;
+    const adapter = new TelegramAdapter();
+
+    // postMessage rejects (mimics isTelegramThread guard throwing).
+    vi.spyOn(adapter, "postMessage").mockRejectedValue(new Error("non-Telegram thread"));
+
+    await expect(adapter.postRich(thread, { text: "confirm" })).resolves.toBeUndefined();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("confirm");
+  });
 });
