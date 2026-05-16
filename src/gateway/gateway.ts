@@ -781,9 +781,9 @@ export class Gateway {
       {
         triggers: ["/model"],
         acceptsArgs: true,
-        invoke: ({ thread, text }) => handleModel({ thread, text, postWithFallback: post }),
+        invoke: ({ text }) => handleModel({ text }),
         actions: {
-          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value, thread: ev.thread }),
+          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value }),
         },
       },
       {

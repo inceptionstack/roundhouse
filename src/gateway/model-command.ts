@@ -1,25 +1,25 @@
 /**
- * gateway/model-command.ts — Handle the /model command
+ * gateway/model-command.ts \u2014 Handle the /model command
  *
- * Allows switching the default AI model from Telegram.
- * Reads/writes ~/.pi/agent/settings.json (defaultProvider + defaultModel).
+ * Allows switching the default AI model from chat. Reads/writes
+ * ~/.pi/agent/settings.json (defaultProvider + defaultModel).
  *
- * When called without arguments, shows an inline keyboard with model buttons.
- * When a button is clicked, the onAction handler applies the selection.
+ * This module is intentionally transport-free. It returns RichResponse
+ * data; the gateway hands it to the active TransportAdapter for rendering
+ * (Telegram inline keyboard, plain text on text-only transports, etc.).
+ *
+ * Behaviour:
+ *   /model            \u2192 RichResponse with menu (current model + buttons)
+ *   /model <alias>    \u2192 RichResponse with confirmation text only
+ *   button click      \u2192 RichResponse with confirmation text only
  */
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import {
-  encodeCallbackData,
-  toKeyboardRows,
-  extractTelegramChatId,
-  type InlineButton,
-  type InlineKeyboard,
-} from "./inline-keyboard";
+import type { RichResponse } from "../transports";
 
-/** Known model aliases → Bedrock model IDs */
+/** Known model aliases \u2192 Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
   // Anthropic Claude
   "opus-4.7": { provider: "amazon-bedrock", model: "us.anthropic.claude-opus-4-7", label: "Claude Opus 4.7" },
@@ -36,7 +36,7 @@ export const MODEL_ALIASES: Record<string, { provider: string; model: string; la
   "mistral": { provider: "amazon-bedrock", model: "us.mistral.mistral-large-2411-v1:0", label: "Mistral Large" },
 };
 
-/** Models shown in the inline keyboard (max 8, ordered by preference) */
+/** Models shown in the menu (max 8, ordered by preference) */
 const KEYBOARD_MODELS = [
   "opus-4.7", "opus", "sonnet", "haiku",
   "deepseek", "llama", "nova-pro", "mistral",
@@ -48,9 +48,7 @@ export const MODEL_ACTION_ID = "model_select";
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 export interface ModelCommandContext {
-  thread: any;
   text: string;
-  postWithFallback: (thread: any, text: string) => Promise<void>;
 }
 
 function readSettings(): Record<string, any> {
@@ -66,118 +64,102 @@ function writeSettings(settings: Record<string, any>): void {
   writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
 }
 
-function getCurrentModel(settings: Record<string, any>): string {
+function getCurrentModelLabel(settings: Record<string, any>): string {
   const provider = settings.defaultProvider ?? "unknown";
   const model = settings.defaultModel ?? "unknown";
-  for (const [alias, info] of Object.entries(MODEL_ALIASES)) {
-    if (info.provider === provider && info.model === model) return `${info.label}`;
+  for (const [, info] of Object.entries(MODEL_ALIASES)) {
+    if (info.provider === provider && info.model === model) return info.label;
   }
-  return `${model}`;
+  return String(model);
 }
 
-function buildInlineKeyboard(): InlineKeyboard {
-  // Layout: 2 buttons per row for compact display
-  const buttons: InlineButton[] = KEYBOARD_MODELS.map(alias => {
-    const info = MODEL_ALIASES[alias];
-    return {
-      text: info.label,
-      callback_data: encodeCallbackData(MODEL_ACTION_ID, alias),
-    };
-  });
-  return toKeyboardRows(buttons);
+/** Build the /model menu as a transport-neutral RichResponse. */
+function buildModelMenu(currentLabel: string): RichResponse {
+  const aliasList = KEYBOARD_MODELS
+    .map((alias) => {
+      const info = MODEL_ALIASES[alias];
+      const marker = info.label === currentLabel ? " (current)" : "";
+      return `  \`${alias}\` \u2192 ${info.label}${marker}`;
+    })
+    .join("\n");
+
+  const text =
+    `\ud83e\udd16 *Current model:* ${currentLabel}\n\n` +
+    `*Available:*\n${aliasList}\n\n` +
+    `_Usage:_ \`/model sonnet\``;
+
+  return {
+    text,
+    menu: {
+      title: "Current model",
+      body: currentLabel,
+      sections: [
+        {
+          columns: 2,
+          buttons: KEYBOARD_MODELS.map((alias) => ({
+            label: MODEL_ALIASES[alias].label,
+            actionId: MODEL_ACTION_ID,
+            value: alias,
+            selected: MODEL_ALIASES[alias].label === currentLabel,
+          })),
+        },
+      ],
+    },
+  };
 }
 
-export async function handleModel(ctx: ModelCommandContext): Promise<void> {
-  const { thread, text, postWithFallback } = ctx;
-  const parts = text.split(/\s+/).slice(1);
+export async function handleModel(ctx: ModelCommandContext): Promise<RichResponse> {
+  const parts = ctx.text.split(/\s+/).slice(1);
   const target = parts[0]?.toLowerCase();
 
   const settings = readSettings();
 
-  // No argument: show inline keyboard
+  // No argument: show menu (current model + clickable list).
   if (!target) {
-    const current = getCurrentModel(settings);
-    const msgText = `🤖 Current model: <b>${current}</b>\n\nSelect a model:`;
-
-    // Try to send with inline keyboard via telegramFetch
-    const adapter = thread?.adapter;
-    if (adapter?.telegramFetch) {
-      const chatId = extractTelegramChatId(thread);
-      if (chatId) {
-        try {
-          await adapter.telegramFetch("sendMessage", {
-            chat_id: chatId,
-            text: msgText,
-            parse_mode: "HTML",
-            reply_markup: buildInlineKeyboard(),
-          });
-          return;
-        } catch (err) {
-          console.warn("[roundhouse] /model inline keyboard failed, falling back:", (err as Error).message);
-        }
-      }
-    }
-
-    // Fallback: plain text
-    const aliases = KEYBOARD_MODELS.map(a => `  \`${a}\` → ${MODEL_ALIASES[a].label}`).join("\n");
-    await postWithFallback(thread, `🤖 *Current model:* ${current}\n\n*Available:*\n${aliases}\n\n_Usage:_ \`/model sonnet\``);
-    return;
+    return buildModelMenu(getCurrentModelLabel(settings));
   }
 
-  // Resolve alias
-  await applyModelSelection(target, settings, thread, postWithFallback);
+  return applyModelSelection(target, settings);
 }
 
 /**
- * Apply a model selection (used by both /model <arg> and inline keyboard callback).
+ * Apply a model selection (used by both `/model <arg>` and the menu callback).
+ * Returns a RichResponse with confirmation text.
  */
-export async function applyModelSelection(
+export function applyModelSelection(
   target: string,
   settings: Record<string, any> | null,
-  thread: any,
-  postWithFallback: (thread: any, text: string) => Promise<void>,
-): Promise<void> {
+): RichResponse {
   if (!settings) settings = readSettings();
 
   const resolved = MODEL_ALIASES[target];
   if (!resolved) {
     if (target.includes(".") || target.includes("/")) {
+      // Treat as a raw provider/model id passthrough.
       const provider = settings.defaultProvider ?? "amazon-bedrock";
       settings.defaultModel = target;
       settings.defaultProvider = provider;
       writeSettings(settings);
-      await postWithFallback(thread, `✅ Model set to: \`${provider}/${target}\``);
-    } else {
-      const aliases = Object.keys(MODEL_ALIASES).join(", ");
-      await postWithFallback(thread, `❌ Unknown model: \`${target}\`\n\nAvailable: ${aliases}`);
+      return { text: `\u2705 Model set to: \`${provider}/${target}\`` };
     }
-    return;
+    const aliases = Object.keys(MODEL_ALIASES).join(", ");
+    return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
   }
 
   settings.defaultProvider = resolved.provider;
   settings.defaultModel = resolved.model;
   writeSettings(settings);
 
-  await postWithFallback(thread, `✅ Switched to *${resolved.label}*`);
   console.log(`[roundhouse] /model: switched to ${resolved.provider}/${resolved.model}`);
+  return { text: `\u2705 Switched to *${resolved.label}*` };
 }
 
 /**
- * Handle inline keyboard callback for model selection.
- * Call this from chat.onAction(MODEL_ACTION_ID, ...).
+ * Handle inline-keyboard callback for model selection.
+ * Wired from the descriptor's `actions[MODEL_ACTION_ID]`.
  */
-export async function handleModelAction(event: {
-  value?: string;
-  thread: any;
-}): Promise<void> {
+export function handleModelAction(event: { value?: string }): RichResponse | void {
   const alias = event.value;
   if (!alias || !MODEL_ALIASES[alias]) return;
-
-  const postFn = async (_t: any, text: string) => {
-    if (!event.thread) return;
-    try { await event.thread.post({ markdown: text }); }
-    catch { try { await event.thread.post(text); } catch {} }
-  };
-
-  await applyModelSelection(alias, null, event.thread, postFn);
+  return applyModelSelection(alias, null);
 }
