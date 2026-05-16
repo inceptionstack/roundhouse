@@ -2,6 +2,11 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.36] — 2026-05-16
+
+### Fixed
+- **Inline keyboards restored for `/model` and `/topic`** (v0.5.35 regression). The Rich UI Surface refactor extracted `adapter.telegramFetch` as a plain reference, which loses `this` — the underlying `@chat-adapter/telegram` method needs `this.apiBaseUrl` and `this.botToken`. Detached calls threw silently; postRich's catch swallowed and fell back to text. Fix: invoke as `tgAdapter.telegramFetch(...)`. Mutation-tested regression with a `FakeTelegramAdapter` that detects detached calls (`vi.fn()` mocks couldn't catch this).
+
 ## [0.5.35] — 2026-05-16
 
 ### Rich UI Surface
