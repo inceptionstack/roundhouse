@@ -1,42 +1,41 @@
 /**
- * gateway/topic-command.ts — Named topic sessions in private chats
+ * gateway/topic-command.ts \u2014 Named topic sessions in private chats
  *
  * Allows switching between independent conversations via /topic <name>.
  * Each topic has its own agent session (memory, context, thread).
  *
  * Usage:
- *   /topic deploy    — switch to "deploy" topic (creates if new)
- *   /topic           — show current topic + list of known topics as
- *                     clickable inline-keyboard buttons (Telegram)
- *   /topic main      — return to default session
+ *   /topic deploy    \u2014 switch to "deploy" topic (creates if new)
+ *   /topic           \u2014 show current topic + list of known topics as
+ *                     a clickable menu
+ *   /topic main      \u2014 return to default session
  *
- * Inline keyboard: when called with no args in a private chat and at
- * least one known topic exists, we send a Telegram inline keyboard so
- * the user can switch with a tap. Clicking a button fires a callback
- * routed through chat.onAction(TOPIC_ACTION_ID) → handleTopicAction().
+ * Routing rule (CRITICAL): this module returns *agent-session* ids like
+ * "topic:<chatId>:<name>" via applyTopicOverride() and setActiveTopic(),
+ * but it never modifies the *transport* thread object. The chat thread
+ * passed into the gateway dispatcher \u2014 and from there into handleTopic /
+ * handleTopicAction \u2014 keeps its original `.adapter` and `.id`. Agent
+ * thread id flows as a separate string parameter; that separation is what
+ * keeps the menu surface working from inside a named-topic session.
+ *
+ * Transport-free: this module returns RichResponse data; the gateway
+ * hands it to the active TransportAdapter for rendering.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ROUNDHOUSE_DIR } from "../config";
-import {
-  encodeCallbackData,
-  toKeyboardRows,
-  extractTelegramChatId,
-  type ChatThreadLike,
-  type InlineButton,
-  type InlineKeyboard,
-} from "./inline-keyboard";
+import type { RichResponse, RichButton } from "../transports";
 
 /** Action ID for topic-select inline-keyboard callbacks */
 export const TOPIC_ACTION_ID = "topic_select";
 
 /**
- * Special sentinel value used by the "🏠 main (default)" button.
+ * Special sentinel value used by the "main (default)" button.
  *
- * Must be a string that `normalizeTopicName()` can never emit, so that a user
- * who creates a topic via `/topic <name>` can't accidentally collide with it.
+ * Must be a string `normalizeTopicName()` can never emit, so a user who
+ * creates a topic via `/topic <name>` can't accidentally collide with it.
  * The normalizer strips leading/trailing `-`, so any sentinel starting or
  * ending with `-` is unrepresentable as a user-created topic name.
  */
@@ -44,14 +43,14 @@ const MAIN_SENTINEL = "-main";
 
 const TOPICS_FILE = join(ROUNDHOUSE_DIR, "active-topics.json");
 
-/** Active topic per chat (chatId → topicName). "main" means default. */
+/** Active topic per chat (chatId \u2192 topicName). "main" means default. */
 let activeTopics = new Map<string, string>();
 
 // Load persisted topics on module init
 try {
   const data = JSON.parse(readFileSync(TOPICS_FILE, "utf8"));
   activeTopics = new Map(Object.entries(data));
-} catch { /* first run or corrupt — start fresh */ }
+} catch { /* first run or corrupt \u2014 start fresh */ }
 
 function persistTopics(): void {
   try {
@@ -68,7 +67,12 @@ export function getActiveTopic(chatId: string): string | undefined {
   return (topic && topic !== "main") ? topic : undefined;
 }
 
-/** Apply topic override to a resolved agent thread ID. Scoped per chat. */
+/**
+ * Apply topic override to a resolved *agent* thread ID. Scoped per chat.
+ *
+ * NOTE: this only rewrites the agent-session id string. The transport
+ * thread object is never modified \u2014 see the module doc above.
+ */
 export function applyTopicOverride(agentThreadId: string, thread: { id?: string }): string {
   if (agentThreadId !== "main") return agentThreadId;
   const chatId = thread.id?.split(":")[1] ?? thread.id ?? "";
@@ -101,33 +105,15 @@ export function listTopics(chatId: string): string[] {
   }
 }
 
-export interface TopicCommandContext {
-  thread: ChatThreadLike;
-  text: string;
-  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>;
+/** Minimal thread shape this module reads. Transport details are not its concern. */
+export interface TopicThread {
+  id?: string;
+  [key: string]: unknown;
 }
 
-/** Build an inline keyboard listing all known topics + a "main" escape hatch. */
-function buildTopicKeyboard(topics: string[], current: string | undefined): InlineKeyboard {
-  const onMain = !current;
-  const buttons: InlineButton[] = [];
-
-  // Always include "main (default)" first so users can escape back.
-  // ✓ appears when we're currently on main (i.e. no active topic).
-  buttons.push({
-    text: onMain ? "🏠 main (default) ✓" : "🏠 main (default)",
-    callback_data: encodeCallbackData(TOPIC_ACTION_ID, MAIN_SENTINEL),
-  });
-
-  for (const t of topics) {
-    const isActive = t === current;
-    buttons.push({
-      text: isActive ? `📂 ${t} ✓` : `📂 ${t}`,
-      callback_data: encodeCallbackData(TOPIC_ACTION_ID, t),
-    });
-  }
-
-  return toKeyboardRows(buttons);
+export interface TopicCommandContext {
+  thread: TopicThread;
+  text: string;
 }
 
 /** Normalize a topic name the same way as the command parser. */
@@ -135,112 +121,102 @@ function normalizeTopicName(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
-export async function handleTopic(ctx: TopicCommandContext): Promise<void> {
-  const { thread, text, postWithFallback } = ctx;
+/** Extract the chat id from a thread's id string (for both private and group threads). */
+function chatIdFromThread(thread: TopicThread): string {
+  return (thread?.id?.split(":")[1] ?? thread?.id ?? "") as string;
+}
 
-  // Extract chat ID from thread (for private: "telegram:<chatId>")
-  const chatId = (thread?.id?.split(":")[1] ?? thread?.id ?? "") as string;
+/** Build the topic-selection menu as a transport-neutral RichResponse. */
+function buildTopicMenu(chatId: string): RichResponse {
+  const current = getActiveTopic(chatId);
+  const known = listTopics(chatId);
+  const onMain = !current;
+  const currentDisplay = current ?? "main (default)";
 
-  // /topic only works in private chats (groups use forum topics instead)
-  if (chatId && chatId.startsWith("-")) {
-    await postWithFallback(thread, "⚠️ /topic only works in private chats. Use Telegram forum topics for groups.");
-    return;
+  const buttons: RichButton[] = [];
+  // Always include "main (default)" first as an escape hatch.
+  buttons.push({
+    label: "\ud83c\udfe0 main (default)",
+    actionId: TOPIC_ACTION_ID,
+    value: MAIN_SENTINEL,
+    selected: onMain,
+  });
+  for (const t of known) {
+    buttons.push({
+      label: `\ud83d\udcc2 ${t}`,
+      actionId: TOPIC_ACTION_ID,
+      value: t,
+      selected: t === current,
+    });
   }
 
-  // Parse the topic name from the command
+  // Text fallback: human-readable summary of the same information.
+  const textLines = [`\ud83d\udcc2 *Current topic:* \`${currentDisplay}\``, ""];
+  if (known.length > 0) {
+    textLines.push(`Known topics: ${known.map(t => `\`${t}\``).join(", ")}`);
+    textLines.push("");
+  }
+  textLines.push("Switch with: `/topic <name>`");
+  textLines.push("Return to default: `/topic main`");
+
+  return {
+    text: textLines.join("\n"),
+    menu: {
+      title: "Current topic",
+      body: currentDisplay,
+      sections: [{ columns: 2, buttons }],
+    },
+  };
+}
+
+export function handleTopic(ctx: TopicCommandContext): RichResponse {
+  const { thread, text } = ctx;
+  const chatId = chatIdFromThread(thread);
+
+  // /topic only works in private chats (groups use forum topics instead).
+  if (chatId && chatId.startsWith("-")) {
+    return { text: "\u26a0\ufe0f /topic only works in private chats. Use Telegram forum topics for groups." };
+  }
+
+  // Parse the topic name from the command.
   const match = text.match(/^\/topic(?:@\S+)?\s+(.+)/i);
   const topicName = match?.[1] ? normalizeTopicName(match[1]) : "";
 
   if (!topicName) {
-    await showTopicMenu(thread, chatId, postWithFallback);
-    return;
+    return buildTopicMenu(chatId);
   }
 
-  await applyTopicSelection(chatId, topicName, thread, postWithFallback);
-}
-
-/** Show the current topic + inline keyboard (or text fallback). */
-async function showTopicMenu(
-  thread: ChatThreadLike,
-  chatId: string,
-  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>,
-): Promise<void> {
-  const current = getActiveTopic(chatId);
-  const currentDisplay = current ?? "main (default)";
-  const known = listTopics(chatId);
-
-  // Try inline keyboard if the adapter supports raw Telegram calls.
-  // Always show keyboard (main is always available), even if no custom topics yet.
-  const telegramFetch = thread?.adapter?.telegramFetch;
-  if (telegramFetch) {
-    const tgChatId = extractTelegramChatId(thread);
-    if (tgChatId) {
-      try {
-        await telegramFetch("sendMessage", {
-          chat_id: tgChatId,
-          text: `📂 Current topic: <b>${currentDisplay}</b>\n\nTap a topic to switch:`,
-          parse_mode: "HTML",
-          reply_markup: buildTopicKeyboard(known, current),
-        });
-        return;
-      } catch (err) {
-        console.warn("[roundhouse] /topic inline keyboard failed, falling back:", (err as Error).message);
-      }
-    }
-  }
-
-  // Text fallback
-  let msg = `📂 Current topic: \`${currentDisplay}\`\n\n`;
-  if (known.length > 0) {
-    msg += `Known topics: ${known.map(t => `\`${t}\``).join(", ")}\n\n`;
-  }
-  msg += `Switch with: \`/topic <name>\`\nReturn to default: \`/topic main\``;
-  await postWithFallback(thread, msg);
+  return applyTopicSelection(chatId, topicName);
 }
 
 /**
- * Apply a topic selection. Shared by `/topic <name>` and inline-keyboard clicks.
+ * Apply a topic selection. Shared by `/topic <name>` and menu clicks.
  * `topicName` must already be normalized (or be a known sentinel like "main").
  */
-export async function applyTopicSelection(
-  chatId: string,
-  topicName: string,
-  thread: ChatThreadLike,
-  postWithFallback: (thread: ChatThreadLike, text: string) => Promise<void>,
-): Promise<void> {
+export function applyTopicSelection(chatId: string, topicName: string): RichResponse {
   setActiveTopic(chatId, topicName);
   const isDefault = topicName === "main" || topicName === "off" || topicName === "";
   const display = isDefault ? "main (default)" : topicName;
-  const emoji = isDefault ? "🏠" : "📂";
+  const emoji = isDefault ? "\ud83c\udfe0" : "\ud83d\udcc2";
   const suffix = isDefault
     ? "Back to the default session."
     : "Agent context is now independent for this topic.";
-  await postWithFallback(thread, `${emoji} Switched to topic: \`${display}\`\n\n${suffix}`);
+  return { text: `${emoji} Switched to topic: \`${display}\`\n\n${suffix}` };
 }
 
 /**
  * Handle inline-keyboard callback for topic selection.
- * Call this from chat.onAction(TOPIC_ACTION_ID, ...).
+ * Wired from the descriptor's `actions[TOPIC_ACTION_ID]`.
  */
-export async function handleTopicAction(event: {
-  value?: string;
-  thread: ChatThreadLike;
-}): Promise<void> {
+export function handleTopicAction(event: { value?: string; thread: TopicThread }): RichResponse | void {
   const raw = event.value;
   if (!raw) return;
 
-  const thread = event.thread;
-  const chatId = (thread?.id?.split(":")[1] ?? thread?.id ?? "") as string;
+  const chatId = chatIdFromThread(event.thread);
   if (!chatId) return;
 
   const topicName = raw === MAIN_SENTINEL ? "main" : normalizeTopicName(raw);
   if (!topicName && raw !== MAIN_SENTINEL) return;
 
-  const postFn = async (_t: ChatThreadLike, text: string) => {
-    if (!thread?.post) return;
-    try { await thread.post({ markdown: text }); }
-    catch { try { await thread.post(text); } catch { /* ignore */ } }
-  };
-
-  await applyTopicSelection(chatId, topicName, thread, postFn);
+  return applyTopicSelection(chatId, topicName);
 }

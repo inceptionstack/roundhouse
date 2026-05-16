@@ -794,7 +794,7 @@ export class Gateway {
       {
         triggers: ["/topic"],
         acceptsArgs: true,
-        invoke: ({ thread, text }) => handleTopic({ thread, text, postWithFallback: post }),
+        invoke: ({ thread, text }) => handleTopic({ thread, text }),
         actions: {
           [TOPIC_ACTION_ID]: (ev) => handleTopicAction({ value: ev.value, thread: ev.thread }),
         },
