@@ -85,8 +85,9 @@ export function buildSelectableMenu(opts: SelectableMenuOpts): RichResponse {
     });
   }
 
-  // ── Text fallback ──
-  // Mirrors menu information for transports that can't render buttons.
+  // ── Text fallback (verbose: header + available list + hint) ──
+  // Used when transports can't render the menu, or for text-only adapters.
+  // Mirrors all menu information so users still see every option.
   const optionLines = options.map((o) => {
     const marker = o.key === current ? " (current)" : "";
     return `  \`${o.key}\` → ${o.label}${marker}`;
@@ -99,8 +100,17 @@ export function buildSelectableMenu(opts: SelectableMenuOpts): RichResponse {
     textParts.push("", textHint);
   }
 
+  // ── Menu caption (concise: header + hint only) ──
+  // Shown next to the keyboard when the menu renders. The buttons
+  // already convey the option list — don't duplicate.
+  const captionParts: string[] = [textHeader];
+  if (textHint) {
+    captionParts.push("", textHint);
+  }
+
   return {
     text: textParts.join("\n"),
+    menuCaption: captionParts.join("\n"),
     menu: {
       sections: [{ columns, buttons }],
     },

@@ -85,7 +85,10 @@ export class TelegramAdapter implements TransportAdapter {
     try {
       // text formatting: response.text is already markdown-ish from commands.
       // We pass it through markdownToTelegramHtml so bold/code render natively.
-      const html = markdownToTelegramHtml(response.text);
+      // When menuCaption is provided, prefer it as the body next to the
+      // keyboard — commands use this to avoid duplicating buttons in text.
+      const body = response.menuCaption ?? response.text;
+      const html = markdownToTelegramHtml(body);
       await tgAdapter.telegramFetch("sendMessage", {
         chat_id: chatId,
         text: html,

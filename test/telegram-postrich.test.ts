@@ -198,4 +198,52 @@ describe("TelegramAdapter.postRich", () => {
     // Did NOT fall back to text (which would call postMessage).
     expect(postMessageSpy).not.toHaveBeenCalled();
   });
+
+  it("uses menuCaption (not text) as the body when menu renders", async () => {
+    // RichResponse.text is the verbose fallback ("...Available:...").
+    // RichResponse.menuCaption is the concise body shown next to the
+    // keyboard. Asserting separation: text should NOT appear in the
+    // sent payload when menuCaption is set.
+    let capturedText: string | undefined;
+    const telegramFetch = vi.fn(async (_method: string, payload: Record<string, unknown>) => {
+      capturedText = payload.text as string;
+      return { ok: true };
+    });
+    const thread = makeTelegramThread({ chatId: "99", telegramFetch });
+    const adapter = new TelegramAdapter();
+
+    await adapter.postRich(thread, {
+      text: "Verbose fallback with Available block...",
+      menuCaption: "Concise caption",
+      menu: {
+        sections: [{
+          buttons: [{ label: "A", actionId: "x", value: "a" }],
+        }],
+      },
+    });
+
+    expect(telegramFetch).toHaveBeenCalledTimes(1);
+    expect(capturedText).toContain("Concise caption");
+    expect(capturedText).not.toContain("Available");
+    expect(capturedText).not.toContain("Verbose fallback");
+  });
+
+  it("falls back to RichResponse.text when menuCaption is absent", async () => {
+    let capturedText: string | undefined;
+    const telegramFetch = vi.fn(async (_method: string, payload: Record<string, unknown>) => {
+      capturedText = payload.text as string;
+      return { ok: true };
+    });
+    const thread = makeTelegramThread({ chatId: "99", telegramFetch });
+    const adapter = new TelegramAdapter();
+
+    await adapter.postRich(thread, {
+      text: "Just text body",
+      menu: {
+        sections: [{ buttons: [{ label: "A", actionId: "x", value: "a" }] }],
+      },
+    });
+
+    expect(capturedText).toContain("Just text body");
+  });
 });
