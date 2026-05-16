@@ -148,4 +148,29 @@ describe("buildSelectableMenu", () => {
     // But the sentinel button is still rendered.
     expect(r.menu!.sections[0].buttons).toHaveLength(1);
   });
+
+  it("menuCaption is concise (header + hint only, no Available block)", () => {
+    // The caption is what shows next to the keyboard — the buttons
+    // already enumerate the options, so the caption shouldn't repeat
+    // them. Verbose listing belongs only on the text fallback.
+    const r = buildSelectableMenu({
+      current: "sonnet",
+      options: [
+        { key: "opus", label: "Claude Opus" },
+        { key: "sonnet", label: "Claude Sonnet" },
+      ],
+      actionId: "model",
+      textHeader: "\ud83e\udd16 *Current model:* Claude Sonnet",
+      textHint: "_Usage:_ `/model sonnet`",
+    });
+    // Text (fallback) DOES list options.
+    expect(r.text).toContain("*Available:*");
+    expect(r.text).toContain("opus");
+    // Caption does NOT list options — just header + hint.
+    expect(r.menuCaption).toBeDefined();
+    expect(r.menuCaption!).not.toContain("*Available:*");
+    expect(r.menuCaption!).not.toContain("opus");
+    expect(r.menuCaption!).toContain("Current model");
+    expect(r.menuCaption!).toContain("/model sonnet");
+  });
 });

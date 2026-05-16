@@ -88,12 +88,25 @@ export interface RichMenu {
 /**
  * RichResponse — what a command returns to the gateway.
  *
- * `text` is mandatory and is the canonical fallback. `menu` is optional;
- * transports that can't render menus simply post the text.
+ * - `text` is mandatory and is the canonical text-only fallback. Used by
+ *   transports that can't render menus, or when menu rendering fails.
+ * - `menu` is optional; transports that can render menus use it.
+ * - `menuCaption` is optional; when present AND the menu is rendered,
+ *   transports show this *instead of* `text` as the message body next to
+ *   the keyboard. This avoids duplication between the buttons and a
+ *   verbose option list. When the menu can't render, transports fall
+ *   back to `text` (which can be more verbose).
+ *
+ * Convention: `text` is for the no-menu world (full info), `menuCaption`
+ * is for the with-menu world (concise context). Commands that don't care
+ * about the distinction can just set `text`; transports treat that as
+ * "use the same body in both cases" by falling back to `text` when
+ * `menuCaption` is absent.
  */
 export interface RichResponse {
   text: string;
   menu?: RichMenu;
+  menuCaption?: string;
 }
 
 /**
