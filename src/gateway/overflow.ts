@@ -7,13 +7,13 @@
  *
  * Closes the v0.5.38 "soft-reset pre-turn gap": when an idle session has
  * already grown past the provider's context limit (typically via background
- * cron/boot/sub-agent activity that didn't trip soft/hard pressure
- * thresholds), the next user turn's `agent.prompt(...)` throws
- * `prompt is too long`. Before this change the gateway just posted the raw
- * provider error, perpetuating the loop. Now it classifies, calls
- * `agent.softReset(...)`, persists the right memory-state effects, and
- * routes the user to either a deferred-retry hint or the existing pre-turn
- * `pendingCompact="emergency"` recovery branch.
+ * boot/sub-agent activity that didn't trip soft/hard pressure thresholds),
+ * the next user turn's `agent.prompt(...)` throws `prompt is too long`.
+ * Before this change the gateway just posted the raw provider error,
+ * perpetuating the loop. Now it classifies, calls `agent.softReset(...)`,
+ * persists the right memory-state effects, and routes the user to either
+ * a deferred-retry hint or the existing pre-turn `pendingCompact="emergency"`
+ * recovery branch.
  *
  * See docs/design/v0.5.38-soft-reset-pre-turn-gap.md.
  */
@@ -25,14 +25,29 @@ import type { OverflowRecoveryOutcome } from "../agents/shared/overflow-recovery
 import { loadThreadMemoryState, saveThreadMemoryState } from "../memory/state";
 import { appendCompactLog } from "../memory/lifecycle";
 
-/** Origin of an agent turn — drives recovery copy and telemetry. */
-export type TurnSource = "user" | "boot" | "subagent" | "cron";
+/** Origin of an agent turn — drives recovery copy and telemetry.
+ *
+ * Reachable sources today: `user` (chat-platform message), `boot`
+ * (fireBootTurn), `subagent` (handleSubagentCompletion result injection).
+ * Cron jobs run via `cron/runner.ts` in their own session and never invoke
+ * `Gateway.handleAgentTurn`, so `cron` is intentionally not in the union.
+ * If a future patch adds cron→main injection, add it here then.
+ */
+export type TurnSource = "user" | "boot" | "subagent";
 
 /** Telemetry level used for gateway-side overflow recoveries. */
 export const GATEWAY_OVERFLOW_LEVEL = "gateway-overflow" as const;
 
 /** Max bytes of the original provider error we surface in the chat. */
 const MAX_ERROR_PREVIEW = 200;
+
+/**
+ * Max bytes of a recovery-failure reason we embed in the inline
+ * "Recovery armed (kind: reason)" hint. Shorter than MAX_ERROR_PREVIEW
+ * because this is a UI message bracketed by other copy, not a standalone
+ * error preview.
+ */
+const MAX_FAILURE_REASON_PREVIEW = 100;
 
 export interface AgentTurnErrorContext {
   turnSource: TurnSource;
@@ -155,12 +170,19 @@ function pickUserMessage(
     const reason = outcome.kind === "noop"
       ? outcome.reason
       : outcome.kind === "failed"
-        ? outcome.error.slice(0, 100)
+        ? outcome.error.slice(0, MAX_FAILURE_REASON_PREVIEW)
         : "unknown";
     return `⚠️ Recovery armed (${outcome.kind}: ${reason}). Send any message to retry.`;
   }
-  // unsupported, or noop/failed without compact — best we can do is the
-  // sanitized error so the user knows something happened.
+  // Adapter has no usable next-turn recovery path (softReset undefined, or
+  // softReset existed-and-failed without a compact fallback). Tell the user
+  // explicitly that automatic recovery is unavailable; the raw provider
+  // error alone ("prompt is too long: N > M") gives no actionable hint.
+  if (outcome.kind === "unsupported") {
+    return "⚠️ Session full — adapter doesn't support automatic recovery. Run /compact manually or restart session.";
+  }
+  // noop/failed without compact — best-effort sanitized error. Keep the
+  // raw message so the user knows what the underlying provider said.
   return `⚠️ Error: ${safeMsg}`;
 }
 

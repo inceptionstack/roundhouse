@@ -137,8 +137,9 @@ describe("recoverFromAgentTurnOverflow", () => {
     expect(state.pendingCompact).toBeUndefined();
   });
 
-  it("gateway_OverflowDuringNonStreamingPrompt_SoftResetUnsupportedNoCompact_PostsSanitizedError", async () => {
-    // Adapter has neither softReset nor compact — best we can do is sanitized error.
+  it("gateway_OverflowDuringNonStreamingPrompt_SoftResetUnsupportedNoCompact_PostsClearGuidance", async () => {
+    // Adapter has neither softReset nor compact — surface a clear hint to
+    // the user instead of the raw provider error. (F3 regression.)
     const thread = fakeThread();
     const tid = uniqueThreadId("unsupported-nocompact");
     const agent = fakeAdapter({}); // no softReset, no compact
@@ -151,8 +152,11 @@ describe("recoverFromAgentTurnOverflow", () => {
     expect(result.outcome?.kind).toBe("unsupported");
     expect(result.armedPending).toBe(false);
     expect(thread.posts).toHaveLength(1);
-    expect(thread.posts[0]).toMatch(/^⚠️ Error:/);
-    expect(thread.posts[0]).toMatch(/prompt is too long/);
+    expect(thread.posts[0]).toBe(
+      "⚠️ Session full — adapter doesn't support automatic recovery. Run /compact manually or restart session.",
+    );
+    // Raw provider error should NOT leak through this path.
+    expect(thread.posts[0]).not.toMatch(/prompt is too long/);
 
     const state = await loadThreadMemoryState(tid);
     expect(state.pendingCompact).toBeUndefined();
@@ -295,9 +299,11 @@ describe("recoverFromAgentTurnOverflow", () => {
   });
 
   it("gateway_BackgroundTurn_OverflowRecovered_PostsBackgroundCopy_NotRetryHint", async () => {
-    // Background sources (boot, subagent, cron) are not interactive — telling
+    // Background sources (boot, subagent) are not interactive — telling
     // the "user" to resend would be wrong. The original work is dropped, but
     // the session is now recoverable for the next interaction.
+    // (Cron jobs use their own session via cron/runner.ts and never reach
+    // Gateway.handleAgentTurn, so `cron` is not a TurnSource here.)
     const thread = fakeThread();
     const tid = uniqueThreadId("background");
     const agent = fakeAdapter({
@@ -305,7 +311,7 @@ describe("recoverFromAgentTurnOverflow", () => {
       hasCompact: true,
     });
 
-    for (const src of ["boot", "subagent", "cron"] satisfies TurnSource[]) {
+    for (const src of ["boot", "subagent"] satisfies TurnSource[]) {
       thread.posts.length = 0;
       await recoverFromAgentTurnOverflow(thread, tid, agent, bedrockOverflow(), {
         turnSource: src,
