@@ -357,9 +357,16 @@ export interface CronsContext {
   thread: any;
   text: string;
   cronScheduler: any | null;
+  /**
+   * Transport-rendered progress message factory. Used by `/crons trigger`
+   * for the eager "queued…" → "✅ queued" two-phase update so adapters
+   * that support edit-in-place don't post two separate bubbles.
+   * Adapters that can't edit fall back to a single post + no-op updates.
+   */
+  progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
 }
 
-export async function handleCrons(ctx: CronsContext): Promise<RichResponse> {
+export async function handleCrons(ctx: CronsContext): Promise<RichResponse | void> {
   const { thread, text, cronScheduler } = ctx;
   const { startTypingLoop } = await import("../util");
   const { isBuiltinJob } = await import("../cron/helpers");
@@ -378,11 +385,18 @@ export async function handleCrons(ctx: CronsContext): Promise<RichResponse> {
 
     if (sub === "trigger" && id) {
       if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be triggered manually.` };
-      // Two-phase posting: send 'queued' eagerly so the user sees progress,
-      // then return the success line as the command result.
-      try { await thread.post(`⏳ Triggering ${id}...`); } catch {}
-      await cronScheduler.trigger(id);
-      return { text: `✅ ${id} queued.` };
+      // Edit-in-place via transport.progress(): "⏳ Triggering…" → "✅ queued"
+      // (or "❌ failed") so we don't litter the chat with two bubbles.
+      // Adapters without edit support degrade to a single post + no-op update.
+      const progress = await ctx.progress(thread, `⏳ Triggering ${id}...`);
+      try {
+        await ctx.cronScheduler.trigger(id);
+        await progress.update(`✅ ${id} queued.`);
+      } catch (err) {
+        await progress.update(`❌ ${id} failed: ${(err as Error).message}`);
+        throw err;
+      }
+      return; // void — progress already posted final state
     }
 
     if (sub === "pause" && id) {

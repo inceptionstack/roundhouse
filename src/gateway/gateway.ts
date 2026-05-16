@@ -834,6 +834,7 @@ export class Gateway {
         invoke: ({ thread, text }) => handleCrons({
           thread, text,
           cronScheduler: this.cronScheduler,
+          progress: (t, initialText) => this.transport.progress(t, initialText),
         }),
       },
     ];
