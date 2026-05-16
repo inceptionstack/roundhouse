@@ -876,11 +876,16 @@ export class Gateway {
    * Dispatch a command's result to the active transport.
    *
    * - `void` return: the command handled its own posting (legacy path).
-   * - `RichResponse`: render via `transport.postRich()`. Adapters that
-   *   can't render menus degrade to plain text internally.
+   * - `RichResponse`: render via `transport.postRich()`.
    *
    * Centralising this means a new menu-style command only has to return
    * data — it never imports a transport package directly.
+   *
+   * **Trust the postRich never-throws contract.** `TransportAdapter.postRich`
+   * is documented to never throw; adapters degrade gracefully internally
+   * (Telegram does this via `safePostText`). We don't add a fallback
+   * `thread.post(text)` here — if an adapter ever does throw, the error
+   * propagates and surfaces as a bug rather than being silently swallowed.
    *
    * `thread: any` mirrors the rest of the gateway: the chat SDK Thread<TRaw>
    * type doesn't flow cleanly through this surface yet (would require a
@@ -889,16 +894,7 @@ export class Gateway {
    */
   private async postCommandResult(thread: any, result: CommandResult): Promise<void> {
     if (!result) return;
-    try {
-      await this.transport.postRich(thread, result);
-    } catch (err) {
-      console.error(
-        `[roundhouse] postCommandResult failed:`,
-        (err as Error).message,
-      );
-      // Last-ditch best-effort fallback so the user sees *something*.
-      try { await thread.post(result.text); } catch {}
-    }
+    await this.transport.postRich(thread, result);
   }
 
   /** Post text with markdown, falling back to plain text */

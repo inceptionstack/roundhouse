@@ -4,6 +4,8 @@
  * Contract:
  *   - void return  \u2192 no transport call (legacy path).
  *   - RichResponse \u2192 transport.postRich called exactly once.
+ *   - postRich is trusted to never throw (adapter contract). If it does,
+ *     the gateway propagates rather than silently swallowing.
  *
  * We don't boot a real chat client; we instantiate the Gateway and reach
  * into the private dispatcher method. That keeps the dispatcher's
@@ -58,7 +60,12 @@ describe("Gateway.postCommandResult", () => {
     expect(transport.postRich.mock.calls[0][1]).toBe(result);
   });
 
-  it("falls back to thread.post(text) when transport.postRich throws (last-ditch)", async () => {
+  it("propagates if transport.postRich throws (adapter contract violation)", async () => {
+    // postRich is documented to never throw — adapters MUST degrade
+    // internally (TelegramAdapter does so via safePostText). The gateway
+    // dispatcher trusts that contract and does NOT wrap the call in
+    // try/catch. If an adapter ever does throw, the error surfaces as a
+    // bug instead of being silently swallowed.
     const transport = { postRich: vi.fn(async () => { throw new Error("boom"); }) };
     const gw = makeGateway(transport);
     const post = vi.fn(async () => undefined);
@@ -66,9 +73,9 @@ describe("Gateway.postCommandResult", () => {
     const result: RichResponse = { text: "menu text" };
 
     const fn = (gw as unknown as { postCommandResult: (t: any, r: any) => Promise<void> }).postCommandResult.bind(gw);
-    // Must not throw \u2014 the dispatcher absorbs all errors.
-    await expect(fn(thr, result)).resolves.toBeUndefined();
-    expect(post).toHaveBeenCalledWith("menu text");
+    await expect(fn(thr, result)).rejects.toThrow("boom");
+    // No fallback post on the thread — contract is the adapter's responsibility.
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("forwards the Promise of postRich (awaits it)", async () => {

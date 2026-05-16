@@ -108,10 +108,16 @@ export interface TransportAdapter {
   /**
    * Render a rich response (text + optional menu).
    *
-   * Required on every adapter. Adapters that can't render a menu (text-only
-   * transports) MUST fall back to `postMessage(thread, response.text)`.
-   * Adapters that CAN render a menu MUST also fall back to text on any
-   * transport-level failure (network error, missing platform handle, etc.).
+   * **Precondition:** Implementations MUST NOT throw. On failure (network,
+   * rate limit, missing capability), they must degrade gracefully — log
+   * internally and post `response.text` as plain text via best-effort.
+   * The gateway dispatcher relies on this guarantee and does not wrap
+   * calls to this method in try/catch.
+   *
+   * Adapters that can't render a menu (text-only transports) MUST fall
+   * back to `postMessage(thread, response.text)`. Adapters that CAN render
+   * a menu MUST also fall back to text on any transport-level failure
+   * (network error, missing platform handle, etc.).
    */
   postRich(thread: ChatThread, response: RichResponse): Promise<void>;
 
