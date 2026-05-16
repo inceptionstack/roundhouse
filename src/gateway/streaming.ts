@@ -32,8 +32,11 @@ import { isContextOverflowError } from "../agents/shared/error-classifiers";
  */
 export class StreamModelOverflowError extends Error {
   override readonly name = "StreamModelOverflowError";
-  constructor(message: string) {
+  readonly hadVisibleText: boolean;
+
+  constructor(message: string, hadVisibleText: boolean = false) {
     super(message);
+    this.hadVisibleText = hadVisibleText;
   }
 }
 
@@ -213,7 +216,7 @@ export async function handleStreaming(
         // Non-overflow errors keep today's inline post + continue-loop.
         if (isContextOverflowError({ message: event.message })) {
           console.warn(`[roundhouse] streamed model_error: context overflow — escalating to gateway recovery`);
-          throw new StreamModelOverflowError(event.message);
+          throw new StreamModelOverflowError(event.message, hasVisibleText);
         }
         modelErrorPosted = true;
         const safeMsg = event.message.split("\n")[0].slice(0, 400);
