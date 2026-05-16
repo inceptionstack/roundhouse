@@ -6,6 +6,7 @@
  */
 
 import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
+import type { RichResponse } from "../transports";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
@@ -356,15 +357,15 @@ export interface CronsContext {
   thread: any;
   text: string;
   cronScheduler: any | null;
-  postWithFallback: (thread: any, text: string) => Promise<void>;
 }
 
-export async function handleCrons(ctx: CronsContext): Promise<void> {
-  const { thread, text, cronScheduler, postWithFallback } = ctx;
+export async function handleCrons(ctx: CronsContext): Promise<RichResponse> {
+  const { thread, text, cronScheduler } = ctx;
   const { startTypingLoop } = await import("../util");
   const { isBuiltinJob } = await import("../cron/helpers");
   const { formatSchedule, formatRunCounts, jobEnabledIcon } = await import("../cron/format");
 
+  // Typing indicator while we look up scheduler state. Best-effort.
   const stopTyping = startTypingLoop(thread);
   try {
     const parts = text.split(/\s+/).slice(1);
@@ -372,49 +373,61 @@ export async function handleCrons(ctx: CronsContext): Promise<void> {
     const id = parts[1];
 
     if (!cronScheduler) {
-      await thread.post("⚠️ Cron scheduler not running.");
-    } else if (sub === "trigger" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be triggered manually.`); }
-      else { await thread.post(`⏳ Triggering ${id}...`); await cronScheduler.trigger(id); await thread.post(`✅ ${id} queued.`); }
-    } else if (sub === "pause" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be paused.`); }
-      else { await cronScheduler.pauseJob(id); await thread.post(`⏸️ ${id} paused.`); }
-    } else if (sub === "resume" && id) {
-      if (isBuiltinJob(id)) { await thread.post(`⚠️ ${id} is a built-in job and cannot be resumed.`); }
-      else { await cronScheduler.resumeJob(id); await thread.post(`▶️ ${id} resumed.`); }
-    } else {
-      // Default: list jobs
-      const items = await cronScheduler.listJobs();
-      if (items.length === 0) {
-        await thread.post("No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`");
-      } else {
-        const lines = ["🕓 *Scheduled Jobs*", ""];
-        for (const { job, state } of items) {
-          const icon = jobEnabledIcon(job.enabled);
-          const sched = formatSchedule(job.schedule);
-          lines.push(`${icon} *${job.id}*`);
-          lines.push(`   📅 ${sched}`);
-          if (job.description) lines.push(`   📝 ${job.description}`);
-          if (state.totalRuns > 0) {
-            lines.push(`   📊 ${formatRunCounts(state)}`);
-            if (state.lastFinishedAt) {
-              const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
-              const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
-              lines.push(`   ⏱ Last run: ${agoStr}`);
-            }
-          } else {
-            lines.push(`   📊 No runs yet`);
-          }
-          lines.push("");
-        }
-        lines.push(`_${items.length} job(s) configured_`);
-        await postWithFallback(thread, lines.join("\n"));
-      }
+      return { text: "⚠️ Cron scheduler not running." };
     }
+
+    if (sub === "trigger" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be triggered manually.` };
+      // Two-phase posting: send 'queued' eagerly so the user sees progress,
+      // then return the success line as the command result.
+      try { await thread.post(`⏳ Triggering ${id}...`); } catch {}
+      await cronScheduler.trigger(id);
+      return { text: `✅ ${id} queued.` };
+    }
+
+    if (sub === "pause" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be paused.` };
+      await cronScheduler.pauseJob(id);
+      return { text: `⏸️ ${id} paused.` };
+    }
+
+    if (sub === "resume" && id) {
+      if (isBuiltinJob(id)) return { text: `⚠️ ${id} is a built-in job and cannot be resumed.` };
+      await cronScheduler.resumeJob(id);
+      return { text: `▶️ ${id} resumed.` };
+    }
+
+    // Default: list jobs.
+    const items = await cronScheduler.listJobs();
+    if (items.length === 0) {
+      return { text: "No cron jobs configured.\n\nCreate one with:\n`roundhouse cron add <id> --prompt \"...\" --every 6h`" };
+    }
+
+    const lines = ["🕓 *Scheduled Jobs*", ""];
+    for (const { job, state } of items) {
+      const icon = jobEnabledIcon(job.enabled);
+      const sched = formatSchedule(job.schedule);
+      lines.push(`${icon} *${job.id}*`);
+      lines.push(`   📅 ${sched}`);
+      if (job.description) lines.push(`   📝 ${job.description}`);
+      if (state.totalRuns > 0) {
+        lines.push(`   📊 ${formatRunCounts(state)}`);
+        if (state.lastFinishedAt) {
+          const ago = Math.round((Date.now() - new Date(state.lastFinishedAt).getTime()) / 60000);
+          const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
+          lines.push(`   ⏱ Last run: ${agoStr}`);
+        }
+      } else {
+        lines.push(`   📊 No runs yet`);
+      }
+      lines.push("");
+    }
+    lines.push(`_${items.length} job(s) configured_`);
+    return { text: lines.join("\n") };
   } catch (err) {
-    try { await thread.post(`⚠️ Cron error: ${(err as Error).message}`); } catch {}
+    return { text: `⚠️ Cron error: ${(err as Error).message}` };
   } finally {
     stopTyping();
+    console.log(`[roundhouse] /crons for thread=${thread.id}`);
   }
-  console.log(`[roundhouse] /crons for thread=${thread.id}`);
 }

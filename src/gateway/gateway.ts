@@ -832,7 +832,6 @@ export class Gateway {
         invoke: ({ thread, text }) => handleCrons({
           thread, text,
           cronScheduler: this.cronScheduler,
-          postWithFallback: post,
         }),
       },
     ];
