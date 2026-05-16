@@ -22,6 +22,20 @@ export interface IncomingMessage {
 }
 
 /**
+ * Minimal thread shape commands can rely on regardless of transport.
+ *
+ * Sized to what command handlers actually call: id, post, optional
+ * startTyping. Adapters return richer objects at the platform boundary
+ * (Telegram threads carry adapter.telegramFetch + platformThreadId);
+ * commands deliberately don't see those.
+ */
+export interface MinimalThread {
+  id: string;
+  post(text: string): Promise<void>;
+  startTyping?(): void;
+}
+
+/**
  * RichButton — a single clickable button in a rich menu.
  *
  * `actionId` is a gateway-level identifier (matches CommandDescriptor.actions[K]).

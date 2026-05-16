@@ -12,6 +12,7 @@ export type {
   RichMenu,
   RichResponse,
   ProgressMessage,
+  MinimalThread,
 } from "./types";
 export { TelegramAdapter } from "./telegram/telegram-adapter";
 export { buildSelectableMenu } from "./rich-helpers";

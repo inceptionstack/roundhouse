@@ -761,9 +761,12 @@ export class Gateway {
     // Shorthand: wrap a standard-CommandContext handler as a descriptor invoker.
     const withCtx = (handler: (ctx: CommandContext) => Promise<void>) =>
       async ({ thread, message, agentThreadId }: CommandInvocation) => {
-        const authorName = message.author?.userName ?? message.author?.userId ?? "?";
+        // CommandInvocation.message is loosely typed (`text` + index sig);
+        // narrow to the shape we read here.
+        const authorish = message as { author?: { userName?: string; userId?: string | number } };
+        const authorName = authorish.author?.userName ?? authorish.author?.userId ?? "?";
         await handler(this.buildCommandContext(
-          thread, message, agentThreadId, authorName,
+          thread, message, agentThreadId, String(authorName),
           allowedUsers, allowedUserIds, verboseThreads, threadLocks,
         ));
       };
@@ -861,7 +864,7 @@ export class Gateway {
     matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
     thread: any, message: unknown, trimmed: string, agentThreadId: string,
   ): Promise<boolean> {
-    const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
+    const inv: CommandInvocation = { thread, message: message as { text?: string; [key: string]: unknown }, text: trimmed, agentThreadId };
     for (const desc of inTurnCommands) {
       if (matchesDescriptor(desc, trimmed, matchers)) {
         const result = await desc.invoke(inv);

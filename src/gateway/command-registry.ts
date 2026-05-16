@@ -29,7 +29,7 @@
  * owns which action id.
  */
 
-import type { RichResponse } from "../transports";
+import type { RichResponse, MinimalThread } from "../transports";
 
 /**
  * Minimal thread shape an action handler reads. Intentionally narrow so
@@ -58,10 +58,10 @@ export type CommandStage = "pre-turn" | "in-turn";
  * from the gateway's `buildCommandContext()`.
  */
 export interface CommandInvocation {
-  /** The chat thread (subscribed). */
-  thread: any;
+  /** The chat thread (subscribed). Narrow shape — commands only need id + post. */
+  thread: MinimalThread;
   /** The raw incoming message object from the Chat SDK. */
-  message: any;
+  message: { text?: string; [key: string]: unknown };
   /** The already-trimmed text of the message. */
   text: string;
   /** The resolved agent thread id (post topic-override). */
