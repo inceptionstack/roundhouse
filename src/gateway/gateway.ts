@@ -17,8 +17,7 @@ import { IpcServer, createIpcHandler } from "../ipc";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
-// TODO: move progress into TransportAdapter when multi-transport lands
-import { createProgressMessage } from "../transports/telegram/progress";
+// progress messages now flow through the transport via this.transport.progress().
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream } from "./streaming";
@@ -686,7 +685,7 @@ export class Gateway {
     // Hard or emergency: flush + compact
     try {
       const prefix = pressure === "emergency" ? "⚠️ Context nearly full! " : "";
-      const progress = await createProgressMessage(thread, `📝 ${prefix}Saving memory and compacting...`);
+      const progress = await this.transport.progress(thread, `📝 ${prefix}Saving memory and compacting...`);
       const result = await flushMemoryThenCompact(
         agentThreadId, agent, memoryRoot, pressure, this.config.memory,
         (step) => progress.update(step),
@@ -729,6 +728,7 @@ export class Gateway {
       verboseThreads,
       threadLocks,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
+      progress: (t, initialText) => this.transport.progress(t, initialText),
       stopGateway: () => this.stop(),
     };
   }

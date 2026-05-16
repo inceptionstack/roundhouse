@@ -11,5 +11,6 @@ export type {
   RichMenuSection,
   RichMenu,
   RichResponse,
+  ProgressMessage,
 } from "./types";
 export { TelegramAdapter } from "./telegram/telegram-adapter";

@@ -5,13 +5,21 @@
  * utility modules (format, html, progress, notify, bot-commands).
  */
 
-import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult, RichResponse } from "../types";
+import type {
+  TransportAdapter,
+  ChatThread,
+  IncomingMessage,
+  PairingResult,
+  RichResponse,
+  ProgressMessage,
+} from "../types";
 import { isTelegramThread, postTelegramHtml } from "./html";
 import { markdownToTelegramHtml } from "./format";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
 import { toTelegramInlineKeyboard } from "./rich-ui";
+import { createProgressMessage } from "./progress";
 
 /** Extract the numeric Telegram chat id from a thread's id string. */
 function extractTelegramChatId(thread: { id?: string; platformThreadId?: string }): string | undefined {
@@ -49,7 +57,9 @@ export class TelegramAdapter implements TransportAdapter {
    */
   async postRich(thread: ChatThread, response: RichResponse): Promise<void> {
     if (!response.menu) {
-      await this.postMessage(thread, response.text);
+      // Text-only response: still go through a guarded post so the
+      // never-throws contract holds even if postMessage rejects.
+      await this.safePostText(thread, response.text);
       return;
     }
 
@@ -63,7 +73,7 @@ export class TelegramAdapter implements TransportAdapter {
     const chatId = extractTelegramChatId(telegramThread);
 
     if (!telegramFetch || !chatId) {
-      await this.postMessage(thread, response.text);
+      await this.safePostText(thread, response.text);
       return;
     }
 
@@ -82,15 +92,33 @@ export class TelegramAdapter implements TransportAdapter {
         "[roundhouse] telegram postRich failed, falling back to text:",
         (err as Error).message,
       );
-      try {
-        await this.postMessage(thread, response.text);
-      } catch (fallbackErr) {
-        console.error(
-          "[roundhouse] telegram postRich text fallback also failed:",
-          (fallbackErr as Error).message,
-        );
-      }
+      await this.safePostText(thread, response.text);
     }
+  }
+
+  /**
+   * Post `text` via postMessage, swallowing any error so callers (chiefly
+   * postRich) can satisfy their never-throws contract. The error is
+   * logged so it isn't silently lost.
+   */
+  private async safePostText(thread: ChatThread, text: string): Promise<void> {
+    try {
+      await this.postMessage(thread, text);
+    } catch (err) {
+      console.error(
+        "[roundhouse] telegram safePostText failed (text fallback also unavailable):",
+        (err as Error).message,
+      );
+    }
+  }
+
+  /**
+   * Open an editable progress message. Delegates to the existing
+   * `createProgressMessage` helper which already handles non-Telegram
+   * threads by degrading to a single post + no-op updates.
+   */
+  progress(thread: ChatThread, initialText: string): Promise<ProgressMessage> {
+    return createProgressMessage(thread as any, initialText);
   }
 
   async registerCommands(token: string): Promise<void> {

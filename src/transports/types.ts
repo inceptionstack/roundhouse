@@ -68,6 +68,17 @@ export interface RichResponse {
   menu?: RichMenu;
 }
 
+/**
+ * ProgressMessage — handle to a transport-rendered progress message.
+ *
+ * Returned by `TransportAdapter.progress()`. `update(text)` is allowed
+ * to silently no-op on transports that can't edit messages in place
+ * (the initial text was already posted).
+ */
+export interface ProgressMessage {
+  update(text: string): Promise<void>;
+}
+
 /** Result of a successful transport pairing */
 export interface PairingResult {
   /** Thread/channel ID for notifications */
@@ -95,7 +106,7 @@ export interface TransportAdapter {
   postMessage(thread: ChatThread, text: string): Promise<void>;
 
   /**
-   * Post a rich response (text + optional menu).
+   * Render a rich response (text + optional menu).
    *
    * Required on every adapter. Adapters that can't render a menu (text-only
    * transports) MUST fall back to `postMessage(thread, response.text)`.
@@ -103,6 +114,17 @@ export interface TransportAdapter {
    * transport-level failure (network error, missing platform handle, etc.).
    */
   postRich(thread: ChatThread, response: RichResponse): Promise<void>;
+
+  /**
+   * Open an editable progress message used by long-running commands like
+   * /update, /compact, /doctor.
+   *
+   * Adapters that can't natively edit messages MUST still satisfy this
+   * contract by posting `initialText` once and treating subsequent
+   * `update()` calls as no-ops. Either way the caller never imports a
+   * platform-specific module.
+   */
+  progress(thread: ChatThread, initialText: string): Promise<ProgressMessage>;
 
   /** Register bot commands with the platform */
   registerCommands(token: string): Promise<void>;

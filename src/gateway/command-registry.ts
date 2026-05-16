@@ -29,8 +29,17 @@
  * owns which action id.
  */
 
-import type { ChatThreadLike } from "./inline-keyboard";
 import type { RichResponse } from "../transports";
+
+/**
+ * Minimal thread shape an action handler reads. Intentionally narrow so
+ * the registry doesn't depend on Chat SDK or transport-specific types.
+ * The transport adapter does the heavy lifting downstream.
+ */
+export interface ActionThreadLike {
+  id?: string;
+  [key: string]: unknown;
+}
 
 /**
  * What a command's `invoke()` or action handler may return.
@@ -65,7 +74,7 @@ export interface CommandInvocation {
  */
 export interface ActionInvocation {
   value?: string;
-  thread: ChatThreadLike;
+  thread: ActionThreadLike;
 }
 
 /**
@@ -147,7 +156,8 @@ export function matchesDescriptor(
 export function collectAndValidateActions(
   descriptors: readonly CommandDescriptor[],
 ): Array<{ actionId: string; handler: NonNullable<CommandDescriptor["actions"]>[string]; ownerTriggers: readonly string[] }> {
-  const result: Array<{ actionId: string; handler: any; ownerTriggers: readonly string[] }> = [];
+  type ActionHandler = NonNullable<CommandDescriptor["actions"]>[string];
+  const result: Array<{ actionId: string; handler: ActionHandler; ownerTriggers: readonly string[] }> = [];
   const ownerByAction = new Map<string, readonly string[]>();
 
   for (const desc of descriptors) {

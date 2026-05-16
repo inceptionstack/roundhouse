@@ -6,12 +6,10 @@
  */
 
 import type { AgentAdapter, AgentStreamEvent, GatewayConfig } from "../types";
-import type { RichResponse } from "../transports";
+import type { RichResponse, ProgressMessage } from "../transports";
 import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
-// TODO: move progress into TransportAdapter when multi-transport lands
-import { createProgressMessage } from "../transports/telegram/progress";
 import { getSystemResources } from "./helpers";
 
 // ── Types ────────────────────────────────────────────
@@ -28,6 +26,8 @@ export interface CommandContext {
   verboseThreads: Set<string>;
   threadLocks: Map<string, Promise<void>>;
   postWithFallback: (thread: any, text: string) => Promise<void>;
+  /** Open a transport-rendered progress message (post + edit-in-place). */
+  progress: (thread: any, initialText: string) => Promise<ProgressMessage>;
   stopGateway: () => Promise<void>;
 }
 
@@ -78,7 +78,7 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
     writeFileSync(join(ROUNDHOUSE_DIR, ".last-version"), ROUNDHOUSE_VERSION + "\n");
   } catch {}
   console.log(`[roundhouse] /update requested by @${authorName} in thread=${thread.id}`);
-  const progress = await createProgressMessage(thread, "📦 Checking for updates...");
+  const progress = await ctx.progress(thread, "📦 Checking for updates...");
   try {
     const { performUpdate } = await import("../cli/update");
     const result = await performUpdate(progress);
@@ -118,7 +118,7 @@ export async function handleCompact(ctx: CommandContext): Promise<void> {
   threadLocks.set(agentThreadId, lockPromise);
   if (prevLock) await prevLock;
 
-  const progress = await createProgressMessage(thread, "📝 Saving memory and compacting...");
+  const progress = await ctx.progress(thread, "📝 Saving memory and compacting...");
   const stopTyping = startTypingLoop(thread);
   try {
     const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
