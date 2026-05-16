@@ -26,7 +26,8 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from 
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ROUNDHOUSE_DIR } from "../config";
-import type { RichResponse, RichButton } from "../transports";
+import type { RichResponse } from "../transports";
+import { buildSelectableMenu } from "../transports";
 
 /** Action ID for topic-select inline-keyboard callbacks */
 export const TOPIC_ACTION_ID = "topic_select";
@@ -38,8 +39,10 @@ export const TOPIC_ACTION_ID = "topic_select";
  * creates a topic via `/topic <name>` can't accidentally collide with it.
  * The normalizer strips leading/trailing `-`, so any sentinel starting or
  * ending with `-` is unrepresentable as a user-created topic name.
+ *
+ * Exported for invariant property tests.
  */
-const MAIN_SENTINEL = "-main";
+export const MAIN_SENTINEL = "-main";
 
 const TOPICS_FILE = join(ROUNDHOUSE_DIR, "active-topics.json");
 
@@ -117,7 +120,7 @@ export interface TopicCommandContext {
 }
 
 /** Normalize a topic name the same way as the command parser. */
-function normalizeTopicName(raw: string): string {
+export function normalizeTopicName(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
@@ -126,47 +129,29 @@ function chatIdFromThread(thread: TopicThread): string {
   return (thread?.id?.split(":")[1] ?? thread?.id ?? "") as string;
 }
 
-/** Build the topic-selection menu as a transport-neutral RichResponse. */
+/**
+ * Build the topic-selection menu as a transport-neutral RichResponse.
+ * Delegates to the shared `buildSelectableMenu` picker helper, with the
+ * "main (default)" sentinel button prepended.
+ */
 function buildTopicMenu(chatId: string): RichResponse {
   const current = getActiveTopic(chatId);
   const known = listTopics(chatId);
-  const onMain = !current;
   const currentDisplay = current ?? "main (default)";
 
-  const buttons: RichButton[] = [];
-  // Always include "main (default)" first as an escape hatch.
-  buttons.push({
-    label: "\ud83c\udfe0 main (default)",
+  return buildSelectableMenu({
+    current,
+    options: known.map((t) => ({ key: t, label: `\ud83d\udcc2 ${t}` })),
     actionId: TOPIC_ACTION_ID,
-    value: MAIN_SENTINEL,
-    selected: onMain,
-  });
-  for (const t of known) {
-    buttons.push({
-      label: `\ud83d\udcc2 ${t}`,
-      actionId: TOPIC_ACTION_ID,
-      value: t,
-      selected: t === current,
-    });
-  }
-
-  // Text fallback: human-readable summary of the same information.
-  const textLines = [`\ud83d\udcc2 *Current topic:* \`${currentDisplay}\``, ""];
-  if (known.length > 0) {
-    textLines.push(`Known topics: ${known.map(t => `\`${t}\``).join(", ")}`);
-    textLines.push("");
-  }
-  textLines.push("Switch with: `/topic <name>`");
-  textLines.push("Return to default: `/topic main`");
-
-  return {
-    text: textLines.join("\n"),
-    menu: {
-      title: "Current topic",
-      body: currentDisplay,
-      sections: [{ columns: 2, buttons }],
+    textHeader: `\ud83d\udcc2 *Current topic:* \`${currentDisplay}\``,
+    textHint: "Switch with: `/topic <name>`\nReturn to default: `/topic main`",
+    columns: 2,
+    sentinel: {
+      label: "\ud83c\udfe0 main (default)",
+      value: MAIN_SENTINEL,
+      activeWhenCurrentIsUndefined: true,
     },
-  };
+  });
 }
 
 export function handleTopic(ctx: TopicCommandContext): RichResponse {

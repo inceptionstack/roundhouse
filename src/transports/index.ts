@@ -14,3 +14,5 @@ export type {
   ProgressMessage,
 } from "./types";
 export { TelegramAdapter } from "./telegram/telegram-adapter";
+export { buildSelectableMenu } from "./rich-helpers";
+export type { SelectableOption, SelectableMenuOpts } from "./rich-helpers";

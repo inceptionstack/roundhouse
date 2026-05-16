@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import type { RichResponse } from "../transports";
+import { buildSelectableMenu } from "../transports";
 
 /** Known model aliases \u2192 Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
@@ -73,39 +74,28 @@ function getCurrentModelLabel(settings: Record<string, any>): string {
   return String(model);
 }
 
-/** Build the /model menu as a transport-neutral RichResponse. */
+/**
+ * Build the /model menu as a transport-neutral RichResponse.
+ * Delegates to the shared `buildSelectableMenu` picker helper.
+ */
 function buildModelMenu(currentLabel: string): RichResponse {
-  const aliasList = KEYBOARD_MODELS
-    .map((alias) => {
-      const info = MODEL_ALIASES[alias];
-      const marker = info.label === currentLabel ? " (current)" : "";
-      return `  \`${alias}\` \u2192 ${info.label}${marker}`;
-    })
-    .join("\n");
+  // Map our label-based "current" semantics into the helper's key-based
+  // semantics by finding the alias whose label matches.
+  const currentAlias = KEYBOARD_MODELS.find(
+    (alias) => MODEL_ALIASES[alias].label === currentLabel,
+  );
 
-  const text =
-    `\ud83e\udd16 *Current model:* ${currentLabel}\n\n` +
-    `*Available:*\n${aliasList}\n\n` +
-    `_Usage:_ \`/model sonnet\``;
-
-  return {
-    text,
-    menu: {
-      title: "Current model",
-      body: currentLabel,
-      sections: [
-        {
-          columns: 2,
-          buttons: KEYBOARD_MODELS.map((alias) => ({
-            label: MODEL_ALIASES[alias].label,
-            actionId: MODEL_ACTION_ID,
-            value: alias,
-            selected: MODEL_ALIASES[alias].label === currentLabel,
-          })),
-        },
-      ],
-    },
-  };
+  return buildSelectableMenu({
+    current: currentAlias,
+    options: KEYBOARD_MODELS.map((alias) => ({
+      key: alias,
+      label: MODEL_ALIASES[alias].label,
+    })),
+    actionId: MODEL_ACTION_ID,
+    textHeader: `\ud83e\udd16 *Current model:* ${currentLabel}`,
+    textHint: "_Usage:_ `/model sonnet`",
+    columns: 2,
+  });
 }
 
 export async function handleModel(ctx: ModelCommandContext): Promise<RichResponse> {
