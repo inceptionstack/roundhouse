@@ -2,6 +2,14 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.40] — 2026-05-16
+
+### Changed
+- **Refactor:** Renamed `/stop` command to `/cancel` for semantic clarity.
+  - Better UX terminology: "cancel" explicitly means "abort in-flight work"
+  - Updated command handlers, Telegram bot menu, docs
+  - UI feedback: `⏹️ Cancelled.`
+
 ## [0.5.38] — 2026-05-16
 
 ### Fixed
