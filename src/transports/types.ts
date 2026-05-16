@@ -45,6 +45,16 @@ export interface MinimalThread {
 export interface RichButton {
   label: string;
   actionId: string;
+  /**
+   * Action payload sent back when the button is clicked.
+   *
+   * Intentionally a flat string (not an object) — keeps callback encoding
+   * simple across transports (Telegram callback_data is 64 bytes max).
+   * If structured payload is needed, JSON-encode into this field and
+   * decode in the action handler. Sentinel values (e.g. "-main") must
+   * be unrepresentable by the normalization function of the value space
+   * they share — see topic-command.ts MAIN_SENTINEL for the pattern.
+   */
   value: string;
   /** Visual hint that this button is the currently-active selection. */
   selected?: boolean;
