@@ -156,4 +156,46 @@ describe("TelegramAdapter.postRich", () => {
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith("confirm");
   });
+
+  it("preserves `this` when calling adapter.telegramFetch (regression: detached-method bug)", async () => {
+    // The real @chat-adapter/telegram telegramFetch is a class method that
+    // depends on `this.apiBaseUrl` / `this.botToken`. If postRich extracts
+    // it as a plain reference (`const fn = adapter.telegramFetch; fn(...)`)
+    // it throws "Cannot read properties of undefined" and silently falls
+    // back to text — the v0.5.35 bug Roy hit.
+    //
+    // This test models that semantics: telegramFetch only succeeds when
+    // invoked with the right `this`, and asserts postRich uses the menu
+    // path (no fallback to text) on a Telegram-shaped thread.
+    class FakeTelegramAdapter {
+      apiBaseUrl = "https://api.telegram.org";
+      sentMessages: Array<{ method: string; payload: unknown }> = [];
+      async telegramFetch(method: string, payload: Record<string, unknown>) {
+        // Touch `this.apiBaseUrl` — throws if `this` is undefined.
+        if (!this.apiBaseUrl) throw new Error("this lost");
+        this.sentMessages.push({ method, payload });
+        return { ok: true };
+      }
+    }
+    const fake = new FakeTelegramAdapter();
+    const thread = {
+      id: "telegram:42",
+      platformThreadId: "telegram:42",
+      adapter: fake,
+      post: vi.fn(),
+    } as unknown as ChatThread;
+
+    const adapter = new TelegramAdapter();
+    const postMessageSpy = vi.spyOn(adapter, "postMessage");
+
+    await adapter.postRich(thread, MENU_RESPONSE);
+
+    // Menu path was taken: telegramFetch invoked with sendMessage + reply_markup.
+    expect(fake.sentMessages).toHaveLength(1);
+    expect(fake.sentMessages[0].method).toBe("sendMessage");
+    expect((fake.sentMessages[0].payload as { reply_markup: unknown }).reply_markup)
+      .toBeDefined();
+    // Did NOT fall back to text (which would call postMessage).
+    expect(postMessageSpy).not.toHaveBeenCalled();
+  });
 });

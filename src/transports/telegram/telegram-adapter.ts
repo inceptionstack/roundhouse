@@ -69,10 +69,15 @@ export class TelegramAdapter implements TransportAdapter {
       platformThreadId?: string;
       adapter?: { telegramFetch?: (method: string, payload: Record<string, unknown>) => Promise<unknown> };
     };
-    const telegramFetch = telegramThread.adapter?.telegramFetch;
+    // CRITICAL: telegramFetch is a class method on the @chat-adapter/telegram
+    // adapter — it relies on `this.apiBaseUrl` and `this.botToken`. Calling
+    // it as a plain function (`const fn = adapter.telegramFetch; fn(...)`)
+    // throws "Cannot read properties of undefined". Always invoke it as
+    // `adapter.telegramFetch(...)` so `this` is preserved.
+    const tgAdapter = telegramThread.adapter;
     const chatId = extractTelegramChatId(telegramThread);
 
-    if (!telegramFetch || !chatId) {
+    if (!tgAdapter?.telegramFetch || !chatId) {
       await this.safePostText(thread, response.text);
       return;
     }
@@ -81,7 +86,7 @@ export class TelegramAdapter implements TransportAdapter {
       // text formatting: response.text is already markdown-ish from commands.
       // We pass it through markdownToTelegramHtml so bold/code render natively.
       const html = markdownToTelegramHtml(response.text);
-      await telegramFetch("sendMessage", {
+      await tgAdapter.telegramFetch("sendMessage", {
         chat_id: chatId,
         text: html,
         parse_mode: "HTML",
