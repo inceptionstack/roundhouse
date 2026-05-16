@@ -70,13 +70,15 @@ export interface RichMenu {
 }
 
 export interface RichResponse {
-  text: string;
-  menu?: RichMenu;
+  text: string;          // verbose fallback (no menu, or menu render fails)
+  menu?: RichMenu;       // optional inline keyboard / blocks
+  menuCaption?: string;  // concise body shown next to the menu (avoids duplicating buttons)
 }
 ```
 
 Opinionated constraints:
 - `text` is mandatory and is the canonical fallback
+- `menuCaption` is optional; transports prefer it over `text` when rendering a menu, so commands can keep `text` verbose (lists every option) without polluting the menu view. See `src/transports/types.ts` for the source-of-truth contract.
 - buttons carry gateway action ids, not platform callback payloads
 - menu layout is descriptive, not platform-specific
 - no Telegram HTML, no Slack blocks, no Discord components in gateway code
@@ -220,8 +222,9 @@ export interface RichMenu {
 }
 
 export interface RichResponse {
-  text: string;
+  text: string;          // verbose fallback
   menu?: RichMenu;
+  menuCaption?: string;  // concise body when menu renders; falls back to `text` when absent
 }
 
 export interface TransportAdapter {
