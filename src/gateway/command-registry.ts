@@ -30,6 +30,15 @@
  */
 
 import type { ChatThreadLike } from "./inline-keyboard";
+import type { RichResponse } from "../transports";
+
+/**
+ * What a command's `invoke()` or action handler may return.
+ *
+ * - `void`: the handler did its own posting (legacy path).
+ * - `RichResponse`: gateway dispatches to `transport.postRich(thread, result)`.
+ */
+export type CommandResult = void | RichResponse;
 
 /** Dispatch stages — see module doc. */
 export type CommandStage = "pre-turn" | "in-turn";
@@ -81,10 +90,11 @@ export interface CommandDescriptor {
   stage?: CommandStage;
   /** If true, `/cmd arg1 arg2` also matches. Default false. */
   acceptsArgs?: boolean;
-  /** Do the work. Return (or resolve) when done — gateway will skip further dispatch. */
-  invoke: (inv: CommandInvocation) => Promise<void> | void;
-  /** Optional inline-keyboard callback handlers keyed by action id. */
-  actions?: Record<string, (inv: ActionInvocation) => Promise<void> | void>;
+  /** Do the work. Return (or resolve) when done — gateway will skip further dispatch.
+   *  May return a RichResponse for the gateway to render via the active transport. */
+  invoke: (inv: CommandInvocation) => Promise<CommandResult> | CommandResult;
+  /** Optional inline-keyboard callback handlers keyed by action id. May return a RichResponse. */
+  actions?: Record<string, (inv: ActionInvocation) => Promise<CommandResult> | CommandResult>;
 }
 
 /**

@@ -5,12 +5,18 @@
  * utility modules (format, html, progress, notify, bot-commands).
  */
 
-import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult } from "../types";
+import type { TransportAdapter, ChatThread, IncomingMessage, PairingResult, RichResponse } from "../types";
 import { isTelegramThread, postTelegramHtml } from "./html";
 import { markdownToTelegramHtml } from "./format";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
+import { toTelegramInlineKeyboard } from "./rich-ui";
+
+/** Extract the numeric Telegram chat id from a thread's id string. */
+function extractTelegramChatId(thread: { id?: string; platformThreadId?: string }): string | undefined {
+  return thread.platformThreadId?.split(":")?.[1] ?? thread.id?.split(":")?.[1];
+}
 
 const TELEGRAM_FORMAT_HINT = "[Format your final answer to be telegram-friendly.]";
 
@@ -26,6 +32,65 @@ export class TelegramAdapter implements TransportAdapter {
       throw new Error("TelegramAdapter.postMessage called with non-Telegram thread");
     }
     await postTelegramHtml(thread as any, text);
+  }
+
+  /**
+   * Render a RichResponse as a Telegram message.
+   *
+   * - No menu → plain text via postMessage (HTML-formatted).
+   * - With menu → inline keyboard via raw `sendMessage` if the thread
+   *   exposes `adapter.telegramFetch`. Falls back to plain text on any
+   *   error or missing handle.
+   *
+   * One `as any` cast: ChatThread is a transport-neutral interface, but
+   * `@chat-adapter/telegram` decorates threads with `adapter.telegramFetch`
+   * and `platformThreadId` at runtime. We narrow at the boundary instead
+   * of polluting ChatThread with Telegram-only fields.
+   */
+  async postRich(thread: ChatThread, response: RichResponse): Promise<void> {
+    if (!response.menu) {
+      await this.postMessage(thread, response.text);
+      return;
+    }
+
+    // Narrow at the transport boundary. See doc above.
+    const telegramThread = thread as unknown as {
+      id?: string;
+      platformThreadId?: string;
+      adapter?: { telegramFetch?: (method: string, payload: Record<string, unknown>) => Promise<unknown> };
+    };
+    const telegramFetch = telegramThread.adapter?.telegramFetch;
+    const chatId = extractTelegramChatId(telegramThread);
+
+    if (!telegramFetch || !chatId) {
+      await this.postMessage(thread, response.text);
+      return;
+    }
+
+    try {
+      // text formatting: response.text is already markdown-ish from commands.
+      // We pass it through markdownToTelegramHtml so bold/code render natively.
+      const html = markdownToTelegramHtml(response.text);
+      await telegramFetch("sendMessage", {
+        chat_id: chatId,
+        text: html,
+        parse_mode: "HTML",
+        reply_markup: toTelegramInlineKeyboard(response.menu),
+      });
+    } catch (err) {
+      console.warn(
+        "[roundhouse] telegram postRich failed, falling back to text:",
+        (err as Error).message,
+      );
+      try {
+        await this.postMessage(thread, response.text);
+      } catch (fallbackErr) {
+        console.error(
+          "[roundhouse] telegram postRich text fallback also failed:",
+          (fallbackErr as Error).message,
+        );
+      }
+    }
   }
 
   async registerCommands(token: string): Promise<void> {

@@ -29,6 +29,7 @@ import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } f
 import {
   type CommandDescriptor,
   type CommandInvocation,
+  type CommandResult,
   collectAndValidateActions,
   isPreTurn,
   matchesDescriptor,
@@ -257,7 +258,8 @@ export class Gateway {
       const inv: CommandInvocation = { thread, message, text: trimmed, agentThreadId };
       for (const desc of inTurnCommands) {
         if (matchesDescriptor(desc, trimmed, matchers)) {
-          await desc.invoke(inv);
+          const result = await desc.invoke(inv);
+          await this.postCommandResult(thread, result);
           return;
         }
       }
@@ -277,7 +279,8 @@ export class Gateway {
       for (const desc of preTurnCommands) {
         if (matchesDescriptor(desc, text, matchers)) {
           if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
-          await desc.invoke({ thread, message, text, agentThreadId });
+          const result = await desc.invoke({ thread, message, text, agentThreadId });
+          await this.postCommandResult(thread, result);
           return;
         }
       }
@@ -309,7 +312,8 @@ export class Gateway {
     // fail fast at startup.
     for (const { actionId, handler } of collectAndValidateActions(allDescriptors)) {
       this.chat.onAction(actionId, async (event: any) => {
-        await handler({ value: event.value, thread: event.thread });
+        const result = await handler({ value: event.value, thread: event.thread });
+        await this.postCommandResult(event.thread, result);
       });
     }
 
@@ -841,6 +845,30 @@ export class Gateway {
       signal,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
     });
+  }
+
+  /**
+   * Dispatch a command's result to the active transport.
+   *
+   * - `void` return: the command handled its own posting (legacy path).
+   * - `RichResponse`: render via `transport.postRich()`. Adapters that
+   *   can't render menus degrade to plain text internally.
+   *
+   * Centralising this means a new menu-style command only has to return
+   * data — it never imports a transport package directly.
+   */
+  private async postCommandResult(thread: any, result: CommandResult): Promise<void> {
+    if (!result) return;
+    try {
+      await this.transport.postRich(thread, result);
+    } catch (err) {
+      console.error(
+        `[roundhouse] postCommandResult failed:`,
+        (err as Error).message,
+      );
+      // Last-ditch best-effort fallback so the user sees *something*.
+      try { await thread.post(result.text); } catch {}
+    }
   }
 
   /** Post text with markdown, falling back to plain text */

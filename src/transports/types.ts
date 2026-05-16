@@ -21,6 +21,53 @@ export interface IncomingMessage {
   [key: string]: unknown;
 }
 
+/**
+ * RichButton — a single clickable button in a rich menu.
+ *
+ * `actionId` is a gateway-level identifier (matches CommandDescriptor.actions[K]).
+ * `value` is the payload sent back to the action handler when clicked.
+ * Transports translate this into platform-native callback payloads.
+ */
+export interface RichButton {
+  label: string;
+  actionId: string;
+  value: string;
+  /** Visual hint that this button is the currently-active selection. */
+  selected?: boolean;
+}
+
+/** A grouped row/region of buttons inside a RichMenu. */
+export interface RichMenuSection {
+  title?: string;
+  /** Layout hint; transports may ignore. Defaults to 2. */
+  columns?: 1 | 2 | 3;
+  buttons: RichButton[];
+}
+
+/**
+ * RichMenu — a transport-agnostic menu of buttons.
+ *
+ * Commands return menus as data; transports render them. Telegram maps
+ * sections to inline-keyboard rows; text-only adapters ignore the menu and
+ * fall back to RichResponse.text.
+ */
+export interface RichMenu {
+  title?: string;
+  body?: string;
+  sections: RichMenuSection[];
+}
+
+/**
+ * RichResponse — what a command returns to the gateway.
+ *
+ * `text` is mandatory and is the canonical fallback. `menu` is optional;
+ * transports that can't render menus simply post the text.
+ */
+export interface RichResponse {
+  text: string;
+  menu?: RichMenu;
+}
+
 /** Result of a successful transport pairing */
 export interface PairingResult {
   /** Thread/channel ID for notifications */
@@ -46,6 +93,16 @@ export interface TransportAdapter {
 
   /** Post a message using platform-native formatting */
   postMessage(thread: ChatThread, text: string): Promise<void>;
+
+  /**
+   * Post a rich response (text + optional menu).
+   *
+   * Required on every adapter. Adapters that can't render a menu (text-only
+   * transports) MUST fall back to `postMessage(thread, response.text)`.
+   * Adapters that CAN render a menu MUST also fall back to text on any
+   * transport-level failure (network error, missing platform handle, etc.).
+   */
+  postRich(thread: ChatThread, response: RichResponse): Promise<void>;
 
   /** Register bot commands with the platform */
   registerCommands(token: string): Promise<void>;
