@@ -1,6 +1,6 @@
 {
   "name": "@inceptionstack/roundhouse",
-  "version": "0.5.38",
+  "version": "0.5.40",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
   "license": "MIT",
@@ -26,7 +26,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postpublish": "node scripts/verify-publish.mjs"
   },
   "files": [
     "src/",
