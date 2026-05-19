@@ -16,9 +16,10 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { RichResponse } from "../transports";
 import { buildSelectableMenu } from "../transports";
+import { updatePiSettings } from "../pi-settings";
 
 /** Known model aliases \u2192 Bedrock model IDs */
 export const MODEL_ALIASES: Record<string, { provider: string; model: string; label: string }> = {
@@ -58,11 +59,6 @@ function readSettings(): Record<string, any> {
   } catch {
     return {};
   }
-}
-
-function writeSettings(settings: Record<string, any>): void {
-  mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
 }
 
 function getCurrentModelLabel(settings: Record<string, any>): string {
@@ -112,36 +108,38 @@ export async function handleModel(ctx: ModelCommandContext): Promise<RichRespons
     return buildModelMenu(getCurrentModelLabel(settings));
   }
 
-  return applyModelSelection(target, settings);
+  return applyModelSelection(target);
 }
 
 /**
  * Apply a model selection (used by both `/model <arg>` and the menu callback).
  * Returns a RichResponse with confirmation text.
  */
-export function applyModelSelection(
+export async function applyModelSelection(
   target: string,
-  settings: Record<string, any> | null,
-): RichResponse {
-  if (!settings) settings = readSettings();
-
+): Promise<RichResponse> {
   const resolved = MODEL_ALIASES[target];
   if (!resolved) {
     if (target.includes(".") || target.includes("/")) {
       // Treat as a raw provider/model id passthrough.
+      const settings = readSettings();
       const provider = settings.defaultProvider ?? "amazon-bedrock";
-      settings.defaultModel = target;
-      settings.defaultProvider = provider;
-      writeSettings(settings);
+      await updatePiSettings((s) => ({
+        ...s,
+        defaultProvider: provider,
+        defaultModel: target,
+      }));
       return { text: `\u2705 Model set to: \`${provider}/${target}\`` };
     }
     const aliases = Object.keys(MODEL_ALIASES).join(", ");
     return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
   }
 
-  settings.defaultProvider = resolved.provider;
-  settings.defaultModel = resolved.model;
-  writeSettings(settings);
+  await updatePiSettings((s) => ({
+    ...s,
+    defaultProvider: resolved.provider,
+    defaultModel: resolved.model,
+  }));
 
   console.log(`[roundhouse] /model: switched to ${resolved.provider}/${resolved.model}`);
   return { text: `\u2705 Switched to *${resolved.label}*` };
@@ -151,8 +149,8 @@ export function applyModelSelection(
  * Handle inline-keyboard callback for model selection.
  * Wired from the descriptor's `actions[MODEL_ACTION_ID]`.
  */
-export function handleModelAction(event: { value?: string }): RichResponse | void {
+export async function handleModelAction(event: { value?: string }): Promise<RichResponse | void> {
   const alias = event.value;
   if (!alias || !MODEL_ALIASES[alias]) return;
-  return applyModelSelection(alias, null);
+  return applyModelSelection(alias);
 }

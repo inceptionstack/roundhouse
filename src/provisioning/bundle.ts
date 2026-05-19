@@ -270,15 +270,16 @@ export function provisionExtensionFiles(opts: ProvisionOpts = {}): void {
 
 /**
  * Ensure core extensions are listed in ~/.pi/agent/settings.json packages array.
+ * NOTE: pi-hard-no and pi-branch-enforcer are now opt-in — not auto-added.
+ * This function preserves any existing packages but no longer force-adds the
+ * quality extensions on new setups.
  */
 export function provisionExtensions(opts: ProvisionOpts = {}): void {
   const { log = consoleLog } = opts;
   const settingsPath = resolve(homedir(), ".pi", "agent", "settings.json");
 
-  const coreExtensions = [
-    "npm:@inceptionstack/pi-hard-no",
-    "npm:@inceptionstack/pi-branch-enforcer",
-  ];
+  // coreExtensions is now empty — pi-hard-no and pi-branch-enforcer are opt-in
+  const coreExtensions: string[] = [];
 
   try {
     let settings: Record<string, unknown> = {};

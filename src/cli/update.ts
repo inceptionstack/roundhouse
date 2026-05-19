@@ -7,8 +7,8 @@
 
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
 import { provisionBundle } from "../provisioning/bundle";
+import { updatePiSettings } from "../pi-settings";
 
 const GLOBAL_PI_EXTENSION_PACKAGES = [
   "@inceptionstack/pi-hard-no",
@@ -117,16 +117,18 @@ export async function updateSelf(
   }
 }
 
-export function patchPiSettings(): void {
+export async function patchPiSettings(): Promise<void> {
   try {
-    const settingsPath = `${homedir()}/.pi/agent/settings.json`;
-    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-    const selfPkg = "npm:@inceptionstack/roundhouse";
-    if (!Array.isArray(settings.packages)) settings.packages = [];
-    if (!settings.packages.includes(selfPkg)) {
-      settings.packages.push(selfPkg);
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    }
+    await updatePiSettings((settings) => {
+      const selfPkg = "npm:@inceptionstack/roundhouse";
+      if (!Array.isArray(settings.packages)) settings = { ...settings, packages: [] };
+      const pkgs = [...(settings.packages as string[])];
+      if (!pkgs.includes(selfPkg)) {
+        pkgs.push(selfPkg);
+        return { ...settings, packages: pkgs };
+      }
+      return settings;
+    });
   } catch { /* settings.json may not exist yet — fine, setup will create it */ }
 }
 
@@ -173,7 +175,7 @@ export async function performUpdate(progress: UpdateProgress): Promise<UpdateRes
     console.warn("[roundhouse] bundle provisioning failed:", e instanceof Error ? e.message : e);
   }
 
-  patchPiSettings();
+  await patchPiSettings();
 
   return { action: "updated", currentVersion, latestVersion };
 }

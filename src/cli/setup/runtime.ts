@@ -1,7 +1,7 @@
-import { dirname } from "node:path";
-import { readFile, mkdir } from "node:fs/promises";
-import { atomicWriteJson, execOrFail } from "./helpers";
+import { readFile } from "node:fs/promises";
+import { execOrFail } from "./helpers";
 import { type SetupOptions, type StepLog, PI_SETTINGS_PATH } from "./types";
+import { updatePiSettings } from "../../pi-settings";
 import {
   getAgentDefinition,
   type AgentDefinition,
@@ -19,47 +19,49 @@ export function resolveAgentForSetup(opts: SetupOptions, logger: StepLog): Agent
         existing = JSON.parse(await readFile(PI_SETTINGS_PATH, "utf8"));
       } catch {}
 
-      const settings: Record<string, unknown> = { ...existing };
+      await updatePiSettings((settings) => {
+        // Merge with what we read above (preserves any concurrent writes
+        // since our read — the lock serialises the final RMW).
+        const merged = { ...settings };
 
-      if (ctx.force) {
-        settings.defaultProvider = ctx.provider;
-        settings.defaultModel = ctx.model;
-      } else {
-        if (existing.defaultProvider && existing.defaultProvider !== ctx.provider) {
-          logger.warn(`Pi provider already set to '${existing.defaultProvider}' (keeping, use --force to override)`);
+        if (ctx.force) {
+          merged.defaultProvider = ctx.provider;
+          merged.defaultModel = ctx.model;
         } else {
-          settings.defaultProvider = ctx.provider;
+          if (existing.defaultProvider && existing.defaultProvider !== ctx.provider) {
+            logger.warn(`Pi provider already set to '${existing.defaultProvider}' (keeping, use --force to override)`);
+          } else {
+            merged.defaultProvider = ctx.provider;
+          }
+          if (existing.defaultModel && existing.defaultModel !== ctx.model) {
+            logger.warn(`Pi model already set to '${existing.defaultModel}' (keeping, use --force to override)`);
+          } else {
+            merged.defaultModel = ctx.model;
+          }
         }
-        if (existing.defaultModel && existing.defaultModel !== ctx.model) {
-          logger.warn(`Pi model already set to '${existing.defaultModel}' (keeping, use --force to override)`);
-        } else {
-          settings.defaultModel = ctx.model;
+
+        if (!Array.isArray(merged.packages)) merged.packages = [];
+
+        const pkgs = merged.packages as string[];
+        const selfPkg = "npm:@inceptionstack/roundhouse";
+        const selfIdx = pkgs.indexOf(selfPkg);
+        if (selfIdx !== -1) pkgs.splice(selfIdx, 1);
+
+        // coreExtensions is empty — pi-hard-no and pi-branch-enforcer are now opt-in
+        const coreExtensions: string[] = [];
+        for (const ext of coreExtensions) {
+          if (!pkgs.includes(ext)) pkgs.push(ext);
         }
-      }
 
-      if (!Array.isArray(settings.packages)) settings.packages = [];
+        if (ctx.psst) {
+          const psstPkg = "npm:@miclivs/pi-psst";
+          if (!pkgs.includes(psstPkg)) pkgs.push(psstPkg);
+        }
 
-      const pkgs = settings.packages as string[];
-      const selfPkg = "npm:@inceptionstack/roundhouse";
-      const selfIdx = pkgs.indexOf(selfPkg);
-      if (selfIdx !== -1) pkgs.splice(selfIdx, 1);
+        return merged;
+      });
 
-      const coreExtensions = [
-        "npm:@inceptionstack/pi-hard-no",
-        "npm:@inceptionstack/pi-branch-enforcer",
-      ];
-      for (const ext of coreExtensions) {
-        if (!pkgs.includes(ext)) pkgs.push(ext);
-      }
-
-      if (ctx.psst) {
-        const psstPkg = "npm:@miclivs/pi-psst";
-        if (!pkgs.includes(psstPkg)) pkgs.push(psstPkg);
-      }
-
-      await mkdir(dirname(PI_SETTINGS_PATH), { recursive: true });
-      await atomicWriteJson(PI_SETTINGS_PATH, settings);
-      logger.ok(`~/.pi/agent/settings.json (${settings.defaultProvider}, ${settings.defaultModel})`);
+      logger.ok(`~/.pi/agent/settings.json (${existing.defaultProvider ?? ctx.provider}, ${existing.defaultModel ?? ctx.model})`);
     };
 
     agent.installExtension = async (ext: string) => {
