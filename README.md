@@ -222,6 +222,8 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/doctor` | Run health checks and show system status |
 | `/crons` | Manage scheduled jobs (list, trigger, pause, resume) |
 | `/jobs` | List scheduled jobs (alias for /crons) |
+| `/toggle-quality-inspector` | Toggle pi-hard-no code review on/off |
+| `/toggle-branch-enforcer` | Toggle pi-branch-enforcer guard on/off |
 
 These appear in Telegram's `/` command menu automatically.
 
@@ -253,6 +255,24 @@ When extensions (e.g. code review) queue follow-up work after the agent responds
 - ✅ "All done — waiting for your input." (when processing completes)
 
 Fast operations that complete within 2 seconds show no extra messages.
+
+### Optional extensions
+
+Roundhouse ships with two optional pi extensions that are **not enabled by default** for new setups:
+
+- **pi-hard-no** — Code quality inspector that reviews agent output
+- **pi-branch-enforcer** — Guards against committing to protected branches
+
+These are installed globally by `/update` but must be explicitly enabled:
+
+| Command | Description |
+|---------|-------------|
+| `/toggle-quality-inspector [on\|off]` | Enable/disable pi-hard-no. No arg shows current state + buttons. |
+| `/toggle-branch-enforcer [on\|off]` | Enable/disable pi-branch-enforcer. No arg shows current state + buttons. |
+
+After toggling, run `/restart` for the change to take effect (pi loads extensions at startup).
+
+**Existing setups** that already have these extensions enabled are unaffected — toggling off is opt-in.
 
 ## File attachments
 
