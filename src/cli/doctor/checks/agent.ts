@@ -53,26 +53,43 @@ export const agentChecks: DoctorCheck[] = [
     id: "pi-settings", category: "agent", name: "Pi settings",
     async run() {
       const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
+      let raw: string;
       try {
-        const raw = await readFile(settingsPath, "utf8");
-        const settings = JSON.parse(raw);
-        const model = settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : "not configured";
-        const issues: string[] = [];
-        if (!settings.defaultProvider) issues.push("No defaultProvider set");
-        if (!settings.defaultModel) issues.push("No defaultModel set");
+        raw = await readFile(settingsPath, "utf8");
+      } catch (err: any) {
+        if (err.code === "ENOENT") {
+          return {
+            id: "pi-settings", category: "agent", name: "Pi settings",
+            status: "warn" as const, summary: "not found",
+            details: [`${settingsPath} does not exist`],
+          };
+        }
         return {
           id: "pi-settings", category: "agent", name: "Pi settings",
-          status: issues.length ? "warn" : "pass",
-          summary: issues.length ? `${issues.length} issue(s)` : `model: ${model}`,
-          details: issues.length ? issues : undefined,
-        };
-      } catch {
-        return {
-          id: "pi-settings", category: "agent", name: "Pi settings",
-          status: "warn", summary: "not found",
-          details: [`${settingsPath} does not exist`],
+          status: "fail" as const, summary: `read error: ${err.message}`,
+          details: [`Failed to read ${settingsPath}: ${err.message}`],
         };
       }
+      let settings: any;
+      try {
+        settings = JSON.parse(raw);
+      } catch (parseErr: any) {
+        return {
+          id: "pi-settings", category: "agent", name: "Pi settings",
+          status: "fail" as const, summary: "malformed JSON",
+          details: [`${settingsPath}: ${parseErr.message}`],
+        };
+      }
+      const model = settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : "not configured";
+      const issues: string[] = [];
+      if (!settings.defaultProvider) issues.push("No defaultProvider set");
+      if (!settings.defaultModel) issues.push("No defaultModel set");
+      return {
+        id: "pi-settings", category: "agent", name: "Pi settings",
+        status: issues.length ? "warn" : "pass",
+        summary: issues.length ? `${issues.length} issue(s)` : `model: ${model}`,
+        details: issues.length ? issues : undefined,
+      };
     },
   },
 ];

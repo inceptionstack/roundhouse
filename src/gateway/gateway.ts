@@ -27,6 +27,14 @@ import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command
 import { handleLater } from "./later-command";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
 import {
+  handleToggleQualityInspector,
+  handleToggleBranchEnforcer,
+  handleExtToggleQiAction,
+  handleExtToggleBeAction,
+  EXT_TOGGLE_QI_ACTION_ID,
+  EXT_TOGGLE_BE_ACTION_ID,
+} from "./extension-toggle-command";
+import {
   type CommandDescriptor,
   type CommandInvocation,
   type CommandResult,
@@ -845,6 +853,24 @@ export class Gateway {
           cronScheduler: this.cronScheduler,
           progress: (t, initialText) => this.transport.progress(t, initialText),
         }),
+      },
+      {
+        triggers: ["/toggle-quality-inspector"],
+        stage: "pre-turn",
+        acceptsArgs: true,
+        invoke: ({ text }) => handleToggleQualityInspector({ text }),
+        actions: {
+          [EXT_TOGGLE_QI_ACTION_ID]: (ev) => handleExtToggleQiAction({ value: ev.value }),
+        },
+      },
+      {
+        triggers: ["/toggle-branch-enforcer"],
+        stage: "pre-turn",
+        acceptsArgs: true,
+        invoke: ({ text }) => handleToggleBranchEnforcer({ text }),
+        actions: {
+          [EXT_TOGGLE_BE_ACTION_ID]: (ev) => handleExtToggleBeAction({ value: ev.value }),
+        },
       },
     ];
   }
