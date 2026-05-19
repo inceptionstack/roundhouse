@@ -9,6 +9,7 @@ import {
   provisionUvx,
   provisionMcporterConfig,
   provisionBundle,
+  provisionExtensions,
   SKILLS_DIR,
   SKILLS_REPO,
   type ProvisionLog,
@@ -120,6 +121,63 @@ describe("bundle", () => {
       provisionBundle({ force: false, log });
       const alreadyInstalled = log.messages.filter(m => m.includes("already installed"));
       expect(alreadyInstalled.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe("provisionExtensions", () => {
+    const settingsDir = resolve(homedir(), ".pi", "agent");
+    const settingsPath = resolve(settingsDir, "settings.json");
+    let originalContent: string | null = null;
+
+    beforeEach(() => {
+      try {
+        const { readFileSync } = require("node:fs");
+        originalContent = readFileSync(settingsPath, "utf8");
+      } catch {
+        originalContent = null;
+      }
+    });
+
+    afterEach(() => {
+      if (originalContent !== null) {
+        writeFileSync(settingsPath, originalContent);
+      } else {
+        try { rmSync(settingsPath); } catch {}
+      }
+    });
+
+    it("does NOT auto-add pi-hard-no or pi-branch-enforcer to fresh settings", () => {
+      // Write a minimal settings.json with no packages
+      mkdirSync(settingsDir, { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "test" }, null, 2));
+
+      const log = createMockLog();
+      provisionExtensions({ log });
+
+      const { readFileSync } = require("node:fs");
+      const result = JSON.parse(readFileSync(settingsPath, "utf8"));
+      const pkgs = result.packages ?? [];
+      expect(pkgs).not.toContain("npm:@inceptionstack/pi-hard-no");
+      expect(pkgs).not.toContain("npm:@inceptionstack/pi-branch-enforcer");
+    });
+
+    it("does NOT strip pi-hard-no or pi-branch-enforcer from existing settings", () => {
+      // Write settings.json WITH both extensions already present
+      mkdirSync(settingsDir, { recursive: true });
+      const existing = {
+        defaultProvider: "test",
+        packages: ["npm:@inceptionstack/pi-hard-no", "npm:@inceptionstack/pi-branch-enforcer", "npm:other"],
+      };
+      writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+
+      const log = createMockLog();
+      provisionExtensions({ log });
+
+      const { readFileSync } = require("node:fs");
+      const result = JSON.parse(readFileSync(settingsPath, "utf8"));
+      expect(result.packages).toContain("npm:@inceptionstack/pi-hard-no");
+      expect(result.packages).toContain("npm:@inceptionstack/pi-branch-enforcer");
+      expect(result.packages).toContain("npm:other");
     });
   });
 });
