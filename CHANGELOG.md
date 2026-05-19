@@ -2,7 +2,23 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
-## [0.5.40] — 2026-05-16
+## [0.5.40] — 2026-05-19
+
+### Added
+- **Optional quality extensions.** `pi-hard-no` (code quality inspector) and
+  `pi-branch-enforcer` are now **opt-in for new setups**. Existing setups that
+  already have them enabled are unaffected.
+- **Toggle commands:** `/toggle-quality-inspector [on|off]` and
+  `/toggle-branch-enforcer [on|off]` let users enable/disable these extensions
+  from chat. No argument shows current state with inline keyboard buttons.
+  Idempotent setter semantics (safe for delivery dups).
+- **Shared `pi-settings` module** (`src/pi-settings.ts`): centralises all
+  `~/.pi/agent/settings.json` read/write/update logic with atomic writes,
+  per-process queue + on-disk lockfile (`proper-lockfile`), and
+  `MalformedPiSettingsError` on parse failure. All 4 existing writers migrated.
+- **Doctor check improvement:** `pi-settings` check now distinguishes
+  ENOENT (warn, “not found”) from SyntaxError (fail, “malformed JSON” +
+  parse error message).
 
 ### Changed
 - **Refactor:** Renamed `/stop` command to `/cancel` for semantic clarity.
