@@ -15,9 +15,18 @@ import { resolve } from "node:path";
 import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo, MessageContext } from "../../types.js";
 import { ROUNDHOUSE_VERSION } from "../../config.js";
 import { BaseAdapter } from "../base-adapter.js";
-import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
+import { spawnKiroCli, shutdownProcess, getKiroCliVersion, AcpMethod, AcpEvent, SessionUpdateKind, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
+
+// kiro emits context usage as a percentage and does not advertise the
+// active model's window size in the ACP protocol. We approximate the window
+// at 200k so SessionEntry.contextTokens/contextWindow stay populated and the
+// memory pressure classifier (which short-circuits when either is null) can
+// still trigger compaction. This is correct for 200k-window models and a
+// best-effort approximation for others — when kiro adds a window field,
+// thread it through here instead.
+const KIRO_DEFAULT_CONTEXT_WINDOW = 200_000;
 
 // ── Types ────────────────────────────────────────────
 
@@ -141,7 +150,7 @@ class KiroAdapter extends BaseAdapter {
   async abort(threadId: string): Promise<void> {
     const session = this.store.get(threadId);
     if (!session || !this.mainProcess) return;
-    await this.mainProcess.client.call("session/cancel", { sessionId: session.sessionId }).catch(() => {});
+    await this.mainProcess.client.call(AcpMethod.SessionCancel, { sessionId: session.sessionId }).catch(() => {});
   }
 
   async restart(threadId: string): Promise<void> {
@@ -154,7 +163,7 @@ class KiroAdapter extends BaseAdapter {
     if (!session || !this.mainProcess) return null;
 
     const before = session.contextTokens ?? 0;
-    await this.mainProcess.client.call("_kiro.dev/commands/execute", {
+    await this.mainProcess.client.call(AcpMethod.KiroCommandsExecute, {
       sessionId: session.sessionId,
       command: "/compact",
     });
@@ -189,10 +198,20 @@ class KiroAdapter extends BaseAdapter {
   private async ensureProcess(): Promise<AcpProcess> {
     if (this.mainProcess && !this.mainProcess.client.isClosed) return this.mainProcess;
 
-    this.mainProcess = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+    const acpProc = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+    this.mainProcess = acpProc;
 
-    await this.mainProcess.client.call<InitializeResult>("initialize", {
-      protocolVersion: "1.0",
+    // Capture acpProc in the closure so the listener always reports stderr
+    // for *this* process even if `this.mainProcess` is reassigned later.
+    acpProc.proc.on("exit", (code, signal) => {
+      if (acpProc.stderr.length) {
+        console.error(`[kiro] process exited code=${code} signal=${signal}; stderr:\n${acpProc.stderr.join("")}`);
+      }
+    });
+
+    await acpProc.client.call<InitializeResult>(AcpMethod.Initialize, {
+      protocolVersion: 1,
+      clientCapabilities: { terminal: true },
       clientInfo: { name: "roundhouse", version: ROUNDHOUSE_VERSION },
     });
 
@@ -207,12 +226,12 @@ class KiroAdapter extends BaseAdapter {
     const existing = this.store.get(threadId);
     if (existing) return existing;
 
-    const proc = await this.ensureProcess();
+    let proc = await this.ensureProcess();
 
     const persistedId = this.store.loadPersistedSessionId(threadId);
     if (persistedId) {
       try {
-        await proc.client.call("session/load", { sessionId: persistedId });
+        await proc.client.call(AcpMethod.SessionLoad, { sessionId: persistedId, cwd: this.config.cwd, mcpServers: [] });
         const entry: SessionEntry = {
           sessionId: persistedId,
           threadId,
@@ -226,11 +245,19 @@ class KiroAdapter extends BaseAdapter {
         this.store.set(threadId, entry);
         return entry;
       } catch {
-        // Session no longer valid — create new
+        // Session no longer valid. kiro-cli sometimes responds to an unknown
+        // sessionId by exiting (rather than returning a JSON-RPC error), which
+        // closes the AcpClient. Clear the stale persisted id and respawn before
+        // falling through to session/new.
+        this.store.clearPersistedSessionId(threadId);
+        if (this.mainProcess?.client.isClosed) {
+          this.mainProcess = null;
+          proc = await this.ensureProcess();
+        }
       }
     }
 
-    const result = await proc.client.call<SessionNewResult>("session/new", {});
+    const result = await proc.client.call<SessionNewResult>(AcpMethod.SessionNew, { cwd: this.config.cwd, mcpServers: [] });
     const entry: SessionEntry = {
       sessionId: result.sessionId,
       threadId,
@@ -255,44 +282,40 @@ class KiroAdapter extends BaseAdapter {
       const proc = this.mainProcess!;
       const text = this.formatMessage(message);
 
-      const responsePromise = proc.client.call<void>("session/prompt", {
-        sessionId: session.sessionId,
-        text,
-      });
-
       let fullText = "";
 
-      const onTextChunk = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          fullText += params.text ?? "";
-        }
-      };
-
-      const onPermission = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          proc.client.notify("permission/response", {
-            tool_call_id: params.tool_call_id,
-            decision: "approved",
-          });
-        }
-      };
-
       const onSessionUpdate = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+        if (params?.sessionId !== session.sessionId) return;
+        const update = params.update;
+        if (!update) return;
+        if (update.sessionUpdate === SessionUpdateKind.AgentMessageChunk && update.content?.text) {
+          fullText += update.content.text;
         }
       };
 
-      proc.client.on("text_chunk", onTextChunk);
-      proc.client.on("permission_request", onPermission);
-      proc.client.on("session/update", onSessionUpdate);
+      const onMetadata = (params: any) => {
+        if (params?.sessionId !== session.sessionId) return;
+        const pct = params.contextUsagePercentage;
+        if (pct != null) {
+          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
+          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
+        }
+      };
+
+      // session/update is the canonical channel; _kiro.dev/session/update
+      // multiplexes a different set of update kinds (e.g. tool_call_chunk)
+      // we don't currently consume — don't subscribe twice.
+      proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       try {
-        await responsePromise;
+        await proc.client.call<any>(AcpMethod.SessionPrompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text }],
+        }, 0);
       } finally {
-        proc.client.off("text_chunk", onTextChunk);
-        proc.client.off("permission_request", onPermission);
-        proc.client.off("session/update", onSessionUpdate);
+        proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
 
       return { text: fullText };
@@ -319,59 +342,56 @@ class KiroAdapter extends BaseAdapter {
         resolveWait?.();
       }
 
-      const onTextChunk = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "text_delta", text: params.text ?? "" });
-        }
-      };
-
-      const onToolCall = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "tool_start", toolName: normalizeToolName(params.title ?? params.tool_name ?? ""), toolCallId: params.tool_call_id });
-        }
-      };
-
-      const onToolResult = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "tool_end", toolName: normalizeToolName(params.tool_name ?? ""), toolCallId: params.tool_call_id, isError: (params.exit_code ?? 0) !== 0 });
-        }
-      };
-
-      const onPermission = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          proc.client.notify("permission/response", {
-            tool_call_id: params.tool_call_id,
-            decision: "approved",
-          });
-        }
-      };
-
-      const onComplete = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          if (params.stop_reason === "end_turn") {
-            push({ type: "turn_end" });
-          }
-          push({ type: "agent_end" });
-          done = true;
-          resolveWait?.();
-        }
-      };
-
       const onSessionUpdate = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+        if (params?.sessionId !== session.sessionId) return;
+        const update = params.update;
+        if (!update) return;
+        switch (update.sessionUpdate) {
+          case SessionUpdateKind.AgentMessageChunk:
+            if (update.content?.text) {
+              push({ type: "text_delta", text: update.content.text });
+            }
+            break;
+          case SessionUpdateKind.ToolCall:
+            push({ type: "tool_start", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "" });
+            break;
+          case SessionUpdateKind.ToolCallUpdate: {
+            // tool_call_update arrives multiple times per call — for in-progress
+            // status changes and for the terminal completed/failed transition.
+            // Only the terminal one closes the tool lifecycle in our gateway.
+            const status = update.status;
+            if (status === "completed" || status === "failed") {
+              push({
+                type: "tool_end",
+                toolName: normalizeToolName(update.title ?? ""),
+                toolCallId: update.toolCallId ?? "",
+                isError: status === "failed",
+              });
+            }
+            break;
+          }
         }
       };
 
-      proc.client.on("text_chunk", onTextChunk);
-      proc.client.on("tool_call", onToolCall);
-      proc.client.on("tool_result", onToolResult);
-      proc.client.on("permission_request", onPermission);
-      proc.client.on("complete", onComplete);
-      proc.client.on("session/update", onSessionUpdate);
+      const onMetadata = (params: any) => {
+        if (params?.sessionId !== session.sessionId) return;
+        const pct = params.contextUsagePercentage;
+        if (pct != null) {
+          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
+          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
+        }
+      };
+
+      proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       // Fire the prompt (don't await — events stream in)
-      proc.client.call("session/prompt", { sessionId: session.sessionId, text }).catch((err) => {
+      proc.client.call<any>(AcpMethod.SessionPrompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] }, 0).then(() => {
+        push({ type: "turn_end" });
+        push({ type: "agent_end" });
+        done = true;
+        resolveWait?.();
+      }).catch((err) => {
         push({ type: "agent_end" });
         done = true;
         promptError = err;
@@ -389,12 +409,8 @@ class KiroAdapter extends BaseAdapter {
         }
         if (promptError) throw promptError;
       } finally {
-        proc.client.off("text_chunk", onTextChunk);
-        proc.client.off("tool_call", onToolCall);
-        proc.client.off("tool_result", onToolResult);
-        proc.client.off("permission_request", onPermission);
-        proc.client.off("complete", onComplete);
-        proc.client.off("session/update", onSessionUpdate);
+        proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
     } finally {
       this.store.markInFlight(threadId, false);

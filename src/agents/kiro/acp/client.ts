@@ -11,7 +11,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 export interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export class AcpClient extends EventEmitter {
@@ -31,18 +31,19 @@ export class AcpClient extends EventEmitter {
   }
 
   /** Send a JSON-RPC request and await its response. */
-  async call<T = unknown>(method: string, params?: unknown): Promise<T> {
+  async call<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     if (this.closed) throw new Error("ACP client is closed");
 
     const id = this.nextId++;
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} });
     this.proc.stdin.write(payload + "\n");
 
+    const timeout = timeoutMs ?? this.requestTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = timeout > 0 ? setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`ACP call "${method}" timed out after ${this.requestTimeoutMs}ms`));
-      }, this.requestTimeoutMs);
+        reject(new Error(`ACP call "${method}" timed out after ${timeout}ms`));
+      }, timeout) : null;
 
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
     });
@@ -90,7 +91,7 @@ export class AcpClient extends EventEmitter {
     // Response to a pending request
     if ("id" in msg && typeof msg.id === "number" && this.pending.has(msg.id)) {
       const { resolve, reject, timer } = this.pending.get(msg.id)!;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       this.pending.delete(msg.id);
       if (msg.error) reject(msg.error);
       else resolve(msg.result);
@@ -109,7 +110,7 @@ export class AcpClient extends EventEmitter {
 
   private rejectAll(error: Error): void {
     for (const [id, { reject, timer }] of this.pending) {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(error);
     }
     this.pending.clear();
