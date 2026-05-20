@@ -192,7 +192,8 @@ class KiroAdapter extends BaseAdapter {
     this.mainProcess = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
 
     await this.mainProcess.client.call<InitializeResult>("initialize", {
-      protocolVersion: "1.0",
+      protocolVersion: 1,
+      clientCapabilities: { terminal: true },
       clientInfo: { name: "roundhouse", version: ROUNDHOUSE_VERSION },
     });
 
@@ -230,7 +231,7 @@ class KiroAdapter extends BaseAdapter {
       }
     }
 
-    const result = await proc.client.call<SessionNewResult>("session/new", {});
+    const result = await proc.client.call<SessionNewResult>("session/new", { cwd: this.config.cwd, mcpServers: [] });
     const entry: SessionEntry = {
       sessionId: result.sessionId,
       threadId,
@@ -255,44 +256,40 @@ class KiroAdapter extends BaseAdapter {
       const proc = this.mainProcess!;
       const text = this.formatMessage(message);
 
-      const responsePromise = proc.client.call<void>("session/prompt", {
-        sessionId: session.sessionId,
-        text,
-      });
-
       let fullText = "";
 
-      const onTextChunk = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          fullText += params.text ?? "";
-        }
-      };
-
-      const onPermission = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          proc.client.notify("permission/response", {
-            tool_call_id: params.tool_call_id,
-            decision: "approved",
-          });
-        }
-      };
-
       const onSessionUpdate = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+        if (params?.sessionId !== session.sessionId) return;
+        const update = params.update;
+        if (!update) return;
+        if (update.sessionUpdate === "agent_message_chunk" && update.content?.text) {
+          fullText += update.content.text;
         }
       };
 
-      proc.client.on("text_chunk", onTextChunk);
-      proc.client.on("permission_request", onPermission);
+      const onMetadata = (params: any) => {
+        if (params?.sessionId !== session.sessionId) return;
+        const pct = params.contextUsagePercentage;
+        if (pct != null) {
+          const window = 200000;
+          const tokens = Math.round((pct / 100) * window);
+          this.store.updateContext(threadId, tokens, window, params.model ?? null);
+        }
+      };
+
       proc.client.on("session/update", onSessionUpdate);
+      proc.client.on("_kiro.dev/session/update", onSessionUpdate);
+      proc.client.on("_kiro.dev/metadata", onMetadata);
 
       try {
-        await responsePromise;
+        await proc.client.call<any>("session/prompt", {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text }],
+        });
       } finally {
-        proc.client.off("text_chunk", onTextChunk);
-        proc.client.off("permission_request", onPermission);
         proc.client.off("session/update", onSessionUpdate);
+        proc.client.off("_kiro.dev/session/update", onSessionUpdate);
+        proc.client.off("_kiro.dev/metadata", onMetadata);
       }
 
       return { text: fullText };
@@ -319,59 +316,46 @@ class KiroAdapter extends BaseAdapter {
         resolveWait?.();
       }
 
-      const onTextChunk = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "text_delta", text: params.text ?? "" });
-        }
-      };
-
-      const onToolCall = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "tool_start", toolName: normalizeToolName(params.title ?? params.tool_name ?? ""), toolCallId: params.tool_call_id });
-        }
-      };
-
-      const onToolResult = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          push({ type: "tool_end", toolName: normalizeToolName(params.tool_name ?? ""), toolCallId: params.tool_call_id, isError: (params.exit_code ?? 0) !== 0 });
-        }
-      };
-
-      const onPermission = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          proc.client.notify("permission/response", {
-            tool_call_id: params.tool_call_id,
-            decision: "approved",
-          });
-        }
-      };
-
-      const onComplete = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          if (params.stop_reason === "end_turn") {
-            push({ type: "turn_end" });
-          }
-          push({ type: "agent_end" });
-          done = true;
-          resolveWait?.();
-        }
-      };
-
       const onSessionUpdate = (params: any) => {
-        if (params?.sessionId === session.sessionId) {
-          this.store.updateContext(threadId, params.context_tokens ?? null, params.context_window ?? null, params.model);
+        if (params?.sessionId !== session.sessionId) return;
+        const update = params.update;
+        if (!update) return;
+        switch (update.sessionUpdate) {
+          case "agent_message_chunk":
+            if (update.content?.text) {
+              push({ type: "text_delta", text: update.content.text });
+            }
+            break;
+          case "tool_call":
+            push({ type: "tool_start", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "" });
+            break;
+          case "tool_call_update":
+            push({ type: "tool_end", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "", isError: false });
+            break;
         }
       };
 
-      proc.client.on("text_chunk", onTextChunk);
-      proc.client.on("tool_call", onToolCall);
-      proc.client.on("tool_result", onToolResult);
-      proc.client.on("permission_request", onPermission);
-      proc.client.on("complete", onComplete);
+      const onMetadata = (params: any) => {
+        if (params?.sessionId !== session.sessionId) return;
+        const pct = params.contextUsagePercentage;
+        if (pct != null) {
+          const window = 200000;
+          const tokens = Math.round((pct / 100) * window);
+          this.store.updateContext(threadId, tokens, window, params.model ?? null);
+        }
+      };
+
       proc.client.on("session/update", onSessionUpdate);
+      proc.client.on("_kiro.dev/session/update", onSessionUpdate);
+      proc.client.on("_kiro.dev/metadata", onMetadata);
 
       // Fire the prompt (don't await — events stream in)
-      proc.client.call("session/prompt", { sessionId: session.sessionId, text }).catch((err) => {
+      proc.client.call<any>("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text }] }).then(() => {
+        push({ type: "turn_end" });
+        push({ type: "agent_end" });
+        done = true;
+        resolveWait?.();
+      }).catch((err) => {
         push({ type: "agent_end" });
         done = true;
         promptError = err;
@@ -389,12 +373,9 @@ class KiroAdapter extends BaseAdapter {
         }
         if (promptError) throw promptError;
       } finally {
-        proc.client.off("text_chunk", onTextChunk);
-        proc.client.off("tool_call", onToolCall);
-        proc.client.off("tool_result", onToolResult);
-        proc.client.off("permission_request", onPermission);
-        proc.client.off("complete", onComplete);
         proc.client.off("session/update", onSessionUpdate);
+        proc.client.off("_kiro.dev/session/update", onSessionUpdate);
+        proc.client.off("_kiro.dev/metadata", onMetadata);
       }
     } finally {
       this.store.markInFlight(threadId, false);

@@ -31,7 +31,7 @@ export interface AcpProcess {
 export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
   const { agentName, cwd, env, maxStderrBytes = 1_048_576 } = opts;
 
-  const proc = spawn("kiro-cli", ["chat", "--agent", agentName, "--acp"], {
+  const proc = spawn("kiro-cli", ["acp", "--agent", agentName], {
     cwd,
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
