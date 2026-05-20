@@ -15,7 +15,7 @@ import { resolve } from "node:path";
 import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo, MessageContext } from "../../types.js";
 import { ROUNDHOUSE_VERSION } from "../../config.js";
 import { BaseAdapter } from "../base-adapter.js";
-import { spawnKiroCli, shutdownProcess, getKiroCliVersion, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
+import { spawnKiroCli, shutdownProcess, getKiroCliVersion, AcpMethod, AcpEvent, SessionUpdateKind, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
 
@@ -141,7 +141,7 @@ class KiroAdapter extends BaseAdapter {
   async abort(threadId: string): Promise<void> {
     const session = this.store.get(threadId);
     if (!session || !this.mainProcess) return;
-    await this.mainProcess.client.call("session/cancel", { sessionId: session.sessionId }).catch(() => {});
+    await this.mainProcess.client.call(AcpMethod.SessionCancel, { sessionId: session.sessionId }).catch(() => {});
   }
 
   async restart(threadId: string): Promise<void> {
@@ -154,7 +154,7 @@ class KiroAdapter extends BaseAdapter {
     if (!session || !this.mainProcess) return null;
 
     const before = session.contextTokens ?? 0;
-    await this.mainProcess.client.call("_kiro.dev/commands/execute", {
+    await this.mainProcess.client.call(AcpMethod.KiroCommandsExecute, {
       sessionId: session.sessionId,
       command: "/compact",
     });
@@ -189,15 +189,18 @@ class KiroAdapter extends BaseAdapter {
   private async ensureProcess(): Promise<AcpProcess> {
     if (this.mainProcess && !this.mainProcess.client.isClosed) return this.mainProcess;
 
-    this.mainProcess = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+    const acpProc = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+    this.mainProcess = acpProc;
 
-    this.mainProcess.proc.on("exit", (code, signal) => {
-      if (this.mainProcess?.stderr.length) {
-        console.error(`[kiro] process exited code=${code} signal=${signal}; stderr:\n${this.mainProcess.stderr.join("")}`);
+    // Capture acpProc in the closure so the listener always reports stderr
+    // for *this* process even if `this.mainProcess` is reassigned later.
+    acpProc.proc.on("exit", (code, signal) => {
+      if (acpProc.stderr.length) {
+        console.error(`[kiro] process exited code=${code} signal=${signal}; stderr:\n${acpProc.stderr.join("")}`);
       }
     });
 
-    await this.mainProcess.client.call<InitializeResult>("initialize", {
+    await acpProc.client.call<InitializeResult>(AcpMethod.Initialize, {
       protocolVersion: 1,
       clientCapabilities: { terminal: true },
       clientInfo: { name: "roundhouse", version: ROUNDHOUSE_VERSION },
@@ -219,7 +222,7 @@ class KiroAdapter extends BaseAdapter {
     const persistedId = this.store.loadPersistedSessionId(threadId);
     if (persistedId) {
       try {
-        await proc.client.call("session/load", { sessionId: persistedId });
+        await proc.client.call(AcpMethod.SessionLoad, { sessionId: persistedId });
         const entry: SessionEntry = {
           sessionId: persistedId,
           threadId,
@@ -245,7 +248,7 @@ class KiroAdapter extends BaseAdapter {
       }
     }
 
-    const result = await proc.client.call<SessionNewResult>("session/new", { cwd: this.config.cwd, mcpServers: [] });
+    const result = await proc.client.call<SessionNewResult>(AcpMethod.SessionNew, { cwd: this.config.cwd, mcpServers: [] });
     const entry: SessionEntry = {
       sessionId: result.sessionId,
       threadId,
@@ -276,7 +279,7 @@ class KiroAdapter extends BaseAdapter {
         if (params?.sessionId !== session.sessionId) return;
         const update = params.update;
         if (!update) return;
-        if (update.sessionUpdate === "agent_message_chunk" && update.content?.text) {
+        if (update.sessionUpdate === SessionUpdateKind.AgentMessageChunk && update.content?.text) {
           fullText += update.content.text;
         }
       };
@@ -291,19 +294,19 @@ class KiroAdapter extends BaseAdapter {
         }
       };
 
-      proc.client.on("session/update", onSessionUpdate);
-      proc.client.on("_kiro.dev/session/update", onSessionUpdate);
-      proc.client.on("_kiro.dev/metadata", onMetadata);
+      proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroSessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       try {
-        await proc.client.call<any>("session/prompt", {
+        await proc.client.call<any>(AcpMethod.SessionPrompt, {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text }],
         }, 0);
       } finally {
-        proc.client.off("session/update", onSessionUpdate);
-        proc.client.off("_kiro.dev/session/update", onSessionUpdate);
-        proc.client.off("_kiro.dev/metadata", onMetadata);
+        proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroSessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
 
       return { text: fullText };
@@ -335,15 +338,15 @@ class KiroAdapter extends BaseAdapter {
         const update = params.update;
         if (!update) return;
         switch (update.sessionUpdate) {
-          case "agent_message_chunk":
+          case SessionUpdateKind.AgentMessageChunk:
             if (update.content?.text) {
               push({ type: "text_delta", text: update.content.text });
             }
             break;
-          case "tool_call":
+          case SessionUpdateKind.ToolCall:
             push({ type: "tool_start", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "" });
             break;
-          case "tool_call_update":
+          case SessionUpdateKind.ToolCallUpdate:
             push({ type: "tool_end", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "", isError: false });
             break;
         }
@@ -359,12 +362,12 @@ class KiroAdapter extends BaseAdapter {
         }
       };
 
-      proc.client.on("session/update", onSessionUpdate);
-      proc.client.on("_kiro.dev/session/update", onSessionUpdate);
-      proc.client.on("_kiro.dev/metadata", onMetadata);
+      proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroSessionUpdate, onSessionUpdate);
+      proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       // Fire the prompt (don't await — events stream in)
-      proc.client.call<any>("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text }] }, 0).then(() => {
+      proc.client.call<any>(AcpMethod.SessionPrompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] }, 0).then(() => {
         push({ type: "turn_end" });
         push({ type: "agent_end" });
         done = true;
@@ -387,9 +390,9 @@ class KiroAdapter extends BaseAdapter {
         }
         if (promptError) throw promptError;
       } finally {
-        proc.client.off("session/update", onSessionUpdate);
-        proc.client.off("_kiro.dev/session/update", onSessionUpdate);
-        proc.client.off("_kiro.dev/metadata", onMetadata);
+        proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroSessionUpdate, onSessionUpdate);
+        proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
     } finally {
       this.store.markInFlight(threadId, false);
