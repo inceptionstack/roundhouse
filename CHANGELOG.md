@@ -2,6 +2,49 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.5.41] — 2026-05-20
+
+### Fixed
+- **Kiro adapter ACP protocol compatibility (kiro-cli 2.x).** The adapter
+  was wired against an older ACP shape and failed end-to-end against
+  current kiro-cli. Symptoms: `kiro-cli exited with code 0` on first
+  prompt, `ACP call timed out after 60000ms` mid-turn, and
+  `ACP client is closed` on the second message.
+- **Spawn:** invoke `kiro-cli acp --agent <name> --trust-all-tools`
+  (kiro-cli 2.x moved ACP to a top-level subcommand and now requires
+  pre-approved tools to avoid blocking on permission requests).
+- **Initialize:** send `protocolVersion: 1` (integer, not string `"1.0"`)
+  and `clientCapabilities: { terminal: true }`.
+- **session/new and session/load:** include required `cwd` and
+  `mcpServers` params.
+- **session/prompt:** use the `prompt` field with content blocks
+  (`[{ type: "text", text }]`) and pass `timeout=0` so long agent turns
+  with tool use aren't killed at 60s.
+- **Stream events:** subscribe to `session/update` only and discriminate
+  on `update.sessionUpdate`; emit `tool_end` only on terminal
+  `completed`/`failed` statuses (with `isError` derived from status)
+  instead of every `tool_call_update`.
+- **Stale persisted session id recovery.** kiro-cli responds to an
+  unknown sessionId in `session/load` by exiting cleanly rather than
+  returning a JSON-RPC error, which closed the AcpClient and left the
+  next prompt with no live process. The adapter now clears the stale
+  persisted id and respawns kiro-cli before falling through to
+  `session/new`.
+- **Exit-listener closure capture.** The ACP exit listener captured
+  `this.mainProcess` instead of the spawn-time `AcpProcess`, so after a
+  respawn it would log stderr from the wrong process. The listener now
+  binds the process in its closure.
+
+### Internal
+- New `src/agents/kiro/acp/methods.ts` centralizing JSON-RPC method
+  names, notification names, and `session/update` discriminator values
+  (`AcpMethod`, `AcpEvent`, `SessionUpdateKind`). Protocol revs touch
+  one file.
+- New `KIRO_DEFAULT_CONTEXT_WINDOW = 200_000` constant in
+  `kiro-adapter.ts` with a comment explaining why we approximate when
+  kiro emits percent-only metadata, and what to replace it with when
+  kiro exposes a window field.
+
 ## [0.5.40] — 2026-05-16
 
 ### Changed
