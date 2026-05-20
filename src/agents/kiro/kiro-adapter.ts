@@ -19,6 +19,15 @@ import { spawnKiroCli, shutdownProcess, getKiroCliVersion, AcpMethod, AcpEvent, 
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
 
+// kiro emits context usage as a percentage and does not advertise the
+// active model's window size in the ACP protocol. We approximate the window
+// at 200k so SessionEntry.contextTokens/contextWindow stay populated and the
+// memory pressure classifier (which short-circuits when either is null) can
+// still trigger compaction. This is correct for 200k-window models and a
+// best-effort approximation for others — when kiro adds a window field,
+// thread it through here instead.
+const KIRO_DEFAULT_CONTEXT_WINDOW = 200_000;
+
 // ── Types ────────────────────────────────────────────
 
 interface KiroAdapterConfig {
@@ -222,7 +231,7 @@ class KiroAdapter extends BaseAdapter {
     const persistedId = this.store.loadPersistedSessionId(threadId);
     if (persistedId) {
       try {
-        await proc.client.call(AcpMethod.SessionLoad, { sessionId: persistedId });
+        await proc.client.call(AcpMethod.SessionLoad, { sessionId: persistedId, cwd: this.config.cwd, mcpServers: [] });
         const entry: SessionEntry = {
           sessionId: persistedId,
           threadId,
@@ -288,14 +297,15 @@ class KiroAdapter extends BaseAdapter {
         if (params?.sessionId !== session.sessionId) return;
         const pct = params.contextUsagePercentage;
         if (pct != null) {
-          const window = 200000;
-          const tokens = Math.round((pct / 100) * window);
-          this.store.updateContext(threadId, tokens, window, params.model ?? null);
+          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
+          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
         }
       };
 
+      // session/update is the canonical channel; _kiro.dev/session/update
+      // multiplexes a different set of update kinds (e.g. tool_call_chunk)
+      // we don't currently consume — don't subscribe twice.
       proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
-      proc.client.on(AcpEvent.KiroSessionUpdate, onSessionUpdate);
       proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       try {
@@ -305,7 +315,6 @@ class KiroAdapter extends BaseAdapter {
         }, 0);
       } finally {
         proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
-        proc.client.off(AcpEvent.KiroSessionUpdate, onSessionUpdate);
         proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
 
@@ -346,9 +355,21 @@ class KiroAdapter extends BaseAdapter {
           case SessionUpdateKind.ToolCall:
             push({ type: "tool_start", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "" });
             break;
-          case SessionUpdateKind.ToolCallUpdate:
-            push({ type: "tool_end", toolName: normalizeToolName(update.title ?? ""), toolCallId: update.toolCallId ?? "", isError: false });
+          case SessionUpdateKind.ToolCallUpdate: {
+            // tool_call_update arrives multiple times per call — for in-progress
+            // status changes and for the terminal completed/failed transition.
+            // Only the terminal one closes the tool lifecycle in our gateway.
+            const status = update.status;
+            if (status === "completed" || status === "failed") {
+              push({
+                type: "tool_end",
+                toolName: normalizeToolName(update.title ?? ""),
+                toolCallId: update.toolCallId ?? "",
+                isError: status === "failed",
+              });
+            }
             break;
+          }
         }
       };
 
@@ -356,14 +377,12 @@ class KiroAdapter extends BaseAdapter {
         if (params?.sessionId !== session.sessionId) return;
         const pct = params.contextUsagePercentage;
         if (pct != null) {
-          const window = 200000;
-          const tokens = Math.round((pct / 100) * window);
-          this.store.updateContext(threadId, tokens, window, params.model ?? null);
+          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
+          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
         }
       };
 
       proc.client.on(AcpEvent.SessionUpdate, onSessionUpdate);
-      proc.client.on(AcpEvent.KiroSessionUpdate, onSessionUpdate);
       proc.client.on(AcpEvent.KiroMetadata, onMetadata);
 
       // Fire the prompt (don't await — events stream in)
@@ -391,7 +410,6 @@ class KiroAdapter extends BaseAdapter {
         if (promptError) throw promptError;
       } finally {
         proc.client.off(AcpEvent.SessionUpdate, onSessionUpdate);
-        proc.client.off(AcpEvent.KiroSessionUpdate, onSessionUpdate);
         proc.client.off(AcpEvent.KiroMetadata, onMetadata);
       }
     } finally {

@@ -18,7 +18,11 @@ export const AcpMethod = {
 /** Notifications the agent emits to the client. */
 export const AcpEvent = {
   SessionUpdate: "session/update",
-  /** Internal kiro variant emitted alongside `session/update` for some payloads. */
+  /**
+   * Internal kiro variant. Multiplexes a different set of update kinds
+   * (e.g. `tool_call_chunk`) than `session/update`, NOT a mirror — subscribing
+   * to both would route the same handler over disjoint payloads.
+   */
   KiroSessionUpdate: "_kiro.dev/session/update",
   KiroMetadata: "_kiro.dev/metadata",
 } as const;
