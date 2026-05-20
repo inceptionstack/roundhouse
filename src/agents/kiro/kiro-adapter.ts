@@ -285,7 +285,7 @@ class KiroAdapter extends BaseAdapter {
         await proc.client.call<any>("session/prompt", {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text }],
-        });
+        }, 0);
       } finally {
         proc.client.off("session/update", onSessionUpdate);
         proc.client.off("_kiro.dev/session/update", onSessionUpdate);
@@ -350,7 +350,7 @@ class KiroAdapter extends BaseAdapter {
       proc.client.on("_kiro.dev/metadata", onMetadata);
 
       // Fire the prompt (don't await — events stream in)
-      proc.client.call<any>("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text }] }).then(() => {
+      proc.client.call<any>("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text }] }, 0).then(() => {
         push({ type: "turn_end" });
         push({ type: "agent_end" });
         done = true;
