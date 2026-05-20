@@ -191,6 +191,12 @@ class KiroAdapter extends BaseAdapter {
 
     this.mainProcess = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
 
+    this.mainProcess.proc.on("exit", (code, signal) => {
+      if (this.mainProcess?.stderr.length) {
+        console.error(`[kiro] process exited code=${code} signal=${signal}; stderr:\n${this.mainProcess.stderr.join("")}`);
+      }
+    });
+
     await this.mainProcess.client.call<InitializeResult>("initialize", {
       protocolVersion: 1,
       clientCapabilities: { terminal: true },
@@ -208,7 +214,7 @@ class KiroAdapter extends BaseAdapter {
     const existing = this.store.get(threadId);
     if (existing) return existing;
 
-    const proc = await this.ensureProcess();
+    let proc = await this.ensureProcess();
 
     const persistedId = this.store.loadPersistedSessionId(threadId);
     if (persistedId) {
@@ -227,7 +233,15 @@ class KiroAdapter extends BaseAdapter {
         this.store.set(threadId, entry);
         return entry;
       } catch {
-        // Session no longer valid — create new
+        // Session no longer valid. kiro-cli sometimes responds to an unknown
+        // sessionId by exiting (rather than returning a JSON-RPC error), which
+        // closes the AcpClient. Clear the stale persisted id and respawn before
+        // falling through to session/new.
+        this.store.clearPersistedSessionId(threadId);
+        if (this.mainProcess?.client.isClosed) {
+          this.mainProcess = null;
+          proc = await this.ensureProcess();
+        }
       }
     }
 

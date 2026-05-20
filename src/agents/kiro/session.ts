@@ -6,7 +6,7 @@
  */
 
 import { resolve } from "node:path";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 export interface SessionEntry {
@@ -95,6 +95,12 @@ export class SessionStore {
     } catch {
       return null;
     }
+  }
+
+  /** Remove the persisted session id file so the next ensureSession starts fresh. */
+  clearPersistedSessionId(threadId: string): void {
+    const filePath = this.sessionFilePath(threadId);
+    try { unlinkSync(filePath); } catch {}
   }
 
   // ── Private ──────────────────────────────────────────
