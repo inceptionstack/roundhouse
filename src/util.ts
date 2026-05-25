@@ -59,31 +59,28 @@ export function sameId(a: string | number, b: string | number): boolean {
  * platform.
  */
 export function isAllowed(
-  message: { author?: { userName?: string; userId?: string; fullName?: string } },
+  message: { author?: { userName?: string; userId?: string | number; fullName?: string } },
   allowedUsers: string[],
   allowedUserIds?: (string | number)[],
 ): boolean {
   if (allowedUsers.length === 0 && (!allowedUserIds || allowedUserIds.length === 0)) return true;
   const author = message.author ?? {};
 
-  // Check immutable platform user ID first
-  if (allowedUserIds?.length && author.userId) {
-    const rawId = author.userId;
-    const numericId = parseInt(rawId, 10);
-    const isNumericString = !isNaN(numericId) && String(numericId) === rawId;
+  // Check immutable platform user ID first.
+  // Normalize both sides to string before comparing — IncomingMessage.author.userId
+  // can arrive as string or number depending on the platform; allowedUserIds can
+  // hold either too. `sameId`-style equality avoids treating "12345" and 12345 as
+  // different.
+  if (allowedUserIds?.length && author.userId != null) {
+    const rawId = String(author.userId);
     for (const entry of allowedUserIds) {
-      if (typeof entry === "number") {
-        if (isNumericString && entry === numericId) return true;
-      } else {
-        // String entry — compare raw string (Slack `Uxxx`, or numeric-as-string telegram id)
-        if (entry === rawId) return true;
-      }
+      if (String(entry) === rawId) return true;
     }
   }
 
   // Fall back to username check
   const candidates = [author.userName, author.userId]
-    .filter(Boolean)
+    .filter((v) => v != null && v !== "")
     .map((s) => String(s).toLowerCase());
   return candidates.some((c) => allowedUsers.includes(c));
 }

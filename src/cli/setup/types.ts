@@ -14,7 +14,7 @@ export interface SetupOptions {
   model: string;
   extensions: string[];
   cwd: string;
-  notifyChatIds: number[];
+  notifyChatIds: (string | number)[];
   systemd: boolean;
   voice: boolean;
   psst: boolean;

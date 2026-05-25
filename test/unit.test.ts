@@ -173,6 +173,27 @@ describe("isAllowed", () => {
       ),
     ).toBe(false);
   });
+
+  it("matches when message.author.userId is a raw number (not string)", () => {
+    // Some platforms hand us userId as a number directly. The dual-lookup
+    // must coerce both sides to string before comparing — otherwise a
+    // numeric allowlist entry [12345] silently misses message.userId === 12345.
+    expect(
+      isAllowed(
+        { author: { userId: 12345 as unknown as string } },
+        [],
+        [12345],
+      ),
+    ).toBe(true);
+
+    expect(
+      isAllowed(
+        { author: { userId: 12345 as unknown as string } },
+        [],
+        ["12345"],
+      ),
+    ).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────

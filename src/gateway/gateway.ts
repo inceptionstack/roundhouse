@@ -694,9 +694,9 @@ export class Gateway {
       return null;
     }
 
-    // Enrich prompt via transport adapter
+    // Enrich prompt via transport adapter (composite routes by ownsThread).
     if (agentMessage.text) {
-      agentMessage.text = this.transport.enrichPrompt(agentMessage.text);
+      agentMessage.text = this.transport.enrichPrompt(thread, agentMessage.text);
     }
 
     return agentMessage;
@@ -754,7 +754,7 @@ export class Gateway {
 
   private buildCommandContext(
     thread: any, message: any, agentThreadId: string, authorName: string,
-    allowedUsers: string[], allowedUserIds: number[],
+    allowedUsers: string[], allowedUserIds: (string | number)[],
     verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>,
   ): CommandContext {
     return {
@@ -792,7 +792,7 @@ export class Gateway {
    */
   private buildCommandDescriptors(deps: {
     allowedUsers: string[];
-    allowedUserIds: number[];
+    allowedUserIds: (string | number)[];
     verboseThreads: Set<string>;
     threadLocks: Map<string, Promise<void>>;
     abortControllers: Map<string, AbortController>;
