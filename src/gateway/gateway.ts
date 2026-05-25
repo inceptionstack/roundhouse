@@ -34,7 +34,7 @@ import {
   isPreTurn,
   matchesDescriptor,
 } from "./command-registry";
-import { TelegramAdapter, CompositeTransportAdapter, buildCompositeTransport, buildChatSdkAdapters } from "../transports";
+import { TelegramAdapter, SlackAdapter, CompositeTransportAdapter, buildCompositeTransport, buildChatSdkAdapters } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
@@ -65,18 +65,8 @@ function buildTransportDelegates(
   config: GatewayConfig["chat"]["adapters"],
 ): TransportAdapter[] {
   const delegates: TransportAdapter[] = [];
-  if (config.telegram) {
-    delegates.push(new TelegramAdapter());
-  }
-  // Slack delegate lands in Phase 2; we keep this branch in place so the
-  // composite plumbing in Phase 1 can be exercised by the test harness.
-  if (config.slack) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    throw new Error(
-      "Slack transport configured in config.chat.adapters.slack but the Slack " +
-      "TransportAdapter is not yet available (lands in Phase 2 of slack-plan.md).",
-    );
-  }
+  if (config.telegram) delegates.push(new TelegramAdapter());
+  if (config.slack) delegates.push(new SlackAdapter());
   // Caller (Gateway.start) validates `chatAdapters` is non-empty before
   // subscribing to events. We don't throw here on empty so test harnesses
   // that inject a fake transport after construction still work.
@@ -345,6 +335,37 @@ export class Gateway {
     }
 
     await this.chat.initialize();
+
+    // Slack-specific post-initialize wiring (no-op when slack isn't configured):
+    //  1. Attach the Chat SDK Slack adapter instance to our SlackAdapter
+    //     delegate so postRich/progress/stream can call its webClient.
+    //  2. Eagerly call auth.test() to populate the SDK's bot user id BEFORE
+    //     events flow — closes the lazy-fetch race window where the bot's
+    //     own messages could echo back through onSubscribedMessage.
+    //  3. Register onAssistantThreadStarted to drive first-DM pairing
+    //     before the user has typed anything.
+    const slackDelegate = this.transport.delegates.find((d): d is SlackAdapter => d.name === "slack") as SlackAdapter | undefined;
+    if (slackDelegate) {
+      try {
+        const slackSdk = (this.chat as unknown as { getAdapter(name: string): unknown }).getAdapter("slack") as Parameters<SlackAdapter["attach"]>[0];
+        if (slackSdk) {
+          slackDelegate.attach(slackSdk);
+          // Eagerly resolve botUserId so the central isMe filter is armed.
+          try {
+            const auth = await (slackSdk as unknown as { webClient: { auth: { test(): Promise<unknown> } } }).webClient.auth.test();
+            console.log("[roundhouse] slack auth.test ok:", JSON.stringify(auth).slice(0, 160));
+          } catch (err) {
+            console.warn("[roundhouse] slack auth.test failed (bot self-loop filter may have a race window):", (err as Error).message);
+          }
+          // Register assistant_thread_started for first-DM pairing.
+          this.registerAssistantThreadStartedHandler();
+        } else {
+          console.warn("[roundhouse] slack adapter not exposed via chat.getAdapter('slack') — pairing/streaming may not work");
+        }
+      } catch (err) {
+        console.error("[roundhouse] slack post-initialize wiring failed:", (err as Error).message);
+      }
+    }
 
     const platforms = Object.keys(this.config.chat.adapters).join(", ");
     console.log(`[roundhouse] gateway ready (platforms: ${platforms})`);
@@ -888,6 +909,7 @@ export class Gateway {
       verbose,
       signal,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
+      transport: this.transport,
     });
   }
 
@@ -970,6 +992,63 @@ export class Gateway {
    */
   private async registerBotCommands() {
     await this.transport.registerCommands();
+  }
+
+  /**
+   * Wire `bot.onAssistantThreadStarted` → composite.handlePairing.
+   *
+   * Slack fires this when the user opens an assistant DM with the bot,
+   * BEFORE the user types anything. Without this hook, the first-DM
+   * pairing path can deadlock: `message.im` only fires for *existing* DMs,
+   * so a user who just clicked "Message" on the bot's profile has no DM
+   * channel yet and never produces an event.
+   *
+   * We synthesize an IncomingMessage with the user's display name resolved
+   * via `slackSdk.getUser(userId)` so the pending pairing's allowedUsers
+   * check (which compares lowercased userName) succeeds.
+   */
+  private registerAssistantThreadStartedHandler(): void {
+    const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
+    if (!slackDelegate) return;
+
+    // chat.onAssistantThreadStarted is the public registration on ChatInstance
+    // (chat@4.29.0 chat-D9UYaaNO.d.ts:2913). Cast here is just to match the
+    // local Chat type that elides the assistant API.
+    const bot = this.chat as unknown as {
+      onAssistantThreadStarted?: (handler: (event: any) => Promise<void> | void) => void;
+      getAdapter(name: string): { getUser?(userId: string): Promise<{ userName?: string; fullName?: string } | null> } | undefined;
+    };
+
+    if (!bot.onAssistantThreadStarted) {
+      console.warn("[roundhouse] chat instance doesn't expose onAssistantThreadStarted; skipping");
+      return;
+    }
+
+    bot.onAssistantThreadStarted(async (event: { userId: string; channelId: string; threadTs: string }) => {
+      try {
+        const slackSdk = bot.getAdapter("slack");
+        const userInfo = slackSdk?.getUser ? await slackSdk.getUser(event.userId).catch(() => null) : null;
+        // Synthesize a thread that ownsThread('slack:…') and a message that
+        // matches the IncomingMessage shape the existing pairing pipeline expects.
+        const syntheticThread = this.transport.createThread(event.channelId);
+        const syntheticMessage = {
+          text: "",
+          author: {
+            userId: event.userId,
+            userName: userInfo?.userName,
+            name: userInfo?.fullName,
+          },
+          chatId: event.channelId,
+          raw: event,
+        };
+        const handled = await this.handlePendingPairing(syntheticMessage, syntheticThread);
+        if (handled) {
+          console.log(`[roundhouse] slack pairing completed via assistant_thread_started for ${event.userId}`);
+        }
+      } catch (err) {
+        console.error("[roundhouse] assistant_thread_started handler failed:", (err as Error).message);
+      }
+    });
   }
 
   /**

@@ -39,6 +39,7 @@
     "pi/"
   ],
   "dependencies": {
+    "@chat-adapter/slack": "^4.29.0",
     "@chat-adapter/state-memory": "^4.29.0",
     "@chat-adapter/telegram": "^4.29.0",
     "@earendil-works/pi-coding-agent": "^0.74.0",
