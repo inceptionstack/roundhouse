@@ -254,6 +254,45 @@ The `AgentRouter` interface is a seam for future multi-agent routing:
 
 The gateway and agent adapters don't change — only the router.
 
+## Transport composition
+
+A single gateway can run multiple chat platforms concurrently (Telegram + Slack today). The wiring:
+
+```
+                     ┌────────────────────────────────────────────┐
+                     │  CompositeTransportAdapter (this.transport) │
+                     │                                            │
+                     │  delegates: [TelegramAdapter, SlackAdapter] │
+                     └─────────────┬───────────────┬──────────────┘
+                                   │               │
+                ownsThread/ownsChatId routing      │
+                                   ▼               ▼
+                     ┌────────────────────┐  ┌────────────────────┐
+                     │  TelegramAdapter   │  │   SlackAdapter      │
+                     │                    │  │                     │
+                     │  ownsThread:       │  │  ownsThread:        │
+                     │   adapter.tg-      │  │   id startsWith     │
+                     │   Fetch present    │  │   "slack:"          │
+                     │  ownsChatId: numeric│  │  ownsChatId: C/D/G/U │
+                     └────────────────────┘  └────────────────────┘
+```
+
+Routing rules implemented in `src/transports/composite.ts`:
+
+| Method | Routing |
+|--------|---------|
+| `postMessage`, `postRich`, `progress`, `stream`, `enrichPrompt` | by `ownsThread(thread)` |
+| `notify(chatIds, …)` | partition by `ownsChatId`, fan out |
+| `createThread(chatId)` | by `ownsChatId` |
+| `encodeParentThreadId`, `formatNotifySession` | by `ownsChatId` |
+| `registerCommands`, `dispose` | fan out to all delegates |
+| `handlePairing` | first delegate that returns non-null; result tagged with delegate name so the gateway tracks `pairingComplete` per-transport |
+| `shouldIgnoreMessage` | by `ownsThread` (Telegram drops `/start`, Slack has no equivalent) |
+
+The gateway code reads `this.transport.foo()` and never branches on platform; adding a third transport is a TransportAdapter implementation + one entry in `chatAdapterFactories` + one entry in `buildTransportDelegates`.
+
+ID types are heterogeneous union `(string | number)[]` to support both numeric (Telegram) and string (Slack `Uxxx`/`Cxxx`) identifiers in the same allowlist / notify list.
+
 ## Module dependency graph
 
 ```

@@ -116,6 +116,53 @@ export ALLOWED_USERS="your_username"
 roundhouse install    # installs as systemd service, starts automatically
 ```
 
+## Slack quick start
+
+Slack is supported in **socket mode** (single workspace, v1). No public URL required — the gateway connects to Slack via WebSocket.
+
+### 1. Create the Slack app
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**.
+2. Pick your workspace and paste the manifest from `src/transports/slack/manifest.yaml` (the setup CLI also prints it inline + saves to `/tmp/roundhouse-slack-manifest.yaml`).
+3. **Install to Workspace**, then on the **Basic Information** page:
+   - Generate an **App-Level Token** with the `connections:write` scope. Copy the `xapp-…` value.
+   - Open **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
+
+### 2. Run setup
+
+```bash
+roundhouse setup --slack
+# (interactive — will prompt for tokens and your Slack username)
+```
+
+Or non-interactive (e.g. SSM / cloud-init):
+
+```bash
+SLACK_BOT_TOKEN=xoxb-… SLACK_APP_TOKEN=xapp-… \
+  roundhouse setup --slack --non-interactive --user your_slack_handle
+```
+
+### 3. Pair
+
+The setup writes a pending-pairing file (`~/.roundhouse/slack-pairing.json`) and starts the gateway. To complete pairing, **open a new DM with the bot** in Slack (click the bot in your sidebar or search Apps → @your-bot, then send any message). The first message from one of the configured `allowedUsers` completes pairing.
+
+> ⚠️ Slack only fires `message.im` for *existing* DM channels. If you've never DM'd the bot before, the assistant_thread_started event takes care of it — the bot's manifest enables Slack's Assistants API which fires that event when you click "Message" on the bot's profile.
+
+### Slack feature support
+
+| Feature | Supported |
+|---|---|
+| Plain text | Yes (markdown) |
+| Block Kit menus (buttons, actions) | Yes (via the SDK's transport-agnostic Card model) |
+| Streaming | Yes (post-then-edit fallback; native AI Assistant streaming is a v2 enhancement) |
+| File attachments | Yes (uses Slack's authenticated `url_private` download) |
+| Reactions / pins / scheduled messages | No (out of scope for v1) |
+| Multi-workspace OAuth | No (single-workspace only in v1) |
+| Webhook mode (no socket) | No (socket-only in v1; needs a public URL otherwise) |
+| Slash commands as Slack-native commands | No (use roundhouse's `/new`, `/restart`, etc. as plain text) |
+
+Telegram and Slack can run in the **same gateway instance** — configure both under `chat.adapters` and roundhouse routes per-thread.
+
 ## CLI
 
 ```
@@ -184,14 +231,16 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `agent.cwd` | Working directory for the agent |
 | `agent.sessionDir` | Override session storage path |
 | `chat.botUsername` | Bot display name for Chat SDK |
-| `chat.allowedUsers` | Telegram usernames / user IDs allowed (empty = allow all) |
-| `chat.notifyChatIds` | Telegram chat IDs to notify on startup (env: `NOTIFY_CHAT_IDS`) |
+| `chat.allowedUsers` | Telegram / Slack usernames allowed (empty = allow all) |
+| `chat.allowedUserIds` | Immutable user IDs (Telegram numeric, Slack `Uxxx`); paired during setup |
+| `chat.notifyChatIds` | Chat IDs to notify on startup (Telegram numeric, Slack `Cxxx`/`Dxxx`) |
 | `chat.adapters.telegram` | `{ "mode": "polling" \| "webhook" \| "auto" }` |
+| `chat.adapters.slack` | `{ "mode": "socket" }` (v1: socket mode only; tokens via `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` env) |
 | `voice.stt.enabled` | Enable automatic voice transcription (default: off unless configured) |
 | `voice.stt.chain` | STT provider chain, e.g. `["whisper"]` |
 | `voice.stt.providers.whisper` | `{ "model": "small", "timeoutMs": 30000 }` |
 
-Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, etc.
+Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, etc.
 
 ## Joining a session from pi CLI
 

@@ -44,7 +44,25 @@ If `promptStream` is missing, `agent.prompt()` is called and the full text is sp
 
 **Adding a new agent backend:** implement `AgentAdapter` from `src/types.ts` in `src/agents/<name>.ts`, register in `src/agents/registry.ts`, set `"agent": { "type": "<name>" }` in config. If you want streaming, implement `promptStream` yielding `AgentStreamEvent`s; otherwise `prompt` alone is enough and the gateway will fall back.
 
-**Adding a new chat platform:** install the `@chat-adapter/<platform>` package, lazy-import it in `buildChatAdapters` inside `src/gateway.ts`, and add a corresponding entry to `GatewayConfig["chat"]["adapters"]` in `src/types.ts`. The unified `handle()` in `gateway.ts` already covers all platforms.
+**Adding a new chat platform:** install the `@chat-adapter/<platform>` package, register it in `chatAdapterFactories` (`src/transports/chat-adapters.ts`), implement a `TransportAdapter` (`src/transports/<name>/<name>-adapter.ts`), add it to `buildTransportDelegates` in `src/gateway/gateway.ts`, and add a corresponding entry to `GatewayConfig["chat"]["adapters"]` in `src/types.ts`. The composite transport routes all per-thread methods automatically by `ownsThread`/`ownsChatId`.
+
+**Multi-transport composition.** A single gateway runs all configured transports simultaneously through `CompositeTransportAdapter` (`src/transports/composite.ts`). The composite owns a `delegates: TransportAdapter[]` and routes:
+- per-thread methods (`postMessage`, `postRich`, `progress`, `stream`, `enrichPrompt`) by the first delegate where `ownsThread(thread)` is true;
+- `notify(chatIds, ...)` by partitioning chat ids by `ownsChatId` then fanning out;
+- `handlePairing` to the first delegate that returns non-null, decorated with `transport: <delegateName>` so the gateway tracks `pairingComplete` per-transport (a `Map<string, boolean>` — a single boolean would silently block the second transport's pairing once the first paired);
+- `registerCommands` and `dispose` to all delegates.
+The gateway never branches on platform; everything reads `this.transport.foo()` against the composite.
+
+**Slack adapter nuances.**
+- Thread ids are `slack:CHANNEL:THREAD_TS`. Always use `sdk.encodeThreadId({ channel, threadTs })` and `sdk.decodeThreadId(id)` — never split manually. Top-level posts use `threadTs: ""` (sentinel); the `progress.ts` and `streaming.ts` helpers check for `"" | "main"` and elide `thread_ts` when posting.
+- `AdapterPostableMessage` is `string | { raw } | { markdown } | { ast } | { card } | CardElement` (`chat@4.29.0` `chat-D9UYaaNO.d.ts:1549`). **There is no `blocks` field.** Menus go through `{ card, fallbackText }` and the SDK's `cardToBlockKit` does the conversion internally. Same model works for telegram via `extractCard`. The transport-agnostic `richMenuToCard` lives in `src/transports/rich-helpers.ts` and is shared.
+- **Streaming + Block Kit can't coexist.** Slack's stream API doesn't take blocks. Decision: streaming turns are agent text only; menu turns are command results that don't stream. If a future feature needs both, finalize the stream first then post a separate menu message.
+- **Bot self-loop filtering.** Slack delivers the bot's own messages back through `message.channels` / `message.groups` if those scopes are enabled. The Chat SDK does central isMe filtering; verified that the SDK's `initialize()` already calls `auth.test` and populates `_botUserId` before subscriptions activate (`@chat-adapter/slack@4.29.0` `index.js:868-885`), so the filter is armed by the time events flow.
+- **Pairing chicken-and-egg.** Slack's `message.im` only fires for *existing* DM channels. To support users who haven't DM'd the bot yet, the gateway also registers `bot.onAssistantThreadStarted` and synthesizes an IncomingMessage from the event (resolving the user via `slackSdk.getUser(userId)` so the allowlist's userName check has a value to match). Both paths flow through the same `transport.handlePairing` → composite seam.
+- **Per-transport boot turn.** `fireBootTurn` partitions `notifyChatIds` by `ownsChatId` and fires one boot turn against the first chatId owned by each transport — not the global `chatIds[0]`. Otherwise multi-transport installs would silently favor whichever transport happened to be listed first.
+- `createSlackAdapter` env-var fallback only fires when called with NO config (`zeroConfig = !config`). The factory in `src/transports/chat-adapters.ts` therefore explicitly forwards `process.env.SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `SLACK_SIGNING_SECRET` so they're populated regardless of whether other config keys are set. Verified against `dist/index.js:4233-4243`. Skipping this is a silent `AuthenticationError: No bot token available` at runtime.
+
+**Type widening for multi-transport.** `allowedUserIds` and `notifyChatIds` are `(string | number)[]` (Telegram numeric, Slack string). `ChatThread.post` accepts `string | { markdown } | { card, fallbackText? }`. `IncomingMessage.chatId` is `string | number`. `isAllowed` does dual lookup against the heterogeneous union by normalizing both sides to `String()`. Several legacy `Number()` coercion sites were caught in Phase 1 (`gateway.ts:113, 329, 352, 978-1001, 1017-1021`, `subagent-command.ts`, `ipc/handler.ts`) — preserve string IDs end-to-end; don't reintroduce `parseInt` or `Number()` casts.
 
 ## Debugging
 
