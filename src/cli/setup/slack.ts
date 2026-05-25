@@ -42,6 +42,8 @@ export async function validateSlackBotToken(botToken: string): Promise<SlackBotI
   const res = await fetch("https://slack.com/api/auth.test", {
     method: "POST",
     headers: { Authorization: `Bearer ${botToken}` },
+    // 15s ceiling so a hung Slack endpoint doesn't block setup forever.
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     throw new Error(`Slack auth.test HTTP ${res.status} (token: ${redactSlackToken(botToken)})`);
