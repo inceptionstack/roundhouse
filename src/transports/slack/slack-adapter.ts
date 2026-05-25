@@ -134,6 +134,11 @@ export class SlackAdapter implements TransportAdapter {
     // level; "" is the agreed sentinel for top-level posts. The SDK's
     // decodeThreadId round-trips it.
     const threadId = sdk.encodeThreadId({ channel: channelId, threadTs: "" });
+    // postChannelMessage at runtime expects "slack:CHANNEL" (it splits on ":"
+    // and grabs index [1]) — passing a bare channel id throws ValidationError.
+    // The published .d.ts only documented the param as `channelId: string`,
+    // not the required prefix. Anchor the format here.
+    const sdkChannelId = `slack:${channelId}`;
 
     const thread: ChatThread = {
       id: threadId,
@@ -144,15 +149,15 @@ export class SlackAdapter implements TransportAdapter {
         // postMessage with a real threadId — gateway internals don't yet
         // need that path.
         if (typeof content === "string") {
-          await sdk.postChannelMessage(channelId, { markdown: content });
+          await sdk.postChannelMessage(sdkChannelId, { markdown: content });
           return;
         }
         if ("markdown" in content) {
-          await sdk.postChannelMessage(channelId, { markdown: content.markdown });
+          await sdk.postChannelMessage(sdkChannelId, { markdown: content.markdown });
           return;
         }
         if ("card" in content) {
-          await sdk.postChannelMessage(channelId, {
+          await sdk.postChannelMessage(sdkChannelId, {
             card: content.card as Parameters<SlackSdkAdapter["postChannelMessage"]>[1] extends infer M
               ? M extends { card: infer C } ? C : never
               : never,
@@ -166,6 +171,11 @@ export class SlackAdapter implements TransportAdapter {
         // scope (per index.d.ts:823).
         try { await sdk.startTyping(threadId); } catch {}
       },
+      // No `stopTyping` on synthetic threads: synthetic threads use a
+      // channel-root threadTs ("") which the SDK's startTyping early-
+      // returns from, so there's nothing to clear. The real stop-path
+      // for incoming-message Slack threads is `stopTypingFor(thread)`,
+      // attached at the gateway boundary.
     };
     return thread;
   }
@@ -199,6 +209,57 @@ export class SlackAdapter implements TransportAdapter {
       return;
     }
     await postSlackToMany(slackIds, text);
+  }
+
+  /**
+   * Build a transport-specific `stopTyping` callback for an incoming Slack
+   * thread, suitable for attaching to the `startTypingLoop` cleanup path.
+   *
+   * Why we need a custom one: `@chat-adapter/slack@4.29.0` `startTyping`
+   * unconditionally forwards `loading_messages: [status ?? "Typing..."]`
+   * to `assistant.threads.setStatus`. With `status === ""` (the documented
+   * "clear" value), the array becomes `[""]` which Slack rejects with
+   * `loading_messages/0 must be more than 0 characters`. Per
+   * https://docs.slack.dev/reference/methods/assistant.threads.setStatus
+   * `loading_messages` is optional, so we call the API directly without
+   * it. Returns null when the thread isn't a Slack thread (composite
+   * routing fallback) so the typing-loop can use its default path.
+   */
+  stopTypingFor(thread: ChatThread): (() => Promise<void>) | null {
+    if (!this.ownsThread(thread)) return null;
+    const sdk = this.slackSdk;
+    if (!sdk) return null;
+    const threadId = (thread as unknown as SlackThreadShape).id;
+    if (!threadId) return null;
+    let channel: string;
+    let threadTs: string;
+    try {
+      const decoded = sdk.decodeThreadId(threadId);
+      channel = decoded.channel;
+      threadTs = decoded.threadTs;
+    } catch {
+      return null;
+    }
+    if (!threadTs || threadTs === "" || threadTs === "main") {
+      // Synthetic thread (channel root). The SDK's startTyping early-
+      // returns when threadTs is empty, so nothing to clear.
+      return null;
+    }
+    return async () => {
+      try {
+        await sdk.webClient.assistant.threads.setStatus({
+          channel_id: channel,
+          thread_ts: threadTs,
+          status: "",
+          // NB: deliberately NOT sending loading_messages — that's the
+          // SDK helper bug we're working around.
+        });
+      } catch (err) {
+        // Best-effort; never throw from the cleanup path. The 2-minute
+        // auto-timeout will eventually clear the indicator regardless.
+        console.warn("[slack] stopTypingFor failed (auto-timeout will clear):", (err as Error).message);
+      }
+    };
   }
 
   async isPairingPending(): Promise<boolean> {

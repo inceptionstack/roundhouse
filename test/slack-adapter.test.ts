@@ -86,7 +86,9 @@ describe("SlackAdapter", () => {
     expect(calls.encodeThreadId).toEqual([{ channel: "C01", threadTs: "" }]);
 
     await thread.post("hello");
-    expect(calls.postChannelMessage).toEqual([{ channelId: "C01", message: { markdown: "hello" } }]);
+    // SDK's postChannelMessage requires the "slack:" prefix on the channel id —
+    // it splits on ":" and grabs index [1]. Passing a bare "C01" throws.
+    expect(calls.postChannelMessage).toEqual([{ channelId: "slack:C01", message: { markdown: "hello" } }]);
 
     await thread.post({ markdown: "**bold**" });
     expect(calls.postChannelMessage[1].message).toEqual({ markdown: "**bold**" });

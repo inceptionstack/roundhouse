@@ -89,17 +89,33 @@ export function isAllowed(
  * Start a periodic typing indicator loop.
  * Calls thread.startTyping() immediately and then every intervalMs.
  * Returns a stop function.
+ *
+ * On stop, also calls thread.stopTyping() if the thread exposes one.
+ * Telegram's `sendChatAction` auto-expires after ~5 s so its
+ * createThread doesn't bother. Slack's `assistant.threads.setStatus`
+ * persists until explicitly cleared OR a message lands in the same
+ * `thread_ts` — and our streaming posts to the channel root, not the
+ * incoming thread, so the status sticks indefinitely without an
+ * explicit clear.
  */
 export function startTypingLoop(
-  thread: { startTyping: (status?: string) => Promise<void> },
+  thread: { startTyping: (status?: string) => Promise<void>; stopTyping?: () => Promise<void> | void },
   intervalMs: number = 4000
 ): () => void {
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * Tracks the most recent in-flight startTyping() promise. The cleanup
+   * path AWAITS this before sending its clear ("") so a tick that started
+   * just before stop() can't land *after* the clear and silently re-set
+   * the indicator. The Slack assistant_thread status doesn't auto-expire,
+   * so this race translates directly into a stuck "Typing…" pill.
+   */
+  let inFlight: Promise<void> | undefined;
 
   const send = () => {
     if (stopped) return;
-    thread.startTyping().catch(() => {});
+    inFlight = thread.startTyping().catch(() => {});
   };
 
   send(); // fire immediately
@@ -109,7 +125,35 @@ export function startTypingLoop(
   return () => {
     stopped = true;
     if (timer) clearInterval(timer);
+    // Best-effort cleanup — never throw, never block the caller. We
+    // dispatch asynchronously so the caller's `try/finally` returns
+    // immediately; the actual clear lands on the next tick after any
+    // in-flight startTyping() has resolved.
+    void (async () => {
+      try { if (inFlight) await inFlight; } catch {}
+      // Prefer a transport-supplied stopTyping (Slack injects one that
+      // bypasses the SDK's setStatus-with-bad-loading_messages bug).
+      // Fall back to the standard thread.startTyping("") for transports
+      // (Telegram) that auto-expire or accept the empty arg cleanly.
+      const cleared = await tryStopTypingHook(thread);
+      if (!cleared) {
+        try { await thread.startTyping(""); } catch {}
+      }
+    })();
   };
+}
+
+/**
+ * Try the transport-supplied `stopTyping` hook. Returns true if the hook
+ * was called (regardless of whether it threw — best-effort), false if the
+ * thread doesn't expose one.
+ */
+async function tryStopTypingHook(
+  thread: { stopTyping?: () => Promise<void> | void },
+): Promise<boolean> {
+  if (typeof thread.stopTyping !== "function") return false;
+  try { await thread.stopTyping(); } catch {}
+  return true;
 }
 
 /**

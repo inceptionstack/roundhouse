@@ -487,7 +487,25 @@ export class Gateway {
         console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
       }
 
-      stopTyping = startTypingLoop(thread);
+      // Inject a Slack-specific stopTyping hook when the thread belongs
+      // to Slack — the SDK's default clear path is broken in 4.29.0
+      // (sends `loading_messages: [""]` which Slack rejects). For
+      // non-Slack threads slackStopTyping is null and the typing loop
+      // falls back to thread.startTyping("") (Telegram's sendChatAction
+      // auto-expires anyway so the call is harmless there).
+      //
+      // Wrapper object delegates startTyping back to the original thread
+      // so we keep its `this`-binding. Don't spread the class instance —
+      // that would lose its prototype.
+      const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
+      const slackStopTyping = slackDelegate?.stopTypingFor?.(thread) ?? null;
+      const typingThread = slackStopTyping
+        ? {
+            startTyping: (status?: string) => thread.startTyping(status),
+            stopTyping: slackStopTyping,
+          }
+        : thread;
+      stopTyping = startTypingLoop(typingThread);
 
       // Pre-turn recovery: if a prior turn failed to compact (state has
       // pendingCompact === "emergency"), the live session is almost certainly
