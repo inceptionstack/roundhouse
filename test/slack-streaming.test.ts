@@ -101,4 +101,26 @@ describe("handleSlackStream", () => {
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  it("overflow: starts a fresh message after crossing the 12k cap", async () => {
+    // Build a single chunk that exceeds the 12k limit. We expect:
+    //  1. initial post (with the first 12k slice — clean cut)
+    //  2. handleOverflow finalizes the first message and nulls messageTs
+    //  3. continued chunks initialize a NEW message
+    const { sdk, calls } = fakeSdk();
+    const big = "a".repeat(13_000);
+    await handleSlackStream(sdk, thread, gen(big));
+
+    // Two posts (first chunk, then overflow re-init via final flush)
+    expect(calls.post.length).toBeGreaterThanOrEqual(2);
+    // Both should target the same channel and be valid markdown_text payloads
+    for (const p of calls.post) {
+      expect(p.channel).toBe("C01");
+      expect(typeof p.markdown_text).toBe("string");
+      expect(p.markdown_text.length).toBeLessThanOrEqual(12_000);
+    }
+    // The combined posted text should equal the original input
+    const combined = calls.post.map((p: any) => p.markdown_text).join("");
+    expect(combined.length).toBe(big.length);
+  });
 });

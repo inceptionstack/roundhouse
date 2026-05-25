@@ -339,10 +339,11 @@ export class Gateway {
     // Slack-specific post-initialize wiring (no-op when slack isn't configured):
     //  1. Attach the Chat SDK Slack adapter instance to our SlackAdapter
     //     delegate so postRich/progress/stream can call its webClient.
-    //  2. Eagerly call auth.test() to populate the SDK's bot user id BEFORE
-    //     events flow — closes the lazy-fetch race window where the bot's
-    //     own messages could echo back through onSubscribedMessage.
-    //  3. Register onAssistantThreadStarted to drive first-DM pairing
+    //     The SDK's own initialize() already called auth.test and populated
+    //     botUserId, so the bot self-loop filter is armed by the time events
+    //     start flowing — no extra eager call needed here (verified against
+    //     @chat-adapter/slack@4.29.0 dist/index.js:868-885).
+    //  2. Register onAssistantThreadStarted to drive first-DM pairing
     //     before the user has typed anything.
     const slackDelegate = this.transport.delegates.find((d): d is SlackAdapter => d.name === "slack") as SlackAdapter | undefined;
     if (slackDelegate) {
@@ -350,14 +351,6 @@ export class Gateway {
         const slackSdk = (this.chat as unknown as { getAdapter(name: string): unknown }).getAdapter("slack") as Parameters<SlackAdapter["attach"]>[0];
         if (slackSdk) {
           slackDelegate.attach(slackSdk);
-          // Eagerly resolve botUserId so the central isMe filter is armed.
-          try {
-            const auth = await (slackSdk as unknown as { webClient: { auth: { test(): Promise<unknown> } } }).webClient.auth.test();
-            console.log("[roundhouse] slack auth.test ok:", JSON.stringify(auth).slice(0, 160));
-          } catch (err) {
-            console.warn("[roundhouse] slack auth.test failed (bot self-loop filter may have a race window):", (err as Error).message);
-          }
-          // Register assistant_thread_started for first-DM pairing.
           this.registerAssistantThreadStartedHandler();
         } else {
           console.warn("[roundhouse] slack adapter not exposed via chat.getAdapter('slack') — pairing/streaming may not work");

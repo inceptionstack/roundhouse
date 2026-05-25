@@ -29,9 +29,6 @@ export const chatAdapterFactories: Record<string, LazyChatAdapterFactory> = {
     });
   },
   slack: async () => {
-    // @chat-adapter/slack is added in Phase 2; until then this throws on use.
-    // The factory is registered eagerly so Phase 1 tests can verify the
-    // registry contract without depending on Phase 2 deliverables.
     const mod = await import("@chat-adapter/slack").catch(() => null);
     if (!mod) {
       throw new Error(
@@ -42,8 +39,14 @@ export const chatAdapterFactories: Record<string, LazyChatAdapterFactory> = {
     const { createSlackAdapter } = mod as typeof import("@chat-adapter/slack");
     return (cfg) => createSlackAdapter({
       mode: (cfg.mode as "socket" | "webhook" | undefined) ?? "socket",
-      // Tokens come from env (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET)
-      // — the SDK auto-detects them. Don't pass explicitly unless overridden in cfg.
+      // CRITICAL: createSlackAdapter only env-falls-back env vars when ZERO
+      // config is passed (zeroConfig = !config). Because we pass an object,
+      // we MUST forward the env vars explicitly — otherwise webClient calls
+      // throw `AuthenticationError: No bot token available …`.
+      // Verified against @chat-adapter/slack@4.29.0 dist/index.js:4233-4243.
+      botToken: (cfg.botToken as string | undefined) ?? process.env.SLACK_BOT_TOKEN,
+      appToken: (cfg.appToken as string | undefined) ?? process.env.SLACK_APP_TOKEN,
+      signingSecret: (cfg.signingSecret as string | undefined) ?? process.env.SLACK_SIGNING_SECRET,
     });
   },
 };

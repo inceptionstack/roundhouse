@@ -29,7 +29,7 @@ export interface ChatThread {
 export interface IncomingMessage {
   text?: string;
   author?: { userName?: string; name?: string; userId?: string | number; id?: string };
-  chatId?: number;
+  chatId?: string | number;
   raw?: { from?: { id?: number } };
   [key: string]: unknown;
 }
