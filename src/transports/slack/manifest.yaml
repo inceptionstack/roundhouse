@@ -23,8 +23,8 @@ oauth_config:
       - im:read
       - im:write
       - users:read               # for username matching during pairing
-      # Note: users:read.email is intentionally NOT requested — it's a
-      # privacy-review red flag and pairing only needs the display name.
+      # Note: the email-tagged users scope is intentionally NOT requested —
+      # it's a privacy-review red flag and pairing only needs the display name.
 
 settings:
   event_subscriptions:

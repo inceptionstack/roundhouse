@@ -22,6 +22,14 @@ export interface SetupOptions {
   dryRun: boolean;
   /** Telegram-focused setup flow */
   telegram: boolean;
+  /** Slack-focused setup flow */
+  slack: boolean;
+  /** Slack bot token (xoxb-…) — only used when slack === true */
+  slackBotToken: string;
+  /** Slack app token (xapp-…) — only used when slack === true */
+  slackAppToken: string;
+  /** Slack signing secret (only relevant for webhook mode; v1 ships socket-only) */
+  slackSigningSecret: string;
   /** Non-interactive mode (no TTY prompts) */
   nonInteractive: boolean;
   /** QR code display mode */

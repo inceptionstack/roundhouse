@@ -43,6 +43,7 @@ import {
 } from "./setup/steps";
 import { resolveAgentForSetup, textLog, textStepLog } from "./setup/runtime";
 import { runInteractiveTelegramSetup, runNonInteractiveTelegramSetup } from "./setup/flows";
+import { runInteractiveSlackSetup, runNonInteractiveSlackSetup } from "./setup/slack-flows";
 
 // ── Orchestrator ─────────────────────────────────────
 
@@ -67,6 +68,16 @@ export async function cmdSetup(argv: string[]): Promise<void> {
       await runNonInteractiveTelegramSetup(opts);
     } else {
       await runInteractiveTelegramSetup(opts);
+    }
+    return;
+  }
+
+  // Route to --slack flows
+  if (opts.slack) {
+    if (opts.nonInteractive) {
+      await runNonInteractiveSlackSetup(opts);
+    } else {
+      await runInteractiveSlackSetup(opts);
     }
     return;
   }
