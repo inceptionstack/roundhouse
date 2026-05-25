@@ -4,6 +4,17 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [0.6.0] — 2026-05-26
 
+> **Migration note for out-of-tree TransportAdapter implementations.** The
+> interface gained five new methods (`ownsChatId`, `encodeParentThreadId`,
+> `formatNotifySession`, optional `shouldIgnoreMessage`, `stream`) and three
+> existing methods changed shape: `enrichPrompt(thread, text)` now takes
+> `thread`; `createThread(string | number)` accepts string ids; `notify`
+> accepts `(string | number)[]`; `registerCommands()` no longer takes a
+> token (each adapter self-sources its env-var creds). External adapters
+> need to add the new methods and update those signatures. Adapters that
+> only ship `TelegramAdapter` / `SlackAdapter` (the included ones) need no
+> action — gateway config files keep working.
+
 ### Added
 - **Slack transport** (socket mode, single workspace). `roundhouse setup
   --slack` walks you through it: prints the bundled Slack app manifest

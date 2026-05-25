@@ -185,8 +185,8 @@ gateway.config.json
     ├── notifyChatIds: [...]   # Telegram chat IDs for startup notifications
     └── adapters
         ├── telegram: { mode: "polling" }
-        ├── slack: { ... }    # (future)
-        └── discord: { ... }  # (future)
+        ├── slack: { mode: "socket" }   # SLACK_BOT_TOKEN/SLACK_APP_TOKEN env
+        └── discord: { ... }             # (future)
 
 └── voice                     # Optional voice features
     └── stt
@@ -228,7 +228,7 @@ Each chat platform thread gets its own agent session:
 
 ```
 Telegram DM with Alice    →  threadId = "telegram:123456789"  →  session A
-Slack DM with Alice       →  threadId = "slack:U12345"         →  session B
+Slack DM with Alice       →  threadId = "slack:D12345:"        →  session B
 Telegram group mention  →  threadId = "telegram:-100123456"  →  session C
 ```
 

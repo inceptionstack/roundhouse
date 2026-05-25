@@ -123,7 +123,7 @@ Slack is supported in **socket mode** (single workspace, v1). No public URL requ
 ### 1. Create the Slack app
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**.
-2. Pick your workspace and paste the manifest from `src/transports/slack/manifest.yaml` (the setup CLI also prints it inline + saves to `/tmp/roundhouse-slack-manifest.yaml`).
+2. Pick your workspace. Paste the manifest that `roundhouse setup --slack` prints inline (and writes to `/tmp/roundhouse-slack-manifest.yaml` for easy paste). The same YAML lives in the source tree at `src/transports/slack/manifest.yaml` for reference.
 3. **Install to Workspace**, then on the **Basic Information** page:
    - Generate an **App-Level Token** with the `connections:write` scope. Copy the `xapp-…` value.
    - Open **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
@@ -507,27 +507,40 @@ export const createMyAgentAdapter: AgentAdapterFactory = (config) => new MyAgent
 
 ## Adding a new chat platform
 
-Add the Chat SDK adapter package and wire it in `gateway.ts`:
+Three small wiring points (the gateway code itself never branches on platform):
 
-```typescript
-if (config.slack) {
-  const { createSlackAdapter } = await import("@chat-adapter/slack");
-  adapters.slack = createSlackAdapter();
-}
-```
+1. **Register the SDK adapter factory** in `src/transports/chat-adapters.ts`:
+   ```ts
+   chatAdapterFactories.discord = async () => {
+     const { createDiscordAdapter } = await import("@chat-adapter/discord");
+     return (cfg) => createDiscordAdapter({ /* …forward env vars explicitly… */ });
+   };
+   ```
+2. **Implement `TransportAdapter`** in `src/transports/discord/discord-adapter.ts`. The contract (`src/transports/types.ts`) covers `postMessage`, `postRich`, `progress`, `stream`, `notify`, `createThread`, `ownsThread`, `ownsChatId`, `encodeParentThreadId`, `formatNotifySession`, plus pairing hooks. The Slack adapter is the cleanest reference impl.
+3. **Add the delegate** in `buildTransportDelegates` (top of `src/gateway/gateway.ts`):
+   ```ts
+   if (config.discord) delegates.push(new DiscordAdapter());
+   ```
 
-No other changes needed — the gateway's unified handler covers all platforms.
+The `CompositeTransportAdapter` automatically routes per-thread methods by `ownsThread` and partitions `notify(chatIds, …)` by `ownsChatId`. No changes needed in the gateway's message handler.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Entry point, config loading, startup |
-| `src/gateway.ts` | Owns Chat SDK, wires events → router → agent |
+| `src/gateway/gateway.ts` | Owns Chat SDK, wires events → router → agent |
 | `src/router.ts` | `AgentRouter` interface + `SingleAgentRouter` |
 | `src/types.ts` | Core interfaces: `AgentAdapter`, `AgentStreamEvent`, `AgentRouter`, `GatewayConfig` |
 | `src/util.ts` | Pure utilities: `splitMessage`, `isAllowed`, `threadIdToDir`, `startTypingLoop` |
+| `src/transports/types.ts` | `TransportAdapter` contract |
+| `src/transports/composite.ts` | Multi-transport routing |
+| `src/transports/chat-adapters.ts` | Chat SDK adapter factory registry |
+| `src/transports/telegram/` | Telegram transport adapter |
+| `src/transports/slack/` | Slack transport adapter (socket mode) |
+| `src/transports/rich-helpers.ts` | `richMenuToCard`, `stripMarkdownToPlain`, `buildSelectableMenu` |
 | `src/cli/cli.ts` | CLI: start, run, install, tui, update, logs, etc. |
+| `src/cli/setup/` | `setup --telegram` and `setup --slack` flows |
 | `src/cli/env-file.ts` | Shared env file parsing, serialization, and quoting |
 | `src/cli/systemd.ts` | Shared systemd service management (unit generation, install, status) |
 | `src/cli/launchd.ts` | macOS LaunchAgent management (plist generation, install, status) |
@@ -536,13 +549,12 @@ No other changes needed — the gateway's unified handler covers all platforms.
 | `src/cli/doctor/checks/` | Individual health check modules |
 | `src/cron/` | Cron scheduler, runner, store, schedule, template, format |
 | `src/cron/helpers.ts` | Shared cron constants and utilities |
-| `src/notify/telegram.ts` | Shared Telegram Bot API sender |
 | `src/agents/pi/pi-adapter.ts` | Pi agent adapter (persistent sessions via pi SDK) |
 | `src/agents/kiro/kiro-adapter.ts` | Kiro CLI agent adapter (ACP over stdio) |
 | `src/agents/base-adapter.ts` | Abstract base class — adapter interface contract |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
-| `test/` | Unit + integration tests (vitest, 311 passing) |
+| `test/` | Unit + integration tests (vitest, 678 passing) |
 
 ## CI/CD
 
