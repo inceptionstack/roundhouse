@@ -40,22 +40,45 @@ export function splitMessage(text: string, maxLen: number): string[] {
 }
 
 /**
+ * Compare two ids (chat or user) loosely. Treats `12345` and `"12345"` as
+ * equal so a heterogeneous allowlist (telegram numeric + slack string) can
+ * still detect duplicates without coercion.
+ */
+export function sameId(a: string | number, b: string | number): boolean {
+  return String(a) === String(b);
+}
+
+/**
  * Check if a Chat SDK message author is in the allowlist.
- * Only matches on userName (unique handle) and userId (numeric ID).
+ * Only matches on userName (unique handle) and userId (immutable platform ID).
  * Does NOT match on fullName (user-controlled display name).
+ *
+ * Dual lookup against `allowedUserIds`: Telegram IDs are numeric (123456789);
+ * Slack IDs are strings ("U02XXXXX"). Both forms match against entries of
+ * either type, so a heterogeneous allowlist authenticates users from either
+ * platform.
  */
 export function isAllowed(
   message: { author?: { userName?: string; userId?: string; fullName?: string } },
   allowedUsers: string[],
-  allowedUserIds?: number[],
+  allowedUserIds?: (string | number)[],
 ): boolean {
   if (allowedUsers.length === 0 && (!allowedUserIds || allowedUserIds.length === 0)) return true;
   const author = message.author ?? {};
 
-  // Check immutable numeric user ID first
+  // Check immutable platform user ID first
   if (allowedUserIds?.length && author.userId) {
-    const numericId = parseInt(author.userId, 10);
-    if (!isNaN(numericId) && allowedUserIds.includes(numericId)) return true;
+    const rawId = author.userId;
+    const numericId = parseInt(rawId, 10);
+    const isNumericString = !isNaN(numericId) && String(numericId) === rawId;
+    for (const entry of allowedUserIds) {
+      if (typeof entry === "number") {
+        if (isNumericString && entry === numericId) return true;
+      } else {
+        // String entry — compare raw string (Slack `Uxxx`, or numeric-as-string telegram id)
+        if (entry === rawId) return true;
+      }
+    }
   }
 
   // Fall back to username check

@@ -118,6 +118,61 @@ describe("isAllowed", () => {
   it("blocks messages with empty author", () => {
     expect(isAllowed({ author: {} }, ["alice"])).toBe(false);
   });
+
+  // ── Multi-transport allowlist (Phase 1: widened to (string | number)[]) ──
+
+  it("matches a numeric telegram id from a heterogeneous allowlist", () => {
+    expect(
+      isAllowed(
+        { author: { userId: "12345" } },
+        [],
+        [12345, "U02ABC"],
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a slack string id from a heterogeneous allowlist", () => {
+    expect(
+      isAllowed(
+        { author: { userId: "U02ABC" } },
+        [],
+        [12345, "U02ABC"],
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT match a slack id when only numeric entries are allowlisted", () => {
+    // parseInt("U02ABC", 10) is NaN — must not silently match a numeric entry.
+    expect(
+      isAllowed(
+        { author: { userId: "U02ABC" } },
+        [],
+        [12345, 67890],
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match a telegram numeric id when only string entries are allowlisted", () => {
+    expect(
+      isAllowed(
+        { author: { userId: "12345" } },
+        [],
+        ["U02ABC"],
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a numeric-shaped string entry that doesn't fully match the userId", () => {
+    // Defensive: parseInt("12345abc", 10) === 12345, but the raw string isn't
+    // "12345" so it must NOT match a numeric entry of 12345.
+    expect(
+      isAllowed(
+        { author: { userId: "12345abc" } },
+        [],
+        [12345],
+      ),
+    ).toBe(false);
+  });
 });
 
 // ─────────────────────────────────────────────────────

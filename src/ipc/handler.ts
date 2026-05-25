@@ -17,12 +17,16 @@ export function createIpcHandler(
       const allChatIds = getConfig().chat.notifyChatIds ?? [];
       if (allChatIds.length === 0) return { ok: false, error: "No notifyChatIds configured" };
 
-      let targetIds: number[];
+      let targetIds: (string | number)[];
       if (req.session === "main") {
         targetIds = [allChatIds[0]];
-      } else if (req.session && /^-?\d+$/.test(req.session)) {
-        targetIds = [Number(req.session)];
+      } else if (req.session && transport.ownsChatId(req.session)) {
+        // session value is a recognized chat id (telegram numeric-as-string
+        // OR slack `Cxxx`/`Dxxx`/`Uxxx`/`Gxxx`). Single-target route.
+        targetIds = [req.session];
       } else {
+        // No session, or session that doesn't match any transport's id shape:
+        // fan out to all configured ids.
         targetIds = allChatIds;
       }
 
