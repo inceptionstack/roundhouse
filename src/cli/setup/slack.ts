@@ -85,13 +85,27 @@ export function validateSlackAppTokenShape(appToken: string): void {
 /**
  * Read the bundled Slack app manifest YAML.
  *
- * Resolves relative to this module so it works for both `tsx src/...` (dev)
- * and `node src/dist/...` (prod-build) layouts. The manifest lives at
- * src/transports/slack/manifest.yaml.
+ * Resolves relative to this module. We probe two candidate paths so we
+ * work for both `tsx src/...` (dev: this file at src/cli/setup/slack.ts)
+ * and `node src/dist/...` (built: this file at src/dist/index.js after
+ * a single-file bundle). The manifest itself is shipped at
+ * src/transports/slack/manifest.yaml in the package.
  */
 export async function readBundledManifest(): Promise<string> {
   const here = dirname(fileURLToPath(import.meta.url));
-  // setup/slack.ts → ../../transports/slack/manifest.yaml
-  const path = resolve(here, "..", "..", "transports", "slack", "manifest.yaml");
-  return readFile(path, "utf8");
+  const candidates = [
+    // Dev (tsx): setup/slack.ts → ../../transports/slack/manifest.yaml
+    resolve(here, "..", "..", "transports", "slack", "manifest.yaml"),
+    // Built (src/dist/): src/dist/index.js → ../transports/slack/manifest.yaml
+    resolve(here, "..", "transports", "slack", "manifest.yaml"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return await readFile(candidate, "utf8");
+    } catch { /* try next */ }
+  }
+  throw new Error(
+    `Could not find Slack manifest. Searched: ${candidates.join(", ")}. ` +
+    `Make sure the package's src/transports/slack/manifest.yaml is shipped.`,
+  );
 }

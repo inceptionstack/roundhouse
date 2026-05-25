@@ -227,10 +227,11 @@ export async function cmdPair(argv: string[]): Promise<void> {
 
 function printDryRun(opts: SetupOptions): void {
   const agent = getAgentDefinition(opts.agent);
-  textLog("\n🔧 Roundhouse Setup (DRY RUN)");
+  const transport = opts.slack ? "Slack" : "Telegram";
+  textLog(`\n🔧 Roundhouse Setup (DRY RUN — ${transport})`);
   textLog("━━━━━━━━━━━━━━━━━━━\n");
   textLog(`Agent: ${agent.name} (${agent.type})`);
-  textLog("Would validate Telegram token");
+  textLog(`Would validate ${transport} ${opts.slack ? "tokens (xoxb + xapp)" : "token"}`);
   textLog("Would stop existing gateway (if running)");
   textLog(`Would install: npm install -g @inceptionstack/roundhouse`);
   for (const pkg of agent.packages) {
@@ -244,11 +245,18 @@ function printDryRun(opts: SetupOptions): void {
     textLog(`Would install: pi-psst extension`);
   }
   for (const ext of opts.extensions) textLog(`Would install extension: ${ext}`);
-  if (!opts.nonInteractive && opts.notifyChatIds.length === 0) {
+  if (opts.slack) {
+    textLog(`Would write pending pairing file ~/.roundhouse/slack-pairing.json (status=pending)`);
+    textLog(`Would save Slack app manifest to /tmp/roundhouse-slack-manifest.yaml`);
+  } else if (!opts.nonInteractive && opts.notifyChatIds.length === 0) {
     textLog(`Would pair via Telegram (interactive)`);
   }
   if (opts.psst) {
-    textLog(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
+    if (opts.slack) {
+      textLog(`Would store SLACK_BOT_TOKEN, SLACK_APP_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
+    } else {
+      textLog(`Would store TELEGRAM_BOT_TOKEN, BOT_USERNAME, ALLOWED_USERS in psst`);
+    }
   }
   if (agent.configDirs?.length) {
     textLog(`Would configure: agent-specific settings`);
@@ -256,9 +264,9 @@ function printDryRun(opts: SetupOptions): void {
   }
   textLog(`  Set defaultProvider: ${opts.provider}`);
   textLog(`  Set defaultModel: ${opts.model}`);
-  textLog(`Would write: ~/.roundhouse/gateway.config.json`);
+  textLog(`Would write: ~/.roundhouse/gateway.config.json (adapters.${opts.slack ? "slack" : "telegram"} configured)`);
   textLog(`Would write: ~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
-  textLog(`Would register ${BOT_COMMANDS.length} bot commands`);
+  if (!opts.slack) textLog(`Would register ${BOT_COMMANDS.length} bot commands`);
   if (opts.systemd) textLog(`Would install systemd service`);
   textLog("\nNo changes made.\n");
 }
@@ -268,21 +276,30 @@ function printDryRun(opts: SetupOptions): void {
 function printSetupHelp(): void {
   console.log(`
 Usage:
-  roundhouse setup --telegram                     Interactive wizard (recommended)
-  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --telegram --non-interactive --user USERNAME   Non-interactive automation (SSM/cloud-init)
-  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --user USERNAME                                Legacy (non-wizard) setup
+  roundhouse setup --telegram                     Interactive Telegram wizard
+  roundhouse setup --slack                        Interactive Slack wizard (socket mode)
+  TELEGRAM_BOT_TOKEN=... roundhouse setup \\\n    --telegram --non-interactive --user USERNAME  Non-interactive Telegram automation
+  SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... \\\n    roundhouse setup --slack --non-interactive \\\n    --user USERNAME                              Non-interactive Slack automation
 
-Modes:
-  --telegram                 Telegram-focused setup (wizard or non-interactive)
-  --non-interactive           Suppress all prompts (for automation/SSM/cloud-init)
-                             Requires TELEGRAM_BOT_TOKEN env var and --user
+Transport (mutually exclusive):
+  --telegram                 Telegram setup (wizard or non-interactive)
+  --slack                    Slack setup, socket mode (wizard or non-interactive)
+  --non-interactive          Suppress all prompts (for automation/SSM/cloud-init)
 
-Required (or prompted in interactive --telegram):
-  --user <username>          Telegram username (repeatable, strips @)
+Required (or prompted in interactive mode):
+  --user <username>          Bot owner's username on the platform (repeatable, strips @)
 
-Token:
+Telegram credentials:
   TELEGRAM_BOT_TOKEN env     Preferred — not in shell history
   --bot-token <token>        Accepted in interactive mode only
+
+Slack credentials (env preferred — never via flags in --non-interactive):
+  SLACK_BOT_TOKEN env        Bot token (xoxb-…)
+  SLACK_APP_TOKEN env        App-level token (xapp-…) for socket mode
+  SLACK_SIGNING_SECRET env   Optional, for webhook mode (v1 ships socket-only)
+  --slack-bot-token <token>      Interactive only
+  --slack-app-token <token>      Interactive only
+  --slack-signing-secret <s>     Interactive only
 
 Agent:
   --agent <type>             Agent type (default: pi; available: ${listAvailableAgentTypes().join(", ")})
@@ -292,7 +309,7 @@ Agent:
   --cwd <path>               Agent working directory (default: ~)
 
 Channel:
-  --notify-chat <id>         Telegram chat ID (repeatable, skips pairing)
+  --notify-chat <id>         Chat ID to notify (Telegram numeric, repeatable)
 
 Service:
   --no-systemd               Skip systemd install
@@ -300,7 +317,7 @@ Service:
   --with-psst                Use psst vault for secrets (default: .env file)
 
 Display:
-  --qr                       Force QR code display
+  --qr                       Force QR code display (Telegram only)
   --no-qr                    Disable QR code display
 
 Behavior:
