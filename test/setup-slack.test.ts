@@ -56,6 +56,14 @@ describe("parseSetupArgs --slack", () => {
     ])).toThrow(/argv visible in process listings/);
   });
 
+  it("rejects --slack-signing-secret in --non-interactive mode (argv leakage)", () => {
+    expect(() => parseSetupArgs([
+      "--slack", "--non-interactive",
+      "--slack-signing-secret", "secret-value",
+      "--user", "alice",
+    ])).toThrow(/argv visible in process listings/);
+  });
+
   it("falls back to env vars when flags omitted", () => {
     process.env.SLACK_BOT_TOKEN = "xoxb-from-env";
     process.env.SLACK_APP_TOKEN = "xapp-from-env";

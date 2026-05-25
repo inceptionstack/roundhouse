@@ -28,6 +28,7 @@ import {
 } from "./steps";
 import { atomicWriteJson, atomicWriteText } from "./helpers";
 import { type SetupOptions } from "./types";
+import { envQuote, parseEnvFile } from "../env-file";
 import { promptText, promptMasked } from "./prompts";
 import { resolveAgentForSetup, textLog, textStepLog, createStepLog } from "./runtime";
 import { createJsonLogger, type SetupDiagnostics, printDiagnosticError } from "./logger";
@@ -49,7 +50,6 @@ import {
   ENV_FILE_PATH as ENV_PATH,
   fileExists,
 } from "../../config";
-import { parseEnvFile, unquoteEnvValue } from "../env-file";
 
 const SLACK_MANIFEST_TMP = resolve(tmpdir(), "roundhouse-slack-manifest.yaml");
 
@@ -76,32 +76,58 @@ async function stepWriteSlackEnv(
   let existing = new Map<string, string>();
   try { existing = parseEnvFile(await readFile(ENV_PATH, "utf8")); } catch {}
 
-  existing.set("SLACK_BOT_TOKEN", `"${opts.slackBotToken}"`);
-  existing.set("SLACK_APP_TOKEN", `"${opts.slackAppToken}"`);
-  if (opts.slackSigningSecret) existing.set("SLACK_SIGNING_SECRET", `"${opts.slackSigningSecret}"`);
-  existing.set("BOT_USERNAME", `"${info.botName}"`);
-  existing.set("ALLOWED_USERS", `"${opts.users.join(",")}"`);
+  // Use envQuote so values with `"`, `$`, backtick, or backslash round-trip
+  // through parseEnvFile and don't trigger shell expansion in systemd's
+  // EnvironmentFile parser.
+  if (!opts.psst) {
+    existing.set("SLACK_BOT_TOKEN", envQuote(opts.slackBotToken));
+    existing.set("SLACK_APP_TOKEN", envQuote(opts.slackAppToken));
+    if (opts.slackSigningSecret) existing.set("SLACK_SIGNING_SECRET", envQuote(opts.slackSigningSecret));
+    existing.set("BOT_USERNAME", envQuote(info.botName));
+    existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
+  } else {
+    // psst path: still write non-secret config so systemd EnvironmentFile
+    // has BOT_USERNAME / ALLOWED_USERS for the gateway warning logic.
+    existing.set("BOT_USERNAME", envQuote(info.botName));
+    existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
+  }
 
   // Bedrock defaults if needed (mirror telegram step)
   const getExisting = (key: string) => existing.get(key);
   if (opts.provider === "amazon-bedrock") {
-    if (!existing.has("AWS_PROFILE")) existing.set("AWS_PROFILE", getExisting("AWS_PROFILE") ?? '"default"');
-    if (!existing.has("AWS_DEFAULT_REGION")) existing.set("AWS_DEFAULT_REGION", getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"');
-    if (!existing.has("AWS_REGION")) existing.set("AWS_REGION", getExisting("AWS_REGION") ?? getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"');
+    if (!existing.has("AWS_PROFILE")) existing.set("AWS_PROFILE", getExisting("AWS_PROFILE") ?? envQuote("default"));
+    if (!existing.has("AWS_DEFAULT_REGION")) existing.set("AWS_DEFAULT_REGION", getExisting("AWS_DEFAULT_REGION") ?? envQuote("us-east-1"));
+    if (!existing.has("AWS_REGION")) existing.set("AWS_REGION", getExisting("AWS_REGION") ?? getExisting("AWS_DEFAULT_REGION") ?? envQuote("us-east-1"));
   }
 
   const lines: string[] = [];
   for (const [k, v] of existing.entries()) lines.push(`${k}=${v}`);
   await atomicWriteText(ENV_PATH, lines.join("\n") + "\n");
-  logger.ok(`~/.roundhouse/.env`);
+  logger.ok(`~/.roundhouse/.env${opts.psst ? " (non-secret config only)" : ""}`);
 }
 
 async function stepWriteSlackConfig(
   logger: ReturnType<typeof createStepLog>,
   opts: SetupOptions,
   info: SlackBotInfo,
+  agent: import("../../agents/registry").AgentDefinition,
 ): Promise<void> {
-  logger.step("⑨", "Writing ~/.roundhouse/gateway.config.json...");
+  logger.step("⑨", "Configuring agent + writing gateway.config.json...");
+
+  await mkdir(ROUNDHOUSE_DIR, { recursive: true });
+
+  // Run the agent's own configurator (writes ~/.pi/agent/settings.json
+  // for pi, etc.). Telegram's stepConfigure does the same.
+  if (agent.configure) {
+    await agent.configure({
+      provider: opts.provider,
+      model: opts.model,
+      cwd: opts.cwd,
+      force: opts.force,
+      psst: opts.psst,
+      extensions: opts.extensions,
+    });
+  }
 
   let gatewayConfig: Record<string, any> = {};
   if (!opts.force) {
@@ -123,7 +149,12 @@ async function stepWriteSlackConfig(
   gatewayConfig = {
     ...gatewayConfig,
     _version: 1,
-    agent: { ...gatewayConfig.agent, type: gatewayConfig.agent?.type ?? opts.agent, cwd: gatewayConfig.agent?.cwd ?? opts.cwd },
+    agent: {
+      ...gatewayConfig.agent,
+      ...agent.configDefaults,
+      type: agent.type,
+      cwd: opts.cwd,
+    },
     chat: {
       ...gatewayConfig.chat,
       botUsername: info.botName,
@@ -137,6 +168,51 @@ async function stepWriteSlackConfig(
 
   await atomicWriteJson(CONFIG_PATH, gatewayConfig);
   logger.ok(`~/.roundhouse/gateway.config.json (slack adapter configured)`);
+}
+
+async function stepStoreSlackSecrets(
+  logger: ReturnType<typeof createStepLog>,
+  opts: SetupOptions,
+  info: SlackBotInfo,
+): Promise<void> {
+  if (!opts.psst) {
+    logger.step("⑦", "Storing secrets...");
+    logger.ok("Skipped (default — use --with-psst to enable)");
+    return;
+  }
+  logger.step("⑦", "Storing secrets in psst...");
+  const secrets: [string, string][] = [
+    ["SLACK_BOT_TOKEN", opts.slackBotToken],
+    ["SLACK_APP_TOKEN", opts.slackAppToken],
+    ["BOT_USERNAME", info.botName],
+    ["ALLOWED_USERS", opts.users.join(",")],
+  ];
+  if (opts.slackSigningSecret) secrets.push(["SLACK_SIGNING_SECRET", opts.slackSigningSecret]);
+
+  for (const [name, value] of secrets) {
+    try {
+      execFileSync("psst", ["set", name, "--stdin"], {
+        input: value,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10_000,
+      });
+      logger.ok(`${name} → psst vault`);
+    } catch {
+      try {
+        execFileSync("psst", ["set", name, "--stdin"], {
+          input: value,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 10_000,
+          env: { ...process.env, PSST_FORCE: "1" },
+        });
+        logger.ok(`${name} → psst vault (updated)`);
+      } catch (err: any) {
+        logger.warn(`Failed to store ${name} in psst: ${err.message}`);
+      }
+    }
+  }
 }
 
 async function stepWriteSlackPairing(
@@ -180,13 +256,16 @@ function printSlackAppGuide(): void {
   textLog("");
 }
 
-function printSlackPairingHint(info: SlackBotInfo): void {
+function printSlackPairingHint(info: SlackBotInfo, opts: SetupOptions): void {
+  const allowedDisplay = opts.users.length
+    ? opts.users.map((u) => `@${u}`).join(", ")
+    : "@your-slack-username";
   textLog("");
   textLog("  🤝 Pairing");
   textLog("  ─────────");
   textLog(`  In Slack, open a NEW DM with @${info.botName} and send any message.`);
   textLog(`  (Click the bot in your sidebar, or search 'Apps' → @${info.botName}.)`);
-  textLog(`  The first message from one of: ${["@" + (process.env.USER ?? "you")].join(", ")} will complete pairing.`);
+  textLog(`  The first message from one of: ${allowedDisplay} will complete pairing.`);
   textLog("");
   textLog(`  Open the bot in Slack: slack://app?team=${info.teamId}&id=${info.botUserId}`);
   textLog("");
@@ -234,14 +313,15 @@ export async function runInteractiveSlackSetup(opts: SetupOptions): Promise<void
     await stepInstallPackages(logger, opts, agent);
     await stepInstallBundle(logger, opts);
 
+    await stepStoreSlackSecrets(logger, opts, info);
     await stepWriteSlackEnv(logger, opts, info);
-    await stepWriteSlackConfig(logger, opts, info);
+    await stepWriteSlackConfig(logger, opts, info, agent);
     await stepWriteSlackPairing(logger, opts, info);
 
     await stepInstallSystemd(logger, opts);
     await stepPostflight(logger);
 
-    printSlackPairingHint(info);
+    printSlackPairingHint(info, opts);
 
     textLog("\n━━━━━━━━━━━━━━━━━━━━━━━━━");
     textLog("✅ Roundhouse is ready!");
@@ -295,20 +375,23 @@ export async function runNonInteractiveSlackSetup(opts: SetupOptions): Promise<v
 
     await stepInstallBundle(stepLogger, opts);
 
-    logger.step(5, 9, "slack.env.write", "Writing env");
+    logger.step(5, 10, "slack.secrets.store", "Storing secrets");
+    await stepStoreSlackSecrets(stepLogger, opts, info);
+
+    logger.step(6, 10, "slack.env.write", "Writing env");
     await stepWriteSlackEnv(stepLogger, opts, info);
 
-    logger.step(6, 9, "slack.config.write", "Writing config");
-    await stepWriteSlackConfig(stepLogger, opts, info);
+    logger.step(7, 10, "slack.config.write", "Writing config");
+    await stepWriteSlackConfig(stepLogger, opts, info, agent);
 
-    logger.step(7, 9, "slack.pairing.write", "Writing pending-pairing");
+    logger.step(8, 10, "slack.pairing.write", "Writing pending-pairing");
     await stepWriteSlackPairing(stepLogger, opts, info);
 
-    logger.step(8, 9, "slack.manifest", "Saving manifest to /tmp");
+    logger.step(9, 10, "slack.manifest", "Saving manifest to /tmp");
     await stepDumpManifest(stepLogger);
 
     let serviceInstalled = false;
-    logger.step(9, 9, "service.install", "Installing service");
+    logger.step(10, 10, "service.install", "Installing service");
     if (!opts.systemd && platform() !== "darwin") {
       logger.warn("service.skip", "--no-systemd: service not installed. Start manually: roundhouse start");
     } else {
@@ -359,5 +442,3 @@ export async function runNonInteractiveSlackSetup(opts: SetupOptions): Promise<v
   }
 }
 
-// Re-exports so cli/setup.ts only needs one import line.
-export { unquoteEnvValue };

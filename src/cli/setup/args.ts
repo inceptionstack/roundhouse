@@ -81,9 +81,14 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
       "Use: TELEGRAM_BOT_TOKEN=... roundhouse setup --telegram --non-interactive --user USERNAME",
     );
   }
-  if (opts.nonInteractive && (argv.includes("--slack-bot-token") || argv.includes("--slack-app-token"))) {
+  if (
+    opts.nonInteractive &&
+    (argv.includes("--slack-bot-token") ||
+      argv.includes("--slack-app-token") ||
+      argv.includes("--slack-signing-secret"))
+  ) {
     throw new Error(
-      "--slack-bot-token / --slack-app-token are not accepted in --non-interactive mode (argv visible in process listings).\n" +
+      "--slack-bot-token / --slack-app-token / --slack-signing-secret are not accepted in --non-interactive mode (argv visible in process listings).\n" +
       "Use: SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... roundhouse setup --slack --non-interactive --user USERNAME",
     );
   }
