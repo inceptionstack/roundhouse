@@ -53,9 +53,6 @@ export type { TurnSource };
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
 const MAX_MESSAGE_CHUNK = 4000;
 
-/** Bot username for command suffix validation (set during gateway init) */
-let _botUsername = "";
-
 /**
  * Build the list of `TransportAdapter` delegates from the configured
  * chat-adapter keys. The Slack delegate is loaded lazily because
@@ -122,7 +119,7 @@ export class Gateway {
     // composite's "at least one delegate" invariant holds. Real deployments
     // always have at least one configured.
     this.transport = buildCompositeTransport(delegates.length > 0 ? delegates : [new TelegramAdapter()]);
-    _botUsername = config.chat.botUsername || "";
+    // BotUsernameResolver handles bot identity per transport; no global fallback needed
   }
 
   /** Handle pending pairing via transport adapter. Returns true if handled. */
