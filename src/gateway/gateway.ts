@@ -105,7 +105,11 @@ export class Gateway {
     const adapterOverrides: Record<string, string> = {};
     for (const [adapterName, adapterConfig] of Object.entries(config.chat.adapters)) {
       if (adapterConfig && typeof adapterConfig === 'object' && 'botUsername' in adapterConfig) {
-        adapterOverrides[adapterName] = (adapterConfig as any).botUsername;
+        const botUsername = (adapterConfig as any).botUsername;
+        // Only accept string overrides; ignore non-strings to prevent crashes in helpers
+        if (typeof botUsername === 'string' && botUsername.length > 0) {
+          adapterOverrides[adapterName] = botUsername;
+        }
       }
     }
     this.botUsernameResolver = new BotUsernameResolver({
@@ -253,10 +257,12 @@ export class Gateway {
     });
     const preTurnCommands = allDescriptors.filter(isPreTurn);
     const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
-    const matchers = {
-      isCommand: (t: string, c: string) => _isCmd(t, c, ""),  // Will be resolved per-thread
-      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, ""),  // Will be resolved per-thread
-    };
+
+    // Build matchers for a given botUsername (shared by pre-turn and in-turn dispatch)
+    const buildMatchers = (botUsername: string) => ({
+      isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
+      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
+    });
 
     // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
@@ -292,6 +298,7 @@ export class Gateway {
       const trimmed = userText.trim();
       // Resolve bot username for this thread's transport, then dispatch
       const botUsername = this.botUsernameResolver.resolve(thread);
+      const matchers = buildMatchers(botUsername);
       if (await this.dispatchInTurnCommand(inTurnCommands, thread, botUsername, message, trimmed, agentThreadId)) {
         return;
       }
@@ -308,6 +315,9 @@ export class Gateway {
       // Pre-turn commands fire before the main handler (and before the
       // session-pressure gate), so /cancel etc. still interrupt a mid-run
       // agent. Allowlist is enforced here for all pre-turn handlers.
+      // Resolve bot username for this thread's transport for @botname matching
+      const botUsername = this.botUsernameResolver.resolve(thread);
+      const matchers = buildMatchers(botUsername);
       for (const desc of preTurnCommands) {
         if (matchesDescriptor(desc, text, matchers)) {
           if (!isAllowed(message, allowedUsers, allowedUserIds)) return;

@@ -19,6 +19,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { Gateway } from "../src/gateway/gateway";
+import { BotUsernameResolver } from "../src/gateway/bot-username-resolver";
 import { applyTopicOverride, setActiveTopic, TOPIC_ACTION_ID } from "../src/gateway/topic-command";
 import type { AgentRouter, GatewayConfig } from "../src/types";
 import type { CommandDescriptor } from "../src/gateway/command-registry";
@@ -49,23 +50,22 @@ interface GatewayInternals {
   /** Live in-turn dispatcher that handle() uses. Calling this directly is the closest we can get to driving the real handler without a Chat SDK. */
   dispatchInTurnCommand: (
     inTurnCommands: readonly CommandDescriptor[],
-    matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
-    thread: any, message: any, trimmed: string, agentThreadId: string,
+    thread: any,
+    botUsername: string,
+    message: any,
+    trimmed: string,
+    agentThreadId: string,
   ) => Promise<boolean>;
 }
 
-function buildInTurn(gw: Gateway): { inTurn: CommandDescriptor[]; matchers: any } {
+function buildInTurn(gw: Gateway): { inTurn: CommandDescriptor[] } {
   const internals = gw as unknown as GatewayInternals;
   const all = internals.buildCommandDescriptors({
     allowedUsers: [], allowedUserIds: [], verboseThreads: new Set(),
     threadLocks: new Map(), abortControllers: new Map(),
   });
   const inTurn = all.filter(d => d.stage !== "pre-turn");
-  const matchers = {
-    isCommand: (t: string, c: string) => isCommand(t, c, "test"),
-    isCommandWithArgs: (t: string, c: string) => isCommandWithArgs(t, c, "test"),
-  };
-  return { inTurn, matchers };
+  return { inTurn };
 }
 
 describe("gateway dispatch \u2014 topic-session adapter preservation (regression)", () => {
@@ -145,14 +145,48 @@ describe("gateway dispatch \u2014 topic-session adapter preservation (regression
   it("dispatcher returns false for unrecognized commands", async () => {
     const transport = { postRich: vi.fn(), progress: vi.fn() };
     const gw = makeGateway(transport);
-    const { inTurn, matchers } = buildInTurn(gw);
+    const { inTurn } = buildInTurn(gw);
     const internals = gw as unknown as GatewayInternals;
     const transportThread = { id: "telegram:99", post: vi.fn() };
 
     const handled = await internals.dispatchInTurnCommand(
-      inTurn, matchers, transportThread, { text: "hi" }, "hi", "main",
+      inTurn,
+      transportThread,
+      "test_bot",
+      { text: "hi" },
+      "hi",
+      "main",
     );
     expect(handled).toBe(false);
     expect(transport.postRich).not.toHaveBeenCalled();
+  });
+});
+
+describe("BotUsernameResolver", () => {
+  it("resolves Slack override when available", () => {
+    const resolver = new BotUsernameResolver({
+      globalBotUsername: "telegram_bot",
+      adapterOverrides: { slack: "slack_bot" },
+    });
+    const slackThread = { id: "slack:C01:main" };
+    const telegramThread = { id: "telegram:42" };
+    expect(resolver.resolve(slackThread)).toBe("slack_bot");
+    expect(resolver.resolve(telegramThread)).toBe("telegram_bot");
+  });
+
+  it("falls back to global when no adapter override", () => {
+    const resolver = new BotUsernameResolver({
+      globalBotUsername: "default_bot",
+      adapterOverrides: {},
+    });
+    expect(resolver.resolve({ id: "slack:C01:main" })).toBe("default_bot");
+  });
+
+  it("returns empty string when no global or override configured", () => {
+    const resolver = new BotUsernameResolver({
+      globalBotUsername: "",
+      adapterOverrides: {},
+    });
+    expect(resolver.resolve({ id: "telegram:42" })).toBe("");
   });
 });
