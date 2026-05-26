@@ -213,7 +213,7 @@ export async function cmdPair(argv: string[]): Promise<void> {
     });
 
     if (!existingUserIds.includes(result.userId)) existingUserIds.push(result.userId);
-    if (!existingNotifyIds.includes(result.chatId)) existingNotifyIds.push(Number(result.chatId));
+    if (!existingNotifyIds.includes(result.chatId)) existingNotifyIds.push(result.chatId);
 
     config.chat.allowedUserIds = existingUserIds;
     config.chat.notifyChatIds = existingNotifyIds;

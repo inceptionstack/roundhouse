@@ -300,7 +300,6 @@ function buildMatchers(botUsername: string) {
       const trimmed = userText.trim();
       // Resolve bot username for this thread's transport, then dispatch
       const botUsername = this.botUsernameResolver.resolve(thread);
-      const matchers = buildMatchers(botUsername);
       if (await this.dispatchInTurnCommand(inTurnCommands, thread, botUsername, message, trimmed, agentThreadId)) {
         return;
       }
