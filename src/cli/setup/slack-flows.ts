@@ -83,12 +83,14 @@ async function stepWriteSlackEnv(
     existing.set("SLACK_BOT_TOKEN", envQuote(opts.slackBotToken));
     existing.set("SLACK_APP_TOKEN", envQuote(opts.slackAppToken));
     if (opts.slackSigningSecret) existing.set("SLACK_SIGNING_SECRET", envQuote(opts.slackSigningSecret));
-    existing.set("BOT_USERNAME", envQuote(info.botName));
+    // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
+    if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
     existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
   } else {
     // psst path: still write non-secret config so systemd EnvironmentFile
     // has BOT_USERNAME / ALLOWED_USERS for the gateway warning logic.
-    existing.set("BOT_USERNAME", envQuote(info.botName));
+    // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
+    if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
     existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
   }
 
