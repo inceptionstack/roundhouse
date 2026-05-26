@@ -164,7 +164,14 @@ export class CompositeTransportAdapter implements TransportAdapter {
     // Walk delegates in order. The first that returns non-null wins. We
     // attach `transport: d.name` so the gateway can mark `pairingComplete`
     // per-transport.
+    //
+    // CRITICAL: Only dispatch to delegates that own the thread. This prevents
+    // cross-transport pairing side effects: e.g., if Telegram sends a message
+    // with a username matching pending Slack pairing, Slack's handlePairing
+    // must not be invoked (it would match on username alone without checking
+    // thread ownership, corrupting notifyChatIds with a Telegram chat ID).
     for (const d of this.delegates) {
+      if (!d.ownsThread(thread)) continue;  // Skip non-owning adapters
       const result = await d.handlePairing(thread, message);
       if (result) {
         return { ...result, transport: result.transport ?? d.name };
