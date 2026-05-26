@@ -86,7 +86,10 @@ async function stepWriteSlackEnv(
     // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
     if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
     // Merge with existing ALLOWED_USERS (don't replace, which would drop prior users)
-    const existingUsers = existing.get("ALLOWED_USERS")?.split(",").filter(Boolean) ?? [];
+    // Note: parseEnvFile returns quoted values (e.g., "alice,bob"), unquote before splitting
+    const rawUsers = existing.get("ALLOWED_USERS") ?? "";
+    const unquoted = rawUsers.startsWith('"') && rawUsers.endsWith('"') ? rawUsers.slice(1, -1) : rawUsers;
+    const existingUsers = unquoted.split(",").filter(Boolean) ?? [];
     const allUsers = Array.from(new Set([...existingUsers, ...opts.users]));
     existing.set("ALLOWED_USERS", envQuote(allUsers.join(",")));
   } else {
@@ -95,7 +98,10 @@ async function stepWriteSlackEnv(
     // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
     if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
     // Merge with existing ALLOWED_USERS (don't replace, which would drop prior users)
-    const existingUsers = existing.get("ALLOWED_USERS")?.split(",").filter(Boolean) ?? [];
+    // Note: parseEnvFile returns quoted values (e.g., "alice,bob"), unquote before splitting
+    const rawUsers = existing.get("ALLOWED_USERS") ?? "";
+    const unquoted = rawUsers.startsWith('"') && rawUsers.endsWith('"') ? rawUsers.slice(1, -1) : rawUsers;
+    const existingUsers = unquoted.split(",").filter(Boolean) ?? [];
     const allUsers = Array.from(new Set([...existingUsers, ...opts.users]));
     existing.set("ALLOWED_USERS", envQuote(allUsers.join(",")));
   }
