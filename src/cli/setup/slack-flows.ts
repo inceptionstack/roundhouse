@@ -85,13 +85,19 @@ async function stepWriteSlackEnv(
     if (opts.slackSigningSecret) existing.set("SLACK_SIGNING_SECRET", envQuote(opts.slackSigningSecret));
     // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
     if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
-    existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
+    // Merge with existing ALLOWED_USERS (don't replace, which would drop prior users)
+    const existingUsers = existing.get("ALLOWED_USERS")?.split(",").filter(Boolean) ?? [];
+    const allUsers = Array.from(new Set([...existingUsers, ...opts.users]));
+    existing.set("ALLOWED_USERS", envQuote(allUsers.join(",")));
   } else {
     // psst path: still write non-secret config so systemd EnvironmentFile
     // has BOT_USERNAME / ALLOWED_USERS for the gateway warning logic.
     // Only set BOT_USERNAME if not already present (preserve Telegram value in mixed installs)
     if (!existing.has("BOT_USERNAME")) existing.set("BOT_USERNAME", envQuote(info.botName));
-    existing.set("ALLOWED_USERS", envQuote(opts.users.join(",")));
+    // Merge with existing ALLOWED_USERS (don't replace, which would drop prior users)
+    const existingUsers = existing.get("ALLOWED_USERS")?.split(",").filter(Boolean) ?? [];
+    const allUsers = Array.from(new Set([...existingUsers, ...opts.users]));
+    existing.set("ALLOWED_USERS", envQuote(allUsers.join(",")));
   }
 
   // Bedrock defaults if needed (mirror telegram step)
