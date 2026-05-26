@@ -1174,7 +1174,6 @@ export class Gateway {
     const chatIds = this.config.chat.notifyChatIds;
     if (!chatIds?.length) return;
 
-    const agentThreadId = "main";
     const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
 
     // Pick the first chatId owned by each delegate (deduplicated by transport name).
@@ -1189,6 +1188,9 @@ export class Gateway {
 
     for (const { transport, chatId } of primaryPerTransport) {
       try {
+        // Derive per-transport boot session id (not global "main")
+        // This ensures each transport seeds its own session, not cross-contaminated
+        const agentThreadId = this.transport.encodeParentThreadId(chatId);
         const syntheticThread = this.transport.createThread(chatId);
         await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers, "boot");
       } catch (err) {
