@@ -269,6 +269,9 @@ export class TelegramAdapter implements TransportAdapter {
   }
 
   async handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null> {
+    // Early guard: only process threads this adapter owns (defensive; Composite also filters)
+    if (!this.ownsThread(thread)) return null;
+
     const text = (message.text ?? "").trim();
     if (!text) return null;
 

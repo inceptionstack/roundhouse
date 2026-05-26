@@ -278,6 +278,9 @@ export class SlackAdapter implements TransportAdapter {
    *     `slackSdk.getUser(userId)` so userName is populated.
    */
   async handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null> {
+    // Early guard: only process threads this adapter owns (defensive; Composite also filters)
+    if (!this.ownsThread(thread)) return null;
+
     const pending = await readPendingSlackPairing();
     if (!pending || pending.status !== "pending") return null;
 
