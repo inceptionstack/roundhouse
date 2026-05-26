@@ -258,11 +258,13 @@ export class Gateway {
     const preTurnCommands = allDescriptors.filter(isPreTurn);
     const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
 
-    // Build matchers for a given botUsername (shared by pre-turn and in-turn dispatch)
-    const buildMatchers = (botUsername: string) => ({
-      isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
-      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
-    });
+// Build matchers for a given botUsername (shared by pre-turn and in-turn dispatch)
+function buildMatchers(botUsername: string) {
+  return {
+    isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
+    isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
+  };
+}
 
     // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
@@ -968,10 +970,7 @@ export class Gateway {
     trimmed: string,
     agentThreadId: string,
   ): Promise<boolean> {
-    const matchers = {
-      isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
-      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
-    };
+    const matchers = buildMatchers(botUsername);  // Reuse shared factory
     const inv: CommandInvocation = { thread, message: message as { text?: string; [key: string]: unknown }, text: trimmed, agentThreadId };
     for (const desc of inTurnCommands) {
       if (matchesDescriptor(desc, trimmed, matchers)) {

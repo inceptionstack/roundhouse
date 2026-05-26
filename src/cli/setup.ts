@@ -206,10 +206,14 @@ export async function cmdPair(argv: string[]): Promise<void> {
     const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
     if (!config.chat) config.chat = {};
     const existingUserIds: number[] = config.chat.allowedUserIds ?? [];
-    const existingNotifyIds: number[] = (config.chat.notifyChatIds ?? []).map(Number).filter((n) => !isNaN(n));
+    // Preserve both numeric (Telegram) and string (Slack: D.../C...) IDs
+    const existingNotifyIds: (number | string)[] = (config.chat.notifyChatIds ?? []).map((id) => {
+      const num = Number(id);
+      return !isNaN(num) ? num : id;  // Keep non-numeric IDs as-is
+    });
 
     if (!existingUserIds.includes(result.userId)) existingUserIds.push(result.userId);
-    if (!existingNotifyIds.includes(result.chatId)) existingNotifyIds.push(result.chatId);
+    if (!existingNotifyIds.includes(result.chatId)) existingNotifyIds.push(Number(result.chatId));
 
     config.chat.allowedUserIds = existingUserIds;
     config.chat.notifyChatIds = existingNotifyIds;
