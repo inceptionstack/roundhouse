@@ -71,6 +71,16 @@ function buildTransportDelegates(
   return delegates;
 }
 
+// ── Matchers ──────────────────────────────────────────
+// Build command matchers for a given botUsername.
+// Shared by pre-turn and in-turn dispatch to avoid duplication.
+function buildMatchers(botUsername: string) {
+  return {
+    isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
+    isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
+  };
+}
+
 // ── Gateway ──────────────────────────────────────────
 
 export class Gateway {
@@ -255,13 +265,7 @@ export class Gateway {
     const preTurnCommands = allDescriptors.filter(isPreTurn);
     const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
 
-// Build matchers for a given botUsername (shared by pre-turn and in-turn dispatch)
-function buildMatchers(botUsername: string) {
-  return {
-    isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
-    isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
-  };
-}
+
 
     // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
