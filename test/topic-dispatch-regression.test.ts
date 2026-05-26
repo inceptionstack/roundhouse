@@ -105,8 +105,12 @@ describe("gateway dispatch \u2014 topic-session adapter preservation (regression
 
       // Drive the live dispatcher \u2014 same code path handle() uses.
       const handled = await internals.dispatchInTurnCommand(
-        inTurn, matchers,
-        transportThread, { text: "/topic" }, "/topic", agentThreadId,
+        inTurn,
+        transportThread,
+        "test_bot",
+        { text: "/topic" },
+        "/topic",
+        agentThreadId,
       );
       expect(handled).toBe(true);
 

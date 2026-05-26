@@ -157,11 +157,10 @@ async function stepWriteSlackConfig(
     },
     chat: {
       ...gatewayConfig.chat,
-      botUsername: info.botName,
       allowedUsers: mergedUsers,
       allowedUserIds: mergedUserIds,
       notifyChatIds: mergedNotifyIds,
-      adapters: { ...existingAdapters, slack: { mode: "socket" } },
+      adapters: { ...existingAdapters, slack: { mode: "socket", botUsername: info.botName } },
     },
     ...(opts.voice === false ? { voice: { stt: { enabled: false } } } : {}),
   };

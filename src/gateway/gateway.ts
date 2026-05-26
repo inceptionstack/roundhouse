@@ -38,6 +38,7 @@ import { TelegramAdapter, SlackAdapter, CompositeTransportAdapter, buildComposit
 import type { TransportAdapter } from "../transports";
 import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
+import { BotUsernameResolver } from "./bot-username-resolver";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -80,6 +81,7 @@ export class Gateway {
   private router: AgentRouter;
   private config: GatewayConfig;
   private transport: CompositeTransportAdapter;
+  private botUsernameResolver: BotUsernameResolver;
   /**
    * Per-transport "pairing complete" flag. Keyed by transport delegate name.
    * Replaces a single boolean that would silently block a second transport's
@@ -99,6 +101,17 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
+    // Initialize bot username resolver with per-adapter overrides
+    const adapterOverrides: Record<string, string> = {};
+    for (const [adapterName, adapterConfig] of Object.entries(config.chat.adapters)) {
+      if (adapterConfig && typeof adapterConfig === 'object' && 'botUsername' in adapterConfig) {
+        adapterOverrides[adapterName] = (adapterConfig as any).botUsername;
+      }
+    }
+    this.botUsernameResolver = new BotUsernameResolver({
+      globalBotUsername: config.chat.botUsername || "",
+      adapterOverrides,
+    });
     const delegates = buildTransportDelegates(config.chat.adapters);
     // Empty config (e.g. test harnesses that override `transport` post-construction)
     // gets a single-delegate composite around a stub Telegram adapter so the
@@ -241,8 +254,8 @@ export class Gateway {
     const preTurnCommands = allDescriptors.filter(isPreTurn);
     const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
     const matchers = {
-      isCommand: (t: string, c: string) => _isCmd(t, c, _botUsername),
-      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, _botUsername),
+      isCommand: (t: string, c: string) => _isCmd(t, c, ""),  // Will be resolved per-thread
+      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, ""),  // Will be resolved per-thread
     };
 
     // ── Unified handler ──────────────────────────────
@@ -277,7 +290,9 @@ export class Gateway {
 
       // ── Command dispatch (in-turn stage) ───
       const trimmed = userText.trim();
-      if (await this.dispatchInTurnCommand(inTurnCommands, matchers, thread, message, trimmed, agentThreadId)) {
+      // Resolve bot username for this thread's transport, then dispatch
+      const botUsername = this.botUsernameResolver.resolve(thread);
+      if (await this.dispatchInTurnCommand(inTurnCommands, thread, botUsername, message, trimmed, agentThreadId)) {
         return;
       }
 
@@ -937,9 +952,16 @@ export class Gateway {
    */
   private async dispatchInTurnCommand(
     inTurnCommands: readonly CommandDescriptor[],
-    matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
-    thread: any, message: unknown, trimmed: string, agentThreadId: string,
+    thread: any,
+    botUsername: string,
+    message: unknown,
+    trimmed: string,
+    agentThreadId: string,
   ): Promise<boolean> {
+    const matchers = {
+      isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
+      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
+    };
     const inv: CommandInvocation = { thread, message: message as { text?: string; [key: string]: unknown }, text: trimmed, agentThreadId };
     for (const desc of inTurnCommands) {
       if (matchesDescriptor(desc, trimmed, matchers)) {
