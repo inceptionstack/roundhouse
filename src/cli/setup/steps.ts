@@ -395,11 +395,19 @@ export async function stepConfigure(
 
   const existingUsers: string[] = gatewayConfig.chat?.allowedUsers ?? [];
   const existingUserIds: number[] = gatewayConfig.chat?.allowedUserIds ?? [];
-  const existingNotifyIds: number[] = (gatewayConfig.chat?.notifyChatIds ?? []).map(Number).filter((n) => !isNaN(n));
+  // Preserve both numeric IDs (Telegram) and string IDs (Slack: D.../C...)
+  const existingNotifyIds: (number | string)[] = (gatewayConfig.chat?.notifyChatIds ?? []).map((id) => {
+    const num = Number(id);
+    return !isNaN(num) ? num : id;
+  });
 
   const mergedUsers = [...new Set([...existingUsers, ...opts.users])];
   const mergedUserIds = [...existingUserIds];
-  const mergedNotifyIds = [...new Set([...existingNotifyIds, ...opts.notifyChatIds])];
+  // Merge notify IDs: preserve existing (both numeric + Slack string IDs), add new ones
+  const mergedNotifyIds = [...new Set([...existingNotifyIds, ...opts.notifyChatIds.map((id) => {
+    const num = Number(id);
+    return !isNaN(num) ? num : id;
+  })])];
 
   if (pairResult) {
     if (!mergedUserIds.includes(pairResult.userId)) {
@@ -428,6 +436,12 @@ export async function stepConfigure(
   await atomicWriteJson(CONFIG_PATH, gatewayConfig);
   logger.ok(`~/.roundhouse/gateway.config.json`);
 
+  // Read existing .env to preserve unrelated keys (Slack tokens, custom vars, etc.)
+  let existingEnv = new Map<string, string>();
+  try {
+    existingEnv = parseEnvFile(await readFile(ENV_PATH, "utf8"));
+  } catch {}
+
   const envLines: string[] = [];
 
   if (!opts.psst) {
@@ -445,10 +459,6 @@ export async function stepConfigure(
   }
 
   if (opts.provider === "amazon-bedrock") {
-    let existingEnv = new Map<string, string>();
-    try {
-      existingEnv = parseEnvFile(await readFile(ENV_PATH, "utf8"));
-    } catch {}
     const getExisting = (key: string) => existingEnv.get(key);
 
     if (!envLines.some((l) => l.startsWith("AWS_PROFILE="))) {
@@ -459,6 +469,13 @@ export async function stepConfigure(
     }
     if (!envLines.some((l) => l.startsWith("AWS_REGION="))) {
       envLines.push(`AWS_REGION=${getExisting("AWS_REGION") ?? getExisting("AWS_DEFAULT_REGION") ?? '"us-east-1"'}`);
+    }
+  }
+
+  // Preserve existing Slack and other adapter credentials
+  for (const [key, value] of existingEnv) {
+    if (key.startsWith("SLACK_") && !envLines.some((l) => l.startsWith(key + "="))) {
+      envLines.push(`${key}=${envQuote(value)}`);
     }
   }
 
