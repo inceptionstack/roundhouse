@@ -186,7 +186,12 @@ export class TelegramAdapter implements TransportAdapter {
   }
 
   encodeParentThreadId(chatId: string | number): string {
-    return `telegram:${chatId}:main`;
+    // For Telegram groups (negative IDs), encode as 'group:<chatId>' to match
+    // inbound routing in resolveAgentThreadId(). This ensures boot turns seed
+    // the same session as live inbound messages.
+    const n = typeof chatId === "number" ? chatId : Number(chatId);
+    if (Number.isFinite(n) && n < 0) return `group:${chatId}`;
+    return "main";
   }
 
   formatNotifySession(chatId: string | number): string {

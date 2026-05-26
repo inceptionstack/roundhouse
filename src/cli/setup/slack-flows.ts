@@ -194,12 +194,46 @@ async function stepStoreSlackSecrets(
     return;
   }
   logger.step("⑦", "Storing secrets in psst...");
+  
+  // Preserve existing vault values for BOT_USERNAME and ALLOWED_USERS
+  // Try to read existing values (may fail if not set yet)
+  let existingBotUsername = info.botName;
+  let existingAllowedUsers = opts.users;
+  
+  try {
+    const botUsernameOutput = execFileSync("psst", ["get", "BOT_USERNAME"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5_000,
+    }).trim();
+    if (botUsernameOutput && !botUsernameOutput.includes("not found")) {
+      existingBotUsername = botUsernameOutput; // Preserve existing
+    }
+  } catch {
+    // Key doesn't exist yet, use new value
+  }
+  
+  try {
+    const allowedUsersOutput = execFileSync("psst", ["get", "ALLOWED_USERS"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5_000,
+    }).trim();
+    if (allowedUsersOutput && !allowedUsersOutput.includes("not found")) {
+      const existing = allowedUsersOutput.split(",").filter(Boolean);
+      existingAllowedUsers = Array.from(new Set([...existing, ...opts.users]));
+    }
+  } catch {
+    // Key doesn't exist yet, use new value
+  }
+  
   const secrets: [string, string][] = [
     ["SLACK_BOT_TOKEN", opts.slackBotToken],
     ["SLACK_APP_TOKEN", opts.slackAppToken],
-    ["BOT_USERNAME", info.botName],
-    ["ALLOWED_USERS", opts.users.join(",")],
+    ["BOT_USERNAME", existingBotUsername],
+    ["ALLOWED_USERS", existingAllowedUsers.join(",")],
   ];
+
   if (opts.slackSigningSecret) secrets.push(["SLACK_SIGNING_SECRET", opts.slackSigningSecret]);
 
   for (const [name, value] of secrets) {
