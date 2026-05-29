@@ -185,8 +185,8 @@ gateway.config.json
     ├── notifyChatIds: [...]   # Telegram chat IDs for startup notifications
     └── adapters
         ├── telegram: { mode: "polling" }
-        ├── slack: { ... }    # (future)
-        └── discord: { ... }  # (future)
+        ├── slack: { mode: "socket" }   # SLACK_BOT_TOKEN/SLACK_APP_TOKEN env
+        └── discord: { ... }             # (future)
 
 └── voice                     # Optional voice features
     └── stt
@@ -228,7 +228,7 @@ Each chat platform thread gets its own agent session:
 
 ```
 Telegram DM with Alice    →  threadId = "telegram:123456789"  →  session A
-Slack DM with Alice       →  threadId = "slack:U12345"         →  session B
+Slack DM with Alice       →  threadId = "slack:D12345:"        →  session B
 Telegram group mention  →  threadId = "telegram:-100123456"  →  session C
 ```
 
@@ -253,6 +253,45 @@ The `AgentRouter` interface is a seam for future multi-agent routing:
 | `RoundRobinRouter` | Load balance across agent instances |
 
 The gateway and agent adapters don't change — only the router.
+
+## Transport composition
+
+A single gateway can run multiple chat platforms concurrently (Telegram + Slack today). The wiring:
+
+```
+                     ┌────────────────────────────────────────────┐
+                     │  CompositeTransportAdapter (this.transport) │
+                     │                                            │
+                     │  delegates: [TelegramAdapter, SlackAdapter] │
+                     └─────────────┬───────────────┬──────────────┘
+                                   │               │
+                ownsThread/ownsChatId routing      │
+                                   ▼               ▼
+                     ┌────────────────────┐  ┌────────────────────┐
+                     │  TelegramAdapter   │  │   SlackAdapter      │
+                     │                    │  │                     │
+                     │  ownsThread:       │  │  ownsThread:        │
+                     │   adapter.tg-      │  │   id startsWith     │
+                     │   Fetch present    │  │   "slack:"          │
+                     │  ownsChatId: numeric│  │  ownsChatId: C/D/G/U │
+                     └────────────────────┘  └────────────────────┘
+```
+
+Routing rules implemented in `src/transports/composite.ts`:
+
+| Method | Routing |
+|--------|---------|
+| `postMessage`, `postRich`, `progress`, `stream`, `enrichPrompt` | by `ownsThread(thread)` |
+| `notify(chatIds, …)` | partition by `ownsChatId`, fan out |
+| `createThread(chatId)` | by `ownsChatId` |
+| `encodeParentThreadId`, `formatNotifySession` | by `ownsChatId` |
+| `registerCommands`, `dispose` | fan out to all delegates |
+| `handlePairing` | first delegate that returns non-null; result tagged with delegate name so the gateway tracks `pairingComplete` per-transport |
+| `shouldIgnoreMessage` | by `ownsThread` (Telegram drops `/start`, Slack has no equivalent) |
+
+The gateway code reads `this.transport.foo()` and never branches on platform; adding a third transport is a TransportAdapter implementation + one entry in `chatAdapterFactories` + one entry in `buildTransportDelegates`.
+
+ID types are heterogeneous union `(string | number)[]` to support both numeric (Telegram) and string (Slack `Uxxx`/`Cxxx`) identifiers in the same allowlist / notify list.
 
 ## Module dependency graph
 

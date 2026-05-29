@@ -2,6 +2,79 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [0.6.0] — 2026-05-26
+
+> **Migration note for out-of-tree TransportAdapter implementations.** The
+> interface gained five new methods (`ownsChatId`, `encodeParentThreadId`,
+> `formatNotifySession`, optional `shouldIgnoreMessage`, `stream`) and three
+> existing methods changed shape: `enrichPrompt(thread, text)` now takes
+> `thread`; `createThread(string | number)` accepts string ids; `notify`
+> accepts `(string | number)[]`; `registerCommands()` no longer takes a
+> token (each adapter self-sources its env-var creds). External adapters
+> need to add the new methods and update those signatures. Adapters that
+> only ship `TelegramAdapter` / `SlackAdapter` (the included ones) need no
+> action — gateway config files keep working.
+
+### Added
+- **Slack transport** (socket mode, single workspace). `roundhouse setup
+  --slack` walks you through it: prints the bundled Slack app manifest
+  (`src/transports/slack/manifest.yaml`), validates `xoxb-`/`xapp-`
+  tokens via `auth.test`, writes `~/.roundhouse/slack-pairing.json`
+  with `status="pending"`, and the gateway completes pairing on the
+  first `message.im` or `assistant_thread_started` event from an
+  allowed user.
+- **Multi-transport composition.** Telegram and Slack can run in the
+  same gateway instance. New `CompositeTransportAdapter`
+  (`src/transports/composite.ts`) routes per-thread methods by
+  `ownsThread`, partitions `notify(chatIds, …)` by `ownsChatId`, and
+  tracks `pairingComplete` per-transport so paired-then-pair-other
+  flows work cleanly.
+- **Card-model menus.** `RichMenu` now maps to the Chat SDK's
+  transport-agnostic `CardElement`. The Slack adapter renders to Block
+  Kit; Telegram renders to inline keyboards. Single converter
+  (`richMenuToCard` in `src/transports/rich-helpers.ts`) replaces what
+  would have been per-platform Block Kit translators.
+- **Slack streaming** with post-then-edit fallback (rate-limit-aware
+  throttling, abort-signal honoring, init-failure backoff with hard
+  cap and final flush). Native AI Assistant streaming deferred to v2.
+- **`@chat-adapter/slack@^4.29.0`** added to dependencies.
+
+### Changed
+- **Chat SDK bump** to `^4.29.0` for `chat`, `@chat-adapter/telegram`,
+  and `@chat-adapter/state-memory`. Backwards-compatible per the SDK's
+  release notes; no API impact on roundhouse code.
+- **`TransportAdapter` interface widened**: new methods `ownsChatId`,
+  `encodeParentThreadId`, `formatNotifySession`, `shouldIgnoreMessage`
+  (optional), `stream`. Signature changes: `enrichPrompt(thread, text)`,
+  `createThread(string | number)`, `notify((string | number)[])`,
+  `registerCommands()` (adapter self-sources its env-var creds — no
+  more passing tokens through the gateway).
+- **`allowedUserIds` and `notifyChatIds`** widened to
+  `(string | number)[]` to support Slack's `Uxxx`/`Cxxx` identifiers
+  alongside Telegram's numerics. `isAllowed` now does dual-lookup
+  against the heterogeneous union; both forms match against entries
+  of either type.
+- **`ChatThread.post`** widened to `string | { markdown: string } | { card: unknown; fallbackText?: string }`.
+- **`gateway/streaming.ts`** dispatches per-turn streaming via
+  `transport.stream(thread, iter, signal)` — no more hardcoded
+  `isTelegramThread` branch.
+- **Telegram `/start <nonce>` filter** moved from the gateway into
+  `TelegramAdapter.shouldIgnoreMessage` so it can't accidentally drop
+  Slack messages.
+- **`fireBootTurn`** partitions `notifyChatIds` by transport and fires
+  one boot turn per transport that owns at least one configured chat
+  id (was a single global `chatIds[0]` which silently favored
+  whichever transport happened to be listed first).
+
+### Fixed
+- **Number()-coercion sweep.** Several call sites silently dropped
+  Slack-shaped chat ids by coercing through `Number()` or matching
+  against `/^-?\d+$/`. Audited and fixed in `gateway.ts:113`,
+  `gateway.ts:329-333` (cron notifyFn), `gateway.ts:352` (sub-agent
+  routing), `gateway.ts:978-1001` (notifyStartup session label),
+  `cli/subagent-command.ts:30-38` (parent thread id encoding), and
+  `ipc/handler.ts:17-30` (notify session sentinel).
+
 ## [0.5.41] — 2026-05-20
 
 ### Fixed

@@ -9,7 +9,15 @@
  * Transport-neutral: this module never imports from transports/telegram.
  */
 
-import type { RichButton, RichResponse } from "./types";
+import { Card, Section, Actions, Button } from "chat";
+import type { CardElement } from "chat";
+import type { RichButton, RichMenu, RichResponse } from "./types";
+
+// `Text` from "chat" resolves to mdast's TYPE re-export, not the JSX
+// factory; the factory lives at chat/jsx-runtime. Constructing TextElement
+// objects directly keeps the dep boundary small.
+const text = (content: string, style?: "plain" | "bold" | "muted") =>
+  ({ type: "text" as const, content, ...(style ? { style } : {}) });
 
 /** A single picker option. `key` is the callback value; `label` is what the user sees. */
 export interface SelectableOption {
@@ -115,4 +123,76 @@ export function buildSelectableMenu(opts: SelectableMenuOpts): RichResponse {
       sections: [{ columns, buttons }],
     },
   };
+}
+
+/**
+ * Convert a RichMenu to the Chat SDK's transport-agnostic Card model.
+ *
+ * The Slack adapter renders this to Block Kit via cardToBlockKit;
+ * Telegram's adapter renders it to inline keyboards via extractCard.
+ * One conversion → many platforms — this is the v3 plan's reason for
+ * dropping per-transport menu converters.
+ *
+ * `headerProse` is optional rendering for the prose that would otherwise
+ * be the menuCaption. Cards put it inside a Section so the markdown
+ * actually renders (Slack's mrkdwn is the accepted text dialect inside
+ * Block Kit sections).
+ */
+export function richMenuToCard(menu: RichMenu, headerProse?: string): CardElement {
+  const children: ReturnType<typeof Section>[] = [];
+  if (headerProse) {
+    children.push(Section([text(headerProse) as any]));
+  }
+  for (const section of menu.sections) {
+    const sectionChildren: any[] = [];
+    if (section.title) sectionChildren.push(text(section.title, "bold"));
+    // Slack's actions block holds at most 5 elements; chunk if needed so
+    // the SDK doesn't have to.
+    for (const chunk of chunkArray(section.buttons, 5)) {
+      sectionChildren.push(Actions(chunk.map(richButtonToButton)));
+    }
+    children.push(Section(sectionChildren));
+  }
+  return Card({ children });
+}
+
+function richButtonToButton(btn: RichButton) {
+  return Button({
+    id: btn.actionId,             // Slack: action_id; Telegram: callback_data
+    label: btn.label,
+    value: btn.value,
+    ...(btn.selected ? { style: "primary" as const } : {}),
+  });
+}
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Strip markdown to a plain-text approximation for card `fallbackText`.
+ * Used by transports that fall back when cards can't render — Slack's
+ * notifications/mobile-previews show this string.
+ *
+ * Best-effort; not a proper markdown parser. Removes:
+ *   `**bold**` / `*bold*` / `_italic_` / `~~strike~~` / `` `code` ``
+ *   markdown links → text only
+ *   leading bullet markers
+ */
+export function stripMarkdownToPlain(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, (m) => m.slice(3, -3).replace(/^\w*\n?/, ""))   // fenced code
+    .replace(/\*\*\*(.+?)\*\*\*/g, "$1")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "$1")
+    .replace(/(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)/g, "$1")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^[-*]{3,}$/gm, "—")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .trim();
 }

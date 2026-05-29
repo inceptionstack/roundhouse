@@ -5,10 +5,23 @@
  * The gateway uses this interface to remain transport-agnostic.
  */
 
+/**
+ * Postable shapes accepted by `ChatThread.post`.
+ *
+ * Mirrors the subset of Chat SDK `AdapterPostableMessage` we actually use:
+ * plain string, `{ markdown }`, and `{ card, fallbackText? }`. Card payload
+ * is `unknown` to avoid coupling this interface to a specific Chat SDK
+ * version's `CardElement` type — adapters narrow at the boundary.
+ */
+export type ChatThreadPost =
+  | string
+  | { markdown: string }
+  | { card: unknown; fallbackText?: string };
+
 /** Minimal thread interface (subset of Chat SDK thread) */
 export interface ChatThread {
   id: string;
-  post(text: string): Promise<void>;
+  post(message: ChatThreadPost): Promise<void>;
   [key: string]: unknown;
 }
 
@@ -16,7 +29,7 @@ export interface ChatThread {
 export interface IncomingMessage {
   text?: string;
   author?: { userName?: string; name?: string; userId?: string | number; id?: string };
-  chatId?: number;
+  chatId?: string | number;
   raw?: { from?: { id?: number } };
   [key: string]: unknown;
 }
@@ -128,6 +141,12 @@ export interface PairingResult {
   userId: string | number;
   /** Display name */
   username: string;
+  /**
+   * Transport name that produced this result. The composite transport
+   * fills this in when fanning out `handlePairing`. Individual delegates
+   * may omit it (the composite assigns its own `.name` after the call).
+   */
+  transport?: string;
 }
 
 /**
@@ -140,8 +159,14 @@ export interface TransportAdapter {
   /** Transport name (e.g. "telegram") */
   readonly name: string;
 
-  /** Enrich prompt text before sending to agent (e.g. formatting hints) */
-  enrichPrompt(text: string): string;
+  /**
+   * Enrich prompt text before sending to agent (e.g. formatting hints).
+   *
+   * `thread` is provided so the composite transport can route to the
+   * delegate that owns the thread. Single-transport adapters may ignore
+   * the argument.
+   */
+  enrichPrompt(thread: ChatThread, text: string): string;
 
   /** Post a message using platform-native formatting */
   postMessage(thread: ChatThread, text: string): Promise<void>;
@@ -173,14 +198,46 @@ export interface TransportAdapter {
    */
   progress(thread: ChatThread, initialText: string): Promise<ProgressMessage>;
 
-  /** Register bot commands with the platform */
-  registerCommands(token: string): Promise<void>;
+  /**
+   * Register bot commands with the platform.
+   *
+   * Adapter is responsible for sourcing its own credentials from env.
+   * No-op when prerequisites are missing (so callers can fire
+   * unconditionally without checking transport-specific env vars).
+   */
+  registerCommands(): Promise<void>;
 
   /** Check if a thread belongs to this transport */
   ownsThread(thread: ChatThread): boolean;
 
+  /**
+   * Pure shape check — return true iff this transport recognizes the given
+   * chat ID format. No I/O. Used by the composite transport to partition
+   * `notifyChatIds` and route notify() calls.
+   *
+   * Telegram: typeof id === "number" || /^-?\d+$/.test(String(id))
+   * Slack:    typeof id === "string" && /^[CDGU]/.test(id)
+   */
+  ownsChatId(id: string | number): boolean;
+
+  /**
+   * Build a synthetic "parent thread id" for sub-agent / cron routing
+   * from a single chat id. Encodes the platform prefix and any
+   * coordinates the transport needs.
+   *
+   * Telegram: `telegram:${chatId}:main`
+   * Slack:    `slack:${channelId}:main`
+   */
+  encodeParentThreadId(chatId: string | number): string;
+
+  /**
+   * Format a chat id for human-facing "Session: …" labels in startup
+   * notifications. Replaces inline platform-specific logic in the gateway.
+   */
+  formatNotifySession(chatId: string | number): string;
+
   /** Send notifications to configured recipients */
-  notify(chatIds: number[], text: string): Promise<void>;
+  notify(chatIds: (string | number)[], text: string): Promise<void>;
 
   /**
    * Create a thread object for a given chat ID.
@@ -188,7 +245,7 @@ export interface TransportAdapter {
    * where no incoming message triggered the interaction.
    * Returns a thread compatible with the streaming system.
    */
-  createThread(chatId: number): ChatThread;
+  createThread(chatId: string | number): ChatThread;
 
   /**
    * Check if a pairing flow is pending.
@@ -202,4 +259,24 @@ export interface TransportAdapter {
    * Transport manages its own state (nonce files, OAuth tokens, etc.)
    */
   handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null>;
+
+  /**
+   * Optional pre-handler hook: return true to drop the message before any
+   * other gateway logic runs. Lets transports filter platform-specific
+   * sentinel messages (e.g. Telegram's `/start <nonce>`).
+   *
+   * Composite routes to the delegate that owns the thread; if no delegate
+   * owns it, the message is not dropped.
+   */
+  shouldIgnoreMessage?(text: string, message: IncomingMessage, thread: ChatThread): boolean;
+
+  /**
+   * Stream agent text into a single thread message with progressive edits.
+   *
+   * Adapters that lack streaming MUST still satisfy this contract by
+   * collecting the iterable into chunks and calling `postMessage` for each.
+   * `signal` is honored at chunk boundaries — when aborted, the adapter
+   * SHOULD finalize the current message rather than truncate silently.
+   */
+  stream(thread: ChatThread, iter: AsyncIterable<string>, signal?: AbortSignal): Promise<void>;
 }

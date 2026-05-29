@@ -15,7 +15,7 @@ import type { SpawnSpec, SubAgentRole, RoutingInfo } from "../subagents/types";
 
 const ROUNDHOUSE_DIR = join(homedir(), ".roundhouse");
 
-function loadGatewayConfig(): { notifyChatIds: number[] } {
+function loadGatewayConfig(): { notifyChatIds: (string | number)[] } {
   try {
     const raw = readFileSync(join(ROUNDHOUSE_DIR, "gateway.config.json"), "utf8");
     const cfg = JSON.parse(raw);
@@ -25,17 +25,34 @@ function loadGatewayConfig(): { notifyChatIds: number[] } {
   }
 }
 
+/**
+ * Detect a transport name from a chat id shape. Mirrors the rules in each
+ * `TransportAdapter.ownsChatId`. Kept as a CLI-only duplicate because this
+ * code path runs without instantiating the gateway transport composite.
+ */
+function detectTransportFromChatId(chatId: string): "telegram" | "slack" | null {
+  if (/^-?\d+$/.test(chatId)) return "telegram";
+  if (/^[CDGU]/.test(chatId)) return "slack";
+  return null;
+}
+
 function buildRouting(): RoutingInfo {
   const cfg = loadGatewayConfig();
-  const chatId = String(cfg.notifyChatIds[0] ?? "");
+  const rawId = cfg.notifyChatIds[0];
+  const chatId = rawId == null ? "" : String(rawId);
   if (!chatId) {
-    console.error("Error: no Telegram chat configured. Run 'roundhouse setup' first.");
+    console.error("Error: no chat configured. Run 'roundhouse setup' first.");
+    process.exit(1);
+  }
+  const transport = detectTransportFromChatId(chatId);
+  if (!transport) {
+    console.error(`Error: cannot determine transport from chatId "${chatId}". Expected telegram numeric or slack C/D/G/U prefix.`);
     process.exit(1);
   }
   return {
-    transport: "telegram",
+    transport,
     chatId,
-    parentThreadId: `telegram:${chatId}:main`,
+    parentThreadId: `${transport}:${chatId}:main`,
   };
 }
 

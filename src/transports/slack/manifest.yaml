@@ -1,0 +1,42 @@
+display_information:
+  name: Roundhouse
+  description: Roundhouse chat-gateway bot
+  background_color: "#2c3e50"
+
+features:
+  bot_user:
+    display_name: Roundhouse
+    always_online: true
+  assistant_view:
+    assistant_description: Roundhouse AI agent
+    suggested_prompts: []
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - assistant:write          # for assistant_thread_started + setStatus indicator
+      - channels:history
+      - chat:write
+      - groups:history
+      - im:history
+      - im:read
+      - im:write
+      - users:read               # for username matching during pairing
+      # Note: the email-tagged users scope is intentionally NOT requested —
+      # it's a privacy-review red flag and pairing only needs the display name.
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+      - assistant_thread_started     # for first-DM pairing fallback
+      - assistant_thread_context_changed
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

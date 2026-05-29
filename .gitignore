@@ -26,3 +26,6 @@ Thumbs.db
 # Pi sessions (persisted locally, not in repo)
 gateway-sessions/
 .codex
+
+# Claude Code local state (cron lock, transcripts, etc.)
+.claude/

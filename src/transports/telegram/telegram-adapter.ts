@@ -8,18 +8,22 @@
 import type {
   TransportAdapter,
   ChatThread,
+  ChatThreadPost,
   IncomingMessage,
   PairingResult,
   RichResponse,
   ProgressMessage,
 } from "../types";
-import { isTelegramThread, postTelegramHtml } from "./html";
+import { isTelegramThread, postTelegramHtml, handleTelegramHtmlStream } from "./html";
 import { markdownToTelegramHtml } from "./format";
 import { sendTelegramToMany } from "./notify";
 import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
 import { toTelegramInlineKeyboard } from "./rich-ui";
 import { createProgressMessage } from "./progress";
+
+/** Bot-command suffix sentinels we recognize as Telegram-specific to ignore. */
+const TELEGRAM_START_PATTERN = /^\/start(\s|@|$)/i;
 
 /** Extract the numeric Telegram chat id from a thread's id string. */
 function extractTelegramChatId(thread: { id?: string; platformThreadId?: string }): string | undefined {
@@ -31,7 +35,7 @@ const TELEGRAM_FORMAT_HINT = "[Format your final answer to be telegram-friendly.
 export class TelegramAdapter implements TransportAdapter {
   readonly name = "telegram";
 
-  enrichPrompt(text: string): string {
+  enrichPrompt(_thread: ChatThread, text: string): string {
     return `${text}\n\n${TELEGRAM_FORMAT_HINT}`;
   }
 
@@ -152,8 +156,9 @@ export class TelegramAdapter implements TransportAdapter {
     return createProgressMessage(thread, initialText);
   }
 
-  async registerCommands(token: string): Promise<void> {
-    if (!token) return;
+  async registerCommands(): Promise<void> {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return;   // Adapter self-sources; no-op when token absent
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
         method: "POST",
@@ -175,7 +180,32 @@ export class TelegramAdapter implements TransportAdapter {
     return isTelegramThread(thread as any);
   }
 
-  createThread(chatId: number): ChatThread {
+  ownsChatId(id: string | number): boolean {
+    if (typeof id === "number") return Number.isFinite(id);
+    return typeof id === "string" && /^-?\d+$/.test(id);
+  }
+
+  encodeParentThreadId(chatId: string | number): string {
+    // For Telegram groups (negative IDs), encode as 'group:<chatId>' to match
+    // inbound routing in resolveAgentThreadId(). This ensures boot turns seed
+    // the same session as live inbound messages.
+    const n = typeof chatId === "number" ? chatId : Number(chatId);
+    if (Number.isFinite(n) && n < 0) return `group:${chatId}`;
+    return "main";
+  }
+
+  formatNotifySession(chatId: string | number): string {
+    // Telegram negative IDs identify groups; positive IDs identify direct chats.
+    const n = typeof chatId === "number" ? chatId : Number(chatId);
+    if (Number.isFinite(n) && n < 0) return `group:${chatId}`;
+    return "main";
+  }
+
+  shouldIgnoreMessage(text: string): boolean {
+    return TELEGRAM_START_PATTERN.test(text.trim());
+  }
+
+  createThread(chatId: string | number): ChatThread {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const threadId = `telegram:${chatId}`;
     const telegramFetch = async (method: string, payload: Record<string, unknown>) => {
@@ -193,23 +223,49 @@ export class TelegramAdapter implements TransportAdapter {
     const thread: ChatThread = {
       id: threadId,
       adapter: { telegramFetch },
-      post: async (content: string | { markdown: string }) => {
-        const text = typeof content === "string" ? content : content.markdown;
-        await postTelegramHtml(thread as any, text);
+      post: async (content: ChatThreadPost) => {
+        if (typeof content === "string") {
+          await postTelegramHtml(thread as any, content);
+          return;
+        }
+        if ("markdown" in content) {
+          await postTelegramHtml(thread as any, content.markdown);
+          return;
+        }
+        // `{ card }` path: the card-based menu rendering is a Phase 2 unification.
+        // Until then, telegram synthetic threads only use markdown/text from
+        // gateway internals (boot turn, cron, sub-agent injections), so falling
+        // back to the card's fallbackText is sufficient.
+        if ("card" in content) {
+          const fallback = content.fallbackText ?? "(card)";
+          await postTelegramHtml(thread as any, fallback);
+        }
       },
       startTyping: async () => {},
     };
     return thread;
   }
 
-  async notify(chatIds: number[], text: string): Promise<void> {
+  async notify(chatIds: (string | number)[], text: string): Promise<void> {
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.warn("[roundhouse] TELEGRAM_BOT_TOKEN not set — skipping notification");
       return;
     }
+    // Filter to telegram-shaped IDs only (composite already partitions, but
+    // defend against direct callers passing a heterogeneous list).
+    const tgIds = chatIds.filter(id => this.ownsChatId(id));
+    if (tgIds.length === 0) return;
     // Convert lightweight markdown to Telegram HTML
     const html = markdownToTelegramHtml(text);
-    await sendTelegramToMany(chatIds, html, { parseMode: "HTML" });
+    await sendTelegramToMany(tgIds, html, { parseMode: "HTML" });
+  }
+
+  async stream(thread: ChatThread, iter: AsyncIterable<string>, _signal?: AbortSignal): Promise<void> {
+    // The existing streaming helper does not yet thread an abort signal; the
+    // gateway's stream loop already aborts at the agent layer when /cancel
+    // fires, so chunks stop arriving. Wiring the signal end-to-end is a
+    // small follow-up.
+    await handleTelegramHtmlStream(thread as any, iter);
   }
 
   async isPairingPending(): Promise<boolean> {
@@ -218,6 +274,9 @@ export class TelegramAdapter implements TransportAdapter {
   }
 
   async handlePairing(thread: ChatThread, message: IncomingMessage): Promise<PairingResult | null> {
+    // Early guard: only process threads this adapter owns (defensive; Composite also filters)
+    if (!this.ownsThread(thread)) return null;
+
     const text = (message.text ?? "").trim();
     if (!text) return null;
 
@@ -260,6 +319,6 @@ export class TelegramAdapter implements TransportAdapter {
     // Mark pairing complete in transport state
     await completePendingPairing({ chatId, userId, username: originalName });
 
-    return { threadId: chatId, userId, username: originalName };
+    return { threadId: chatId, userId, username: originalName, transport: this.name };
   }
 }

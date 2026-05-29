@@ -9,8 +9,8 @@
  */
 
 import type { AgentStreamEvent } from "../types";
+import type { TransportAdapter } from "../transports";
 import { READ_ONLY_TOOLS } from "../memory/types";
-import { isTelegramThread, handleTelegramHtmlStream } from "../transports/telegram/html";
 import { DEBUG_STREAM } from "../util";
 import { toolIcon } from "./helpers";
 import { isContextOverflowError } from "../agents/shared/error-classifiers";
@@ -92,6 +92,14 @@ export interface StreamContext {
   verbose: boolean;
   signal?: AbortSignal;
   postWithFallback: (thread: any, text: string) => Promise<void>;
+  /**
+   * Transport that owns the thread. The dispatch routes the per-turn
+   * AsyncIterable<string> through `transport.stream(thread, iter, signal)`.
+   * Telegram's impl wraps the existing handleTelegramHtmlStream; Slack's
+   * impl wraps a post-then-edit fallback. Optional only because tests can
+   * fall back to `thread.handleStream` directly.
+   */
+  transport?: TransportAdapter;
 }
 
 export interface StreamResult {
@@ -112,7 +120,7 @@ export async function handleStreaming(
   stream: AsyncIterable<AgentStreamEvent>,
   ctx: StreamContext,
 ): Promise<StreamResult> {
-  const { thread, verbose, signal, postWithFallback } = ctx;
+  const { thread, verbose, signal, postWithFallback, transport } = ctx;
   let activeTools = new Map<string, string>();
   let usedFileModifyingTools = false;
 
@@ -131,16 +139,17 @@ export async function handleStreaming(
     currentPromise = null;
   };
 
-  const useTelegramHtml = isTelegramThread(thread);
-
+  // Per-transport streaming: prefer transport.stream(thread, iter, signal)
+  // when we have a transport; fall back to thread.handleStream() (used by
+  // tests that don't pass a transport).
   const ensureStream = () => {
     if (!currentPromise) {
       const ts = createTextStream();
       currentPush = ts.push;
       currentFinish = ts.finish;
-      currentPromise = useTelegramHtml
-        ? handleTelegramHtmlStream(thread, ts.iterable).catch((err: Error) => {
-            console.warn(`[roundhouse] telegram html stream error:`, err.message);
+      currentPromise = transport
+        ? transport.stream(thread, ts.iterable, signal).catch((err: Error) => {
+            console.warn(`[roundhouse] transport stream error:`, err.message);
           })
         : thread.handleStream(ts.iterable).catch((err: Error) => {
             console.warn(`[roundhouse] handleStream error:`, err.message);

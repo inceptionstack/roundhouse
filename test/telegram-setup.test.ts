@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resolve } from "node:path";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -285,6 +285,7 @@ describe("TelegramAdapter.handlePairing", () => {
   let adapter: any;
 
   beforeEach(async () => {
+    vi.resetModules(); // Clear module cache so ROUNDHOUSE_DIR is re-evaluated
     tempDir = await mkdtemp(resolve(tmpdir(), "roundhouse-adapter-test-"));
     process.env.ROUNDHOUSE_DIR = tempDir;
     const { TelegramAdapter } = await import("../src/transports/telegram/telegram-adapter");
@@ -356,7 +357,11 @@ describe("TelegramAdapter.handlePairing", () => {
       status: "pending",
     });
 
-    const thread = { id: "telegram:123456", post: async () => {} };
+    const thread = {
+      id: "telegram:123456",
+      post: async () => {},
+      adapter: { telegramFetch: async () => {} }, // Required for isTelegramThread check
+    };
     const message = {
       text: `/start ${nonce}`,
       author: { name: "alice", userId: 789 },
@@ -382,7 +387,11 @@ describe("TelegramAdapter.handlePairing", () => {
       status: "pending",
     });
 
-    const thread = { id: "telegram:123", post: async () => {} };
+    const thread = {
+      id: "telegram:123",
+      post: async () => {},
+      adapter: { telegramFetch: async () => {} }, // Required for isTelegramThread check
+    };
     const message = {
       text: `/start ${nonce}`,
       author: { name: "Alice", userId: 456 },

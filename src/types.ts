@@ -187,10 +187,20 @@ export interface GatewayConfig {
   chat: {
     botUsername: string;
     allowedUsers?: string[];
-    /** Immutable Telegram user IDs (paired during setup) */
-    allowedUserIds?: number[];
-    /** Telegram chat IDs to notify on startup */
-    notifyChatIds?: number[];
+    /**
+     * Immutable per-platform user IDs (paired during setup).
+     * Telegram IDs are numeric (e.g. 123456789); Slack IDs are strings
+     * (e.g. "U02XXXXX"). The allowlist is a heterogeneous union so a single
+     * gateway running both transports can authenticate users from either.
+     */
+    allowedUserIds?: (string | number)[];
+    /**
+     * Per-platform chat IDs to notify on startup.
+     * Telegram chat IDs are numeric (negative for groups); Slack channel IDs
+     * are strings starting with C/D/G. The composite transport partitions
+     * this list by `ownsChatId` before fanning out notifications.
+     */
+    notifyChatIds?: (string | number)[];
     adapters: {
       telegram?: Record<string, unknown>;
       slack?: Record<string, unknown>;

@@ -22,7 +22,7 @@ export interface CommandContext {
   agent: AgentAdapter;
   config: GatewayConfig;
   allowedUsers: string[];
-  allowedUserIds: number[];
+  allowedUserIds: (string | number)[];
   verboseThreads: Set<string>;
   threadLocks: Map<string, Promise<void>>;
   postWithFallback: (thread: any, text: string) => Promise<void>;

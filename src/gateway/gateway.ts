@@ -8,7 +8,7 @@
 import { Chat } from "chat";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { AgentAdapter, AgentMessage, AgentRouter, AgentStreamEvent, GatewayConfig } from "../types";
-import { splitMessage, isAllowed, startTypingLoop } from "../util";
+import { splitMessage, isAllowed, startTypingLoop, sameId } from "../util";
 import { SttService, enrichAttachmentsWithTranscripts, DEFAULT_STT_CONFIG } from "../voice/stt-service";
 import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doctor/runner";
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
@@ -34,10 +34,11 @@ import {
   isPreTurn,
   matchesDescriptor,
 } from "./command-registry";
-import { TelegramAdapter } from "../transports";
+import { TelegramAdapter, SlackAdapter, CompositeTransportAdapter, buildCompositeTransport, buildChatSdkAdapters } from "../transports";
 import type { TransportAdapter } from "../transports";
 import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
+import { BotUsernameResolver } from "./bot-username-resolver";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -52,25 +53,32 @@ export type { TurnSource };
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
 const MAX_MESSAGE_CHUNK = 4000;
 
-/** Bot username for command suffix validation (set during gateway init) */
-let _botUsername = "";
+/**
+ * Build the list of `TransportAdapter` delegates from the configured
+ * chat-adapter keys. The Slack delegate is loaded lazily because
+ * @chat-adapter/slack may not be installed in older deployments —
+ * if Slack is configured, it MUST be installed; we fail loudly there.
+ */
+function buildTransportDelegates(
+  config: GatewayConfig["chat"]["adapters"],
+): TransportAdapter[] {
+  const delegates: TransportAdapter[] = [];
+  if (config.telegram) delegates.push(new TelegramAdapter());
+  if (config.slack) delegates.push(new SlackAdapter());
+  // Caller (Gateway.start) validates `chatAdapters` is non-empty before
+  // subscribing to events. We don't throw here on empty so test harnesses
+  // that inject a fake transport after construction still work.
+  return delegates;
+}
 
-// ── Chat SDK adapter factories ───────────────────────
-// Lazy-imported so we don't crash if an adapter package isn't installed.
-
-async function buildChatAdapters(
-  config: GatewayConfig["chat"]["adapters"]
-): Promise<Record<string, unknown>> {
-  const adapters: Record<string, unknown> = {};
-
-  if (config.telegram) {
-    const { createTelegramAdapter } = await import("@chat-adapter/telegram");
-    adapters.telegram = createTelegramAdapter({
-      mode: (config.telegram.mode as "auto" | "polling" | "webhook") ?? "auto",
-    });
-  }
-
-  return adapters;
+// ── Matchers ──────────────────────────────────────────
+// Build command matchers for a given botUsername.
+// Shared by pre-turn and in-turn dispatch to avoid duplication.
+function buildMatchers(botUsername: string) {
+  return {
+    isCommand: (t: string, c: string) => _isCmd(t, c, botUsername),
+    isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, botUsername),
+  };
 }
 
 // ── Gateway ──────────────────────────────────────────
@@ -79,8 +87,14 @@ export class Gateway {
   private chat!: Chat;
   private router: AgentRouter;
   private config: GatewayConfig;
-  private transport: TransportAdapter;
-  private pairingComplete = false;
+  private transport: CompositeTransportAdapter;
+  private botUsernameResolver: BotUsernameResolver;
+  /**
+   * Per-transport "pairing complete" flag. Keyed by transport delegate name.
+   * Replaces a single boolean that would silently block a second transport's
+   * pairing once the first one paired.
+   */
+  private pairingComplete = new Map<string, boolean>();
   private sttService: SttService | null = null;
   private cronScheduler: CronSchedulerService | null = null;
   private ipcServer: IpcServer | null = null;
@@ -94,8 +108,28 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
-    this.transport = new TelegramAdapter();
-    _botUsername = config.chat.botUsername || "";
+    // Initialize bot username resolver with per-adapter overrides
+    const adapterOverrides: Record<string, string> = {};
+    for (const [adapterName, adapterConfig] of Object.entries(config.chat.adapters)) {
+      if (adapterConfig && typeof adapterConfig === 'object' && 'botUsername' in adapterConfig) {
+        const botUsername = (adapterConfig as any).botUsername;
+        // Only accept string overrides; ignore non-strings to prevent crashes in helpers
+        if (typeof botUsername === 'string' && botUsername.length > 0) {
+          adapterOverrides[adapterName] = botUsername;
+        }
+      }
+    }
+    this.botUsernameResolver = new BotUsernameResolver({
+      globalBotUsername: config.chat.botUsername || "",
+      adapterOverrides,
+    });
+    const delegates = buildTransportDelegates(config.chat.adapters);
+    // Empty config (e.g. test harnesses that override `transport` post-construction)
+    // gets a single-delegate composite around a stub Telegram adapter so the
+    // composite's "at least one delegate" invariant holds. Real deployments
+    // always have at least one configured.
+    this.transport = buildCompositeTransport(delegates.length > 0 ? delegates : [new TelegramAdapter()]);
+    // BotUsernameResolver handles bot identity per transport; no global fallback needed
   }
 
   /** Handle pending pairing via transport adapter. Returns true if handled. */
@@ -107,24 +141,22 @@ export class Gateway {
       const result = await this.transport.handlePairing(thread, message);
       if (!result) return false;
 
-      const { threadId: rawThreadId, userId: rawUserId, username } = result;
-      // Config arrays are currently number[] — coerce with guard.
-      // When a string-ID transport (Slack/Discord) arrives, widen config types too.
-      const threadId = typeof rawThreadId === "string" ? Number(rawThreadId) : rawThreadId;
-      const userId = typeof rawUserId === "string" ? Number(rawUserId) : rawUserId;
+      // String IDs (Slack `Uxxx`/`Cxxx`) and numeric IDs (Telegram) coexist
+      // in the widened config arrays. Persist as-is — JSON handles either.
+      const { threadId, userId, username, transport: transportName } = result;
 
-      if (!Number.isFinite(threadId) || !Number.isFinite(userId)) {
-        console.error(`[roundhouse] Pairing returned non-numeric IDs: threadId=${rawThreadId} userId=${rawUserId}`);
+      if (threadId == null || userId == null) {
+        console.error(`[roundhouse] Pairing returned null IDs: threadId=${threadId} userId=${userId}`);
         return false;
       }
 
-      // Update in-memory config
+      // Update in-memory config (heterogeneous union list)
       if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];
-      if (!this.config.chat.allowedUserIds.includes(userId)) {
+      if (!this.config.chat.allowedUserIds.some(id => sameId(id, userId))) {
         this.config.chat.allowedUserIds.push(userId);
       }
       if (!this.config.chat.notifyChatIds) this.config.chat.notifyChatIds = [];
-      if (!this.config.chat.notifyChatIds.includes(threadId)) {
+      if (!this.config.chat.notifyChatIds.some(id => sameId(id, threadId))) {
         this.config.chat.notifyChatIds.push(threadId);
       }
 
@@ -136,9 +168,13 @@ export class Gateway {
         const configRaw = JSON.parse(await rf(cfgPath, "utf8"));
         if (!configRaw.chat) configRaw.chat = {};
         if (!configRaw.chat.allowedUserIds) configRaw.chat.allowedUserIds = [];
-        if (!configRaw.chat.allowedUserIds.includes(userId)) configRaw.chat.allowedUserIds.push(userId);
+        if (!configRaw.chat.allowedUserIds.some((id: string | number) => sameId(id, userId))) {
+          configRaw.chat.allowedUserIds.push(userId);
+        }
         if (!configRaw.chat.notifyChatIds) configRaw.chat.notifyChatIds = [];
-        if (!configRaw.chat.notifyChatIds.includes(threadId)) configRaw.chat.notifyChatIds.push(threadId);
+        if (!configRaw.chat.notifyChatIds.some((id: string | number) => sameId(id, threadId))) {
+          configRaw.chat.notifyChatIds.push(threadId);
+        }
         const tmp = `${cfgPath}.tmp.${rb(4).toString("hex")}`;
         await wf(tmp, JSON.stringify(configRaw, null, 2) + "\n");
         await mvf(tmp, cfgPath).catch(async (e) => { try { await ulf(tmp); } catch {} throw e; });
@@ -146,8 +182,10 @@ export class Gateway {
         console.error("[roundhouse] failed to update config after pairing:", cfgErr);
       }
 
-      console.log(`[roundhouse] Pairing complete: @${username} threadId=${threadId} userId=${userId}`);
-      this.pairingComplete = true;
+      console.log(`[roundhouse] Pairing complete (${transportName ?? "?"}): @${username} threadId=${threadId} userId=${userId}`);
+      if (transportName) {
+        this.pairingComplete.set(transportName, true);
+      }
       await thread.post("✅ Roundhouse paired successfully!\n\nSend /status to verify everything is working.");
       return true;
     } catch (err) {
@@ -157,7 +195,7 @@ export class Gateway {
   }
 
   async start() {
-    const chatAdapters = await buildChatAdapters(this.config.chat.adapters);
+    const chatAdapters = await buildChatSdkAdapters(this.config.chat.adapters);
 
     // Initialize STT service (enabled by default, can be disabled via config)
     const rawSttConfig = this.config.voice?.stt;
@@ -194,10 +232,11 @@ export class Gateway {
     const allowedUsers = (this.config.chat.allowedUsers ?? []).map((u) =>
       u.toLowerCase()
     );
-    // Ensure arrays exist on config so pairing hook mutations are visible to isAllowed
+    // Ensure arrays exist on config so pairing hook mutations are visible to isAllowed.
+    // Heterogeneous (string | number)[] — Telegram IDs are numeric, Slack are strings.
     if (!this.config.chat.allowedUserIds) this.config.chat.allowedUserIds = [];
     if (!this.config.chat.notifyChatIds) this.config.chat.notifyChatIds = [];
-    const allowedUserIds = this.config.chat.allowedUserIds;
+    const allowedUserIds: (string | number)[] = this.config.chat.allowedUserIds;
 
     // SECURITY: Warn (loudly) when no auth allowlist is configured
     if (allowedUsers.length === 0 && allowedUserIds.length === 0) {
@@ -225,10 +264,8 @@ export class Gateway {
     });
     const preTurnCommands = allDescriptors.filter(isPreTurn);
     const inTurnCommands = allDescriptors.filter(d => !isPreTurn(d));
-    const matchers = {
-      isCommand: (t: string, c: string) => _isCmd(t, c, _botUsername),
-      isCommandWithArgs: (t: string, c: string) => _isCmdArgs(t, c, _botUsername),
-    };
+
+
 
     // ── Unified handler ──────────────────────────────
     const handle = async (thread: any, message: any) => {
@@ -241,8 +278,12 @@ export class Gateway {
         `[roundhouse] ${thread.id} -> ${agentThreadId} @${authorName}: "${userText.slice(0, 120)}"${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
-      // Check for pending pairing via transport adapter
-      if (!this.pairingComplete && await this.transport.isPairingPending()) {
+      // Check for pending pairing via the transport that owns this thread.
+      // Per-transport `pairingComplete` flag prevents one paired transport
+      // from short-circuiting another that's still pending.
+      const owningTransport = this.transport.ownerOf(thread);
+      const ownerName = owningTransport?.name;
+      if (ownerName && !this.pairingComplete.get(ownerName) && await this.transport.isPairingPending()) {
         const handled = await this.handlePendingPairing(message, thread);
         if (handled) return;
       }
@@ -252,12 +293,15 @@ export class Gateway {
         return;
       }
 
-      if (_isCmd(userText, "/start", _botUsername)) return;
+      // Transport-specific message filtering (e.g. Telegram /start <nonce> handshake).
+      if (this.transport.shouldIgnoreMessage?.(userText, message, thread)) return;
       if (!userText.trim() && !rawAttachments.length) return;
 
       // ── Command dispatch (in-turn stage) ───
       const trimmed = userText.trim();
-      if (await this.dispatchInTurnCommand(inTurnCommands, matchers, thread, message, trimmed, agentThreadId)) {
+      // Resolve bot username for this thread's transport, then dispatch
+      const botUsername = this.botUsernameResolver.resolve(thread);
+      if (await this.dispatchInTurnCommand(inTurnCommands, thread, botUsername, message, trimmed, agentThreadId)) {
         return;
       }
 
@@ -273,6 +317,9 @@ export class Gateway {
       // Pre-turn commands fire before the main handler (and before the
       // session-pressure gate), so /cancel etc. still interrupt a mid-run
       // agent. Allowlist is enforced here for all pre-turn handlers.
+      // Resolve bot username for this thread's transport for @botname matching
+      const botUsername = this.botUsernameResolver.resolve(thread);
+      const matchers = buildMatchers(botUsername);
       for (const desc of preTurnCommands) {
         if (matchesDescriptor(desc, text, matchers)) {
           if (!isAllowed(message, allowedUsers, allowedUserIds)) return;
@@ -316,6 +363,30 @@ export class Gateway {
 
     await this.chat.initialize();
 
+    // Slack-specific post-initialize wiring (no-op when slack isn't configured):
+    //  1. Attach the Chat SDK Slack adapter instance to our SlackAdapter
+    //     delegate so postRich/progress/stream can call its webClient.
+    //     The SDK's own initialize() already called auth.test and populated
+    //     botUserId, so the bot self-loop filter is armed by the time events
+    //     start flowing — no extra eager call needed here (verified against
+    //     @chat-adapter/slack@4.29.0 dist/index.js:868-885).
+    //  2. Register onAssistantThreadStarted to drive first-DM pairing
+    //     before the user has typed anything.
+    const slackDelegate = this.transport.delegates.find((d): d is SlackAdapter => d.name === "slack") as SlackAdapter | undefined;
+    if (slackDelegate) {
+      try {
+        const slackSdk = (this.chat as unknown as { getAdapter(name: string): unknown }).getAdapter("slack") as Parameters<SlackAdapter["attach"]>[0];
+        if (slackSdk) {
+          slackDelegate.attach(slackSdk);
+          this.registerAssistantThreadStartedHandler();
+        } else {
+          console.warn("[roundhouse] slack adapter not exposed via chat.getAdapter('slack') — pairing/streaming may not work");
+        }
+      } catch (err) {
+        console.error("[roundhouse] slack post-initialize wiring failed:", (err as Error).message);
+      }
+    }
+
     const platforms = Object.keys(this.config.chat.adapters).join(", ");
     console.log(`[roundhouse] gateway ready (platforms: ${platforms})`);
 
@@ -326,7 +397,7 @@ export class Gateway {
     this.cronScheduler = new CronSchedulerService({
       agentConfig: this.config.agent,
       notifyChatIds: this.config.chat.notifyChatIds,
-      notifyFn: async (chatIds: number[], text: string) => {
+      notifyFn: async (chatIds: (string | number)[], text: string) => {
         if (chatIds.length && this.transport) {
           await this.transport.notify(chatIds, text);
         }
@@ -349,7 +420,10 @@ export class Gateway {
     // Start sub-agent orchestrator + watcher
     this.subagentOrchestrator = new SubAgentOrchestratorImpl();
     this.subagentOrchestrator.onSpawn(async (status) => {
-      const chatId = Number(status.routing?.chatId);
+      // Sub-agent routing carries the chatId as a string; preserve as-is so
+      // both telegram (numeric-as-string) and slack (`Cxxx`) work. Composite
+      // partitions by ownsChatId before fanning out.
+      const chatId = status.routing?.chatId;
       if (chatId) {
         const msg = `🔬 **Sub-agent launched** (${status.role})\nrun: \`${status.runId.slice(0, 8)}\``;
         try { await this.transport.notify([chatId], msg); } catch {}
@@ -440,7 +514,25 @@ export class Gateway {
         console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
       }
 
-      stopTyping = startTypingLoop(thread);
+      // Inject a Slack-specific stopTyping hook when the thread belongs
+      // to Slack — the SDK's default clear path is broken in 4.29.0
+      // (sends `loading_messages: [""]` which Slack rejects). For
+      // non-Slack threads slackStopTyping is null and the typing loop
+      // falls back to thread.startTyping("") (Telegram's sendChatAction
+      // auto-expires anyway so the call is harmless there).
+      //
+      // Wrapper object delegates startTyping back to the original thread
+      // so we keep its `this`-binding. Don't spread the class instance —
+      // that would lose its prototype.
+      const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
+      const slackStopTyping = slackDelegate?.stopTypingFor?.(thread) ?? null;
+      const typingThread = slackStopTyping
+        ? {
+            startTyping: (status?: string) => thread.startTyping(status),
+            stopTyping: slackStopTyping,
+          }
+        : thread;
+      stopTyping = startTypingLoop(typingThread);
 
       // Pre-turn recovery: if a prior turn failed to compact (state has
       // pendingCompact === "emergency"), the live session is almost certainly
@@ -661,9 +753,9 @@ export class Gateway {
       return null;
     }
 
-    // Enrich prompt via transport adapter
+    // Enrich prompt via transport adapter (composite routes by ownsThread).
     if (agentMessage.text) {
-      agentMessage.text = this.transport.enrichPrompt(agentMessage.text);
+      agentMessage.text = this.transport.enrichPrompt(thread, agentMessage.text);
     }
 
     return agentMessage;
@@ -721,7 +813,7 @@ export class Gateway {
 
   private buildCommandContext(
     thread: any, message: any, agentThreadId: string, authorName: string,
-    allowedUsers: string[], allowedUserIds: number[],
+    allowedUsers: string[], allowedUserIds: (string | number)[],
     verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>,
   ): CommandContext {
     return {
@@ -759,7 +851,7 @@ export class Gateway {
    */
   private buildCommandDescriptors(deps: {
     allowedUsers: string[];
-    allowedUserIds: number[];
+    allowedUserIds: (string | number)[];
     verboseThreads: Set<string>;
     threadLocks: Map<string, Promise<void>>;
     abortControllers: Map<string, AbortController>;
@@ -855,6 +947,7 @@ export class Gateway {
       verbose,
       signal,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
+      transport: this.transport,
     });
   }
 
@@ -871,9 +964,13 @@ export class Gateway {
    */
   private async dispatchInTurnCommand(
     inTurnCommands: readonly CommandDescriptor[],
-    matchers: { isCommand: (t: string, c: string) => boolean; isCommandWithArgs: (t: string, c: string) => boolean },
-    thread: any, message: unknown, trimmed: string, agentThreadId: string,
+    thread: any,
+    botUsername: string,
+    message: unknown,
+    trimmed: string,
+    agentThreadId: string,
   ): Promise<boolean> {
+    const matchers = buildMatchers(botUsername);  // Reuse shared factory
     const inv: CommandInvocation = { thread, message: message as { text?: string; [key: string]: unknown }, text: trimmed, agentThreadId };
     for (const desc of inTurnCommands) {
       if (matchesDescriptor(desc, trimmed, matchers)) {
@@ -930,20 +1027,78 @@ export class Gateway {
   }
 
   /**
-   * Register bot commands with Telegram so they appear in the / menu.
-   * Runs on every startup to keep commands in sync with the code.
+   * Register bot commands with each configured platform so they appear in
+   * its / menu (Telegram) or app config (Slack — no-op at runtime).
+   * Each delegate self-sources its own creds and no-ops if they're missing,
+   * so the gateway calls unconditionally.
    */
   private async registerBotCommands() {
-    if (!this.config.chat.adapters.telegram) return;
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) return;
-    await this.transport.registerCommands(token);
+    await this.transport.registerCommands();
+  }
+
+  /**
+   * Wire `bot.onAssistantThreadStarted` → composite.handlePairing.
+   *
+   * Slack fires this when the user opens an assistant DM with the bot,
+   * BEFORE the user types anything. Without this hook, the first-DM
+   * pairing path can deadlock: `message.im` only fires for *existing* DMs,
+   * so a user who just clicked "Message" on the bot's profile has no DM
+   * channel yet and never produces an event.
+   *
+   * We synthesize an IncomingMessage with the user's display name resolved
+   * via `slackSdk.getUser(userId)` so the pending pairing's allowedUsers
+   * check (which compares lowercased userName) succeeds.
+   */
+  private registerAssistantThreadStartedHandler(): void {
+    const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
+    if (!slackDelegate) return;
+
+    // chat.onAssistantThreadStarted is the public registration on ChatInstance
+    // (chat@4.29.0 chat-D9UYaaNO.d.ts:2913). Cast here is just to match the
+    // local Chat type that elides the assistant API.
+    const bot = this.chat as unknown as {
+      onAssistantThreadStarted?: (handler: (event: any) => Promise<void> | void) => void;
+      getAdapter(name: string): { getUser?(userId: string): Promise<{ userName?: string; fullName?: string } | null> } | undefined;
+    };
+
+    if (!bot.onAssistantThreadStarted) {
+      console.warn("[roundhouse] chat instance doesn't expose onAssistantThreadStarted; skipping");
+      return;
+    }
+
+    bot.onAssistantThreadStarted(async (event: { userId: string; channelId: string; threadTs: string }) => {
+      try {
+        const slackSdk = bot.getAdapter("slack");
+        const userInfo = slackSdk?.getUser ? await slackSdk.getUser(event.userId).catch(() => null) : null;
+        // Synthesize a thread that ownsThread('slack:…') and a message that
+        // matches the IncomingMessage shape the existing pairing pipeline expects.
+        const syntheticThread = this.transport.createThread(event.channelId);
+        const syntheticMessage = {
+          text: "",
+          author: {
+            userId: event.userId,
+            userName: userInfo?.userName,
+            name: userInfo?.fullName,
+          },
+          chatId: event.channelId,
+          raw: event,
+        };
+        const handled = await this.handlePendingPairing(syntheticMessage, syntheticThread);
+        if (handled) {
+          console.log(`[roundhouse] slack pairing completed via assistant_thread_started for ${event.userId}`);
+        }
+      } catch (err) {
+        console.error("[roundhouse] assistant_thread_started handler failed:", (err as Error).message);
+      }
+    });
   }
 
   /**
    * Send a startup notification to configured chat IDs.
-   * Currently Telegram-only — when Slack/Discord adapters are added,
-   * extend this to use their respective APIs or a Chat SDK broadcast API.
+   * Multi-transport: each chatId is routed by `ownsChatId`; the
+   * "Session: …" label is delegated to `transport.formatNotifySession`
+   * so platform-specific semantics (Telegram negative-id = group, Slack
+   * `Dxxx` = DM) live in the adapter, not here.
    */
   private async notifyStartup(platforms: string) {
     const chatIds = this.config.chat.notifyChatIds;
@@ -976,7 +1131,7 @@ export class Gateway {
     const whatsNew = checkVersionChange();
 
     for (const chatId of chatIds) {
-      const sessionId = Number(chatId) < 0 ? `group:${chatId}` : "main";
+      const sessionId = this.transport.formatNotifySession(chatId);
       const perChatText = [
         `\u2705 Roundhouse is online`,
         ``,
@@ -1004,6 +1159,12 @@ export class Gateway {
   /**
    * Fire a boot turn — send a prompt to the agent so it greets in-character.
    * Seeds the session on startup so context is never empty.
+   *
+   * Multi-transport: fire one boot turn per transport that has at least one
+   * configured chat id, against the FIRST chat id owned by that transport.
+   * This ensures both Telegram and Slack get a "hello" on the same gateway
+   * boot, instead of a global `chatIds[0]` which would silently favor
+   * whichever transport happened to be listed first.
    */
   private async fireBootTurn(
     verboseThreads: Set<string>,
@@ -1013,19 +1174,28 @@ export class Gateway {
     const chatIds = this.config.chat.notifyChatIds;
     if (!chatIds?.length) return;
 
-    // Only fire for the primary (first) chat
-    const primaryChatId = chatIds[0];
-    const agentThreadId = "main";
-
-    // Create a thread via the transport adapter — no transport-specific logic in gateway
-    const syntheticThread = this.transport.createThread(primaryChatId);
-
     const bootPrompt = "You just came online after a restart. Say a brief hello in-character (1–2 sentences max). Check your workspace for any pending tasks.";
 
-    try {
-      await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers, "boot");
-    } catch (err) {
-      console.error("[roundhouse] boot turn failed:", (err as Error).message);
+    // Pick the first chatId owned by each delegate (deduplicated by transport name).
+    const seenTransports = new Set<string>();
+    const primaryPerTransport: Array<{ transport: string; chatId: string | number }> = [];
+    for (const chatId of chatIds) {
+      const owner = this.transport.ownerOfChatId(chatId);
+      if (!owner || seenTransports.has(owner.name)) continue;
+      seenTransports.add(owner.name);
+      primaryPerTransport.push({ transport: owner.name, chatId });
+    }
+
+    for (const { transport, chatId } of primaryPerTransport) {
+      try {
+        // Derive per-transport boot session id (not global "main")
+        // This ensures each transport seeds its own session, not cross-contaminated
+        const agentThreadId = this.transport.encodeParentThreadId(chatId);
+        const syntheticThread = this.transport.createThread(chatId);
+        await this.handleAgentTurn(syntheticThread, agentThreadId, bootPrompt, [], verboseThreads, threadLocks, abortControllers, "boot");
+      } catch (err) {
+        console.error(`[roundhouse] boot turn (${transport}) failed:`, (err as Error).message);
+      }
     }
   }
 
@@ -1046,7 +1216,7 @@ export class Gateway {
 
   /** Handle sub-agent completion — notify user AND inject result into agent session */
   private async handleSubagentCompletion(status: RunStatus, routing: RoutingInfo): Promise<void> {
-    const chatId = Number(routing.chatId);
+    const chatId = routing.chatId;
     if (!chatId) return;
 
     await this.notifySubagentResult(status, chatId);
@@ -1054,7 +1224,7 @@ export class Gateway {
   }
 
   /** Notify user of sub-agent completion via transport */
-  private async notifySubagentResult(status: RunStatus, chatId: number): Promise<void> {
+  private async notifySubagentResult(status: RunStatus, chatId: string | number): Promise<void> {
     const emoji = status.status === "complete" ? "✅" : status.status === "timeout" ? "⏰" : "❌";
     const duration = status.completedAt && status.startedAt
       ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
@@ -1068,7 +1238,7 @@ export class Gateway {
   }
 
   /** Inject sub-agent output into agent session as synthetic turn */
-  private async injectSubagentResult(status: RunStatus, chatId: number): Promise<void> {
+  private async injectSubagentResult(status: RunStatus, chatId: string | number): Promise<void> {
     try {
       const runDir = join(process.env.HOME || "/home/ec2-user", ".roundhouse", "subagents", status.runId);
       let stdout = "";

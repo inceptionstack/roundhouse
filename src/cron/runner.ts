@@ -19,8 +19,8 @@ export class CronRunner {
   constructor(
     private store: CronStore,
     private agentConfig?: GatewayConfig["agent"],
-    private defaultChatIds?: number[],
-    private notifyFn?: (chatIds: number[], text: string) => Promise<void>,
+    private defaultChatIds?: (string | number)[],
+    private notifyFn?: (chatIds: (string | number)[], text: string) => Promise<void>,
   ) {}
 
   async runJob(

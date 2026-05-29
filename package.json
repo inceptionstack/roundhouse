@@ -1,6 +1,6 @@
 {
   "name": "@inceptionstack/roundhouse",
-  "version": "0.5.41",
+  "version": "0.6.0",
   "type": "module",
   "description": "Multi-platform chat gateway that routes messages through a configured AI agent",
   "license": "MIT",
@@ -39,10 +39,11 @@
     "pi/"
   ],
   "dependencies": {
-    "@chat-adapter/state-memory": "^4.26.0",
-    "@chat-adapter/telegram": "^4.26.0",
+    "@chat-adapter/slack": "=4.29.0",
+    "@chat-adapter/state-memory": "^4.29.0",
+    "@chat-adapter/telegram": "^4.29.0",
     "@earendil-works/pi-coding-agent": "^0.74.0",
-    "chat": "^4.26.0",
+    "chat": "^4.29.0",
     "croner": "^10.0.1",
     "p-queue": "^9.2.0",
     "qrcode-terminal": "^0.12.0",
