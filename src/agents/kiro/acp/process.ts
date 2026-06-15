@@ -12,6 +12,8 @@ export interface SpawnOptions {
   agentName: string;
   cwd: string;
   env?: Record<string, string>;
+  /** Model ID to start the first session with (e.g. "claude-sonnet-4.6"). Omit for kiro's "auto". */
+  model?: string;
   /** Max stderr buffer in bytes (default 1MB) */
   maxStderrBytes?: number;
 }
@@ -29,9 +31,14 @@ export interface AcpProcess {
  * Throws if the binary is not found.
  */
 export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
-  const { agentName, cwd, env, maxStderrBytes = 1_048_576 } = opts;
+  const { agentName, cwd, env, model, maxStderrBytes = 1_048_576 } = opts;
 
-  const proc = spawn("kiro-cli", ["acp", "--agent", agentName, "--trust-all-tools"], {
+  // `--model` sets the model for the first session. When omitted, kiro uses
+  // the agent config's model (typically "auto").
+  const args = ["acp", "--agent", agentName, "--trust-all-tools"];
+  if (model) args.push("--model", model);
+
+  const proc = spawn("kiro-cli", args, {
     cwd,
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
@@ -108,4 +115,33 @@ export function getKiroCliVersion(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Query kiro-cli for its model catalog and return a map of
+ * model_id → context_window_tokens. Used to size the context window
+ * dynamically per model instead of hardcoding a value.
+ *
+ * Returns an empty map if kiro-cli is unavailable or the output can't be
+ * parsed — callers fall back to a default window in that case.
+ */
+export function getKiroModelWindows(): Map<string, number> {
+  const windows = new Map<string, number>();
+  try {
+    const output = execFileSync("kiro-cli", ["chat", "--list-models", "--format", "json"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    const parsed = JSON.parse(output) as {
+      models?: Array<{ model_id?: string; context_window_tokens?: number }>;
+    };
+    for (const m of parsed.models ?? []) {
+      if (m.model_id && typeof m.context_window_tokens === "number") {
+        windows.set(m.model_id, m.context_window_tokens);
+      }
+    }
+  } catch {
+    // kiro-cli missing or output shape changed — caller uses its default.
+  }
+  return windows;
 }

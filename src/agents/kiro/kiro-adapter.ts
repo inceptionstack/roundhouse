@@ -15,18 +15,23 @@ import { resolve } from "node:path";
 import type { AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, AdapterInfo, MessageContext } from "../../types.js";
 import { ROUNDHOUSE_VERSION } from "../../config.js";
 import { BaseAdapter } from "../base-adapter.js";
-import { spawnKiroCli, shutdownProcess, getKiroCliVersion, AcpMethod, AcpEvent, SessionUpdateKind, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
+import { spawnKiroCli, shutdownProcess, getKiroCliVersion, getKiroModelWindows, AcpMethod, AcpEvent, SessionUpdateKind, type AcpProcess, type InitializeResult, type SessionNewResult } from "./acp/index.js";
 import { SessionStore, type SessionEntry } from "./session.js";
 import { normalizeToolName } from "./tool-names.js";
 
-// kiro emits context usage as a percentage and does not advertise the
-// active model's window size in the ACP protocol. We approximate the window
-// at 200k so SessionEntry.contextTokens/contextWindow stay populated and the
-// memory pressure classifier (which short-circuits when either is null) can
-// still trigger compaction. This is correct for 200k-window models and a
-// best-effort approximation for others — when kiro adds a window field,
-// thread it through here instead.
-const KIRO_DEFAULT_CONTEXT_WINDOW = 200_000;
+// kiro emits context usage as a percentage and does not advertise the active
+// model's window size over ACP. We resolve the real window per model from
+// `kiro-cli chat --list-models` (see getKiroModelWindows) and fall back to
+// this value only when the active model is unknown or the catalog can't be
+// read. 200k is the smallest current kiro window, so the fallback errs toward
+// triggering compaction rather than overflowing.
+const KIRO_FALLBACK_CONTEXT_WINDOW = 200_000;
+
+// Default model for the roundhouse kiro agent. kiro's "auto" mode reports a
+// large (1M) window whose 42% base context trips roundhouse's percent-based
+// compaction thresholds on turn one; pinning a concrete model gives a
+// predictable window. Pi mode controls its model separately (not here).
+const KIRO_DEFAULT_MODEL = "claude-sonnet-4.6";
 
 // ── Types ────────────────────────────────────────────
 
@@ -36,6 +41,8 @@ interface KiroAdapterConfig {
   flushAgentName: string;
   maxIdleMs: number;
   autoApproveTools: string[];
+  /** Model ID for the kiro session (e.g. "claude-sonnet-4.6"). */
+  model: string;
 }
 
 // ── Factory ──────────────────────────────────────────
@@ -47,6 +54,7 @@ export const createKiroAgentAdapter: AgentAdapterFactory = (config) => {
     flushAgentName: (config.flushAgentName as string) ?? "roundhouse-flush",
     maxIdleMs: (config.maxIdleMs as number) ?? 30 * 60 * 1000,
     autoApproveTools: (config.autoApproveTools as string[]) ?? ["read", "grep", "glob", "web_fetch", "web_search"],
+    model: (config.model as string) ?? KIRO_DEFAULT_MODEL,
   });
 };
 
@@ -59,6 +67,8 @@ class KiroAdapter extends BaseAdapter {
   private readonly store: SessionStore;
   private readonly threadQueues = new Map<string, { queue: Array<() => Promise<void>>; running: boolean }>();
   private readonly kiroVersion: string;
+  /** model_id → context_window_tokens, queried from kiro-cli at startup. */
+  private readonly modelWindows: Map<string, number>;
 
   private mainProcess: AcpProcess | null = null;
   private reaperInterval: ReturnType<typeof setInterval> | null = null;
@@ -69,6 +79,16 @@ class KiroAdapter extends BaseAdapter {
     const sessionsDir = resolve(homedir(), ".roundhouse", "sessions");
     this.store = new SessionStore({ sessionsDir, maxIdleMs: config.maxIdleMs });
     this.kiroVersion = getKiroCliVersion() ?? "unknown";
+    this.modelWindows = getKiroModelWindows();
+  }
+
+  /**
+   * Resolve the context window for a model. Prefers the live model reported in
+   * kiro metadata, falls back to the configured model, then to a safe default.
+   */
+  private resolveWindow(modelFromMetadata?: string | null): number {
+    const model = modelFromMetadata || this.config.model;
+    return this.modelWindows.get(model) ?? KIRO_FALLBACK_CONTEXT_WINDOW;
   }
 
   // ── Required: prompt ─────────────────────────────────
@@ -175,7 +195,7 @@ class KiroAdapter extends BaseAdapter {
     const session = threadId ? this.store.get(threadId) : undefined;
     return {
       version: this.kiroVersion,
-      model: session?.model ?? this.config.agentName ?? "unknown",
+      model: session?.model ?? this.config.model ?? "unknown",
       activeSessions: this.store.size,
       cwd: this.config.cwd,
       contextTokens: session?.contextTokens ?? null,
@@ -198,8 +218,9 @@ class KiroAdapter extends BaseAdapter {
   private async ensureProcess(): Promise<AcpProcess> {
     if (this.mainProcess && !this.mainProcess.client.isClosed) return this.mainProcess;
 
-    const acpProc = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd });
+    const acpProc = spawnKiroCli({ agentName: this.config.agentName, cwd: this.config.cwd, model: this.config.model });
     this.mainProcess = acpProc;
+    console.log(`[kiro] spawned agent=${this.config.agentName} model=${this.config.model} window=${this.resolveWindow().toLocaleString()} tokens`);
 
     // Capture acpProc in the closure so the listener always reports stderr
     // for *this* process even if `this.mainProcess` is reassigned later.
@@ -303,8 +324,9 @@ class KiroAdapter extends BaseAdapter {
         if (params?.sessionId !== session.sessionId) return;
         const pct = params.contextUsagePercentage;
         if (pct != null) {
-          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
-          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
+          const window = this.resolveWindow(params.model);
+          const tokens = Math.round((pct / 100) * window);
+          this.store.updateContext(threadId, tokens, window, params.model ?? null);
         }
       };
 
@@ -383,8 +405,9 @@ class KiroAdapter extends BaseAdapter {
         if (params?.sessionId !== session.sessionId) return;
         const pct = params.contextUsagePercentage;
         if (pct != null) {
-          const tokens = Math.round((pct / 100) * KIRO_DEFAULT_CONTEXT_WINDOW);
-          this.store.updateContext(threadId, tokens, KIRO_DEFAULT_CONTEXT_WINDOW, params.model ?? null);
+          const window = this.resolveWindow(params.model);
+          const tokens = Math.round((pct / 100) * window);
+          this.store.updateContext(threadId, tokens, window, params.model ?? null);
         }
       };
 
