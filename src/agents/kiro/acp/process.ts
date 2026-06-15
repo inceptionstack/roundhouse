@@ -35,7 +35,7 @@ export function spawnKiroCli(opts: SpawnOptions): AcpProcess {
     cwd,
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
-    detached: false, // disabled: detached causes EBADF in containers
+    detached: true, // own process group for clean kill (matches MeshClaw start_new_session)
   });
 
   // Handle spawn failures (e.g. ENOENT if kiro-cli not on PATH)

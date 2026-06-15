@@ -209,9 +209,15 @@ class KiroAdapter extends BaseAdapter {
       }
     });
 
+    // Do NOT declare terminal capability. When the client advertises
+    // `terminal: true`, kiro-cli attempts to use a terminal (PTY) file
+    // descriptor for tool execution. In a daemon / redirected-stdio context
+    // (no controlling TTY) that fd is invalid, and kiro-cli exits with
+    // "Bad file descriptor (os error 9)" on the first prompt. MeshClaw's
+    // proven-working client declares no terminal capability for the same reason.
     await acpProc.client.call<InitializeResult>(AcpMethod.Initialize, {
       protocolVersion: 1,
-      clientCapabilities: { terminal: true },
+      clientCapabilities: {},
       clientInfo: { name: "roundhouse", version: ROUNDHOUSE_VERSION },
     });
 
