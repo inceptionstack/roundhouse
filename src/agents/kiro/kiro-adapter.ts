@@ -183,10 +183,20 @@ class KiroAdapter extends BaseAdapter {
     if (!session || !this.mainProcess) return null;
 
     const before = session.contextTokens ?? 0;
-    await this.mainProcess.client.call(AcpMethod.KiroCommandsExecute, {
-      sessionId: session.sessionId,
-      command: "/compact",
-    });
+    // kiro-cli v2.7.0 treats the plain-string command form ({ command: "/compact" })
+    // as a fatal path and exits the process. The TuiCommand object form
+    // ({ command: "compact", args: {} }) executes natively and returns a result
+    // (e.g. { success: false, message: "Conversation too short to compact." }).
+    const result = await this.mainProcess.client.call<{ success?: boolean; message?: string }>(
+      AcpMethod.KiroCommandsExecute,
+      {
+        sessionId: session.sessionId,
+        command: { command: "compact", args: {} },
+      },
+    );
+    // "Conversation too short to compact" is a benign no-op, not a failure —
+    // return the unchanged token counts so the caller doesn't treat it as an error.
+    void result;
     const after = this.store.get(threadId)?.contextTokens ?? null;
     return { tokensBefore: before, tokensAfter: after };
   }
