@@ -108,6 +108,17 @@ export class Gateway {
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
     this.config = config;
+    // kiro-cli manages its own session context (large window + native /compact),
+    // so roundhouse's memory layer (injection + summarize/flush/compact) is
+    // redundant and fights kiro's own management — it can't actually shrink
+    // kiro's context, so it loops a flush every turn once kiro passes the
+    // percent threshold. Default memory OFF for kiro unless the operator
+    // explicitly opted in via config.memory.enabled. Other agents (e.g. pi
+    // without a memory extension) keep roundhouse-managed memory.
+    if (this.config.agent?.type === "kiro" && this.config.memory?.enabled === undefined) {
+      this.config.memory = { ...this.config.memory, enabled: false };
+      console.log("[roundhouse] kiro self-manages context — roundhouse memory disabled (set memory.enabled=true to override)");
+    }
     // Initialize bot username resolver with per-adapter overrides
     const adapterOverrides: Record<string, string> = {};
     for (const [adapterName, adapterConfig] of Object.entries(config.chat.adapters)) {
