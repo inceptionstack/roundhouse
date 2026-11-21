@@ -7,7 +7,7 @@
 import { resolve, dirname } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
-import { execSync, execFileSync, spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { performUpdate } from "./update";
 
@@ -89,19 +89,13 @@ async function cmdRun() {
   const indexPath = resolve(__dirname, "..", "index.ts");
   const jsPath = resolve(__dirname, "..", "dist", "index.js");
 
-  if (await fileExists(jsPath)) {
-    await import(jsPath);
-  } else {
-    const tsxPath = resolve(__dirname, "..", "..", "node_modules", "tsx", "dist", "cli.mjs");
-    execFileSync(process.execPath, [tsxPath, indexPath], {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        ROUNDHOUSE_CONFIG: CONFIG_PATH,
-        NODE_NO_WARNINGS: "1",
-      },
-    });
-  }
+  // Run the gateway in this process. It used to be a child (`tsx index.ts`
+  // under execFileSync): a stop signal then reached this wrapper, the service
+  // manager saw its job end, and the real gateway could live on as an orphan
+  // next to the freshly started one. TypeScript loading is already set up by
+  // whatever started this file (bin/roundhouse.mjs registers tsx).
+  process.env.NODE_NO_WARNINGS ??= "1";
+  await import((await fileExists(jsPath)) ? jsPath : indexPath);
 }
 
 /**

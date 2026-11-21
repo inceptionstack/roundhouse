@@ -11,6 +11,7 @@ import { ROUNDHOUSE_VERSION } from "../config";
 import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
 import { getSystemResources } from "./helpers";
+import { contextThresholds } from "../memory/policy";
 
 // ── Types ────────────────────────────────────────────
 
@@ -281,6 +282,13 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
     const windowK = ((info.contextWindow as number) / 1000).toFixed(0);
     lines.push(``);
     lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
+  }
+  // When this conversation will be compacted, for the model it is on.
+  if (typeof info.contextWindow === "number" && info.contextWindow > 0 && memEnabled && config.memory?.compact?.enabled !== false) {
+    const model = typeof info.model === "string" ? info.model : null;
+    const t = contextThresholds(info.contextWindow as number, config.memory?.compact, model);
+    const k = (n: number) => `${Math.round(n / 1000)}K`;
+    lines.push(`   Saves memory at ${k(t.soft)}, compacts at ${k(t.hard)}`);
   }
 
   const extensions = Array.isArray(info.extensions) ? info.extensions as string[] : [];

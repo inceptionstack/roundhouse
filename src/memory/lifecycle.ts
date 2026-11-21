@@ -161,6 +161,7 @@ export async function finalizeMemoryForTurn(
         contextTokens: typeof info.contextTokens === "number" ? info.contextTokens : null,
         contextWindow: typeof info.contextWindow === "number" ? info.contextWindow : null,
         contextPercent: typeof info.contextPercent === "number" ? info.contextPercent : null,
+        model: typeof info.model === "string" ? info.model : null,
       },
       config?.compact,
     );
@@ -179,7 +180,8 @@ export async function finalizeMemoryForTurn(
  * 2. Compact the session
  * 3. Mark force re-inject for Full mode
  *
- * Uses a cheaper model for flush turns if config.compact.flushModel is set.
+ * Uses config.compact.flushModel for the flush turn and the summary when it
+ * is set and the conversation fits in that model's context window.
  *
  * Returns compaction result or null if nothing to compact.
  */
@@ -192,9 +194,12 @@ export async function flushMemoryThenCompact(
   onProgress?: (step: string) => void | Promise<void>,
 ): Promise<CompactResult | null> {
   const mode = getMode(agent);
-  // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
-  const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";
-  const flushModel = config?.compact?.flushModel === null ? undefined : (config?.compact?.flushModel ?? DEFAULT_FLUSH_MODEL);
+  // The conversation model does the flush and the summary unless a flush
+  // model is configured. A second model has no prompt cache for this
+  // conversation, so it re-reads all of it at full price and speed on every
+  // flush, and it cannot be used at all once the conversation is larger than
+  // its window (the adapter checks that and falls back).
+  const flushModel = config?.compact?.flushModel || undefined;
 
   /** Send flush prompt, preferring flushModel if available */
   async function sendFlush(text: string): Promise<void> {

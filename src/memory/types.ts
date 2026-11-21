@@ -28,20 +28,37 @@ export interface MemoryConfig {
   compact?: {
     /** Enable proactive compaction (default: true) */
     enabled?: boolean;
-    /** Soft flush threshold: percent of context (default: 0.45) */
+    /** Soft flush threshold: fraction of the model's context window (default: 0.45) */
     softPercent?: number;
-    /** Soft flush threshold: absolute tokens (default: 180000) */
+    /** Soft flush threshold: absolute token cap (default: none) */
     softTokens?: number;
-    /** Hard compact threshold: percent (default: 0.50) */
+    /** Hard compact threshold: fraction of the model's context window (default: 0.60) */
     hardPercent?: number;
-    /** Hard compact threshold: absolute tokens (default: 200000) */
+    /** Hard compact threshold: absolute token cap (default: none) */
     hardTokens?: number;
     /** Emergency: compact when remaining tokens < this (default: 32768) */
     emergencyThresholdTokens?: number;
     /** Min time between soft flushes in ms (default: 600000 = 10min) */
     cooldownMs?: number;
-    /** Model ID for flush turns (default: "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0" — fast, matches Sonnet quality for structured writes) */
+    /**
+     * Model for the flush turn and the compaction summary, as
+     * "provider/model-id". Default: none, the conversation model does both.
+     * A second model re-reads the whole conversation without the prompt cache,
+     * and is skipped anyway when the conversation does not fit its window.
+     */
     flushModel?: string | null;
+    /**
+     * Per-model overrides of the thresholds above, keyed by the conversation
+     * model as "provider/model-id". Example: keep a 1M-window model under
+     * 300k tokens with `{ "amazon-bedrock/…": { "hardTokens": 300000 } }`.
+     */
+    models?: Record<string, {
+      softPercent?: number;
+      softTokens?: number;
+      hardPercent?: number;
+      hardTokens?: number;
+      emergencyThresholdTokens?: number;
+    }>;
   };
 }
 

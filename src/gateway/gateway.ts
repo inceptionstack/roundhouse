@@ -353,6 +353,14 @@ export class Gateway {
         `[roundhouse] ${thread.id} -> ${agentThreadId} @${authorName}: ${JSON.stringify(userText.slice(0, 120))}${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
+      // An edit to an earlier message is not a new request. The Telegram
+      // adapter delivers it like one; running it would repeat whatever the
+      // original message already made the agent do.
+      if (message?.metadata?.edited === true || message?.raw?.edit_date !== undefined) {
+        console.log(`[roundhouse] ignoring an edited message in ${thread.id}`);
+        return;
+      }
+
       // Transport-specific message filtering (e.g. Telegram /start <nonce> handshake).
       if (this.transport.shouldIgnoreMessage?.(userText, message, thread)) return;
       if (!userText.trim() && !rawAttachments.length) return;
@@ -615,8 +623,11 @@ export class Gateway {
         await this.enrichWithStt(thread, agentMessage);
       }
 
-      // Inject tools section (after STT enrichment so voice-only messages get it too)
-      if (agentMessage.text) {
+      // Persona and tools (after STT enrichment so voice-only messages get
+      // them too), unless the adapter already carries them in its system
+      // prompt: repeating them per message only grows the context.
+      const standingInSystemPrompt = agent.getInfo?.()?.standingContext === "system-prompt";
+      if (agentMessage.text && !standingInSystemPrompt) {
         agentMessage.text = injectPersonaSection(agentMessage.text);
         agentMessage.text = injectToolsSection(agentMessage.text);
       }
@@ -1303,18 +1314,41 @@ export class Gateway {
     }
   }
 
+  /**
+   * Stop the gateway. Every step is bounded: a turn can run for minutes, and
+   * a stop that waits for it leaves a process behind that still polls the
+   * chat and writes session files after its replacement has started.
+   */
   async stop() {
+    const bounded = async (what: string, work: Promise<unknown> | undefined, ms = 5_000) => {
+      if (!work) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          work,
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms); }),
+        ]);
+      } catch (e) {
+        console.warn(`[roundhouse] ${what} stop error:`, (e as Error).message);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
     if (this.subagentWatcher) {
       this.subagentWatcher.stop();
     }
     if (this.ipcServer) {
       this.ipcServer.stop();
     }
+    // Interrupt turns in flight first; the chat SDK's shutdown waits for its
+    // handlers, and those are the turns.
+    for (const ac of this.abortControllers.values()) ac.abort();
+    await bounded("agent", this.router.dispose());
     if (this.cronScheduler) {
-      try { await this.cronScheduler.stop(); } catch (e) { console.warn("[roundhouse] cron stop error:", e); }
+      await bounded("cron", this.cronScheduler.stop());
     }
-    try { await this.chat?.shutdown(); } catch (e) { console.warn("[roundhouse] chat shutdown error:", e); }
-    await this.router.dispose();
+    await bounded("chat", this.chat?.shutdown());
     console.log("[roundhouse] stopped");
   }
 

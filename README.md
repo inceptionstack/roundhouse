@@ -268,6 +268,33 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `voice.stt.enabled` | Enable automatic voice transcription (default: off unless configured) |
 | `voice.stt.chain` | STT provider chain, e.g. `["whisper"]` |
 | `voice.stt.providers.whisper` | `{ "model": "small", "timeoutMs": 30000 }` |
+| `memory.compact.softPercent` / `hardPercent` | Fractions of the conversation model's context window at which the agent is asked to save memory (default `0.45`) and at which the session is compacted (default `0.60`) |
+| `memory.compact.softTokens` / `hardTokens` | Optional absolute caps on the same two thresholds, in tokens. Default: none |
+| `memory.compact.models` | Per-model overrides of those four, keyed by `provider/model-id` |
+| `memory.compact.flushModel` | Model for the pre-compaction flush and the summary. Default: the conversation model |
+| `memory.compact.enabled` | `false` turns roundhouse's proactive compaction off; pi still compacts by itself when the window is nearly full |
+
+### When a conversation is compacted
+
+Compaction summarizes older history so the conversation keeps fitting in the model's context window. Roundhouse does it earlier than pi would, and first asks the agent to save what matters to its memory files.
+
+The thresholds follow the model. With the defaults, a 200K-token model saves memory at 90K and compacts at 120K; a 1M-token model at 450K and 600K. `/status` shows both numbers for the current chat. To keep a large-window model on a tighter budget, cap it:
+
+```json
+{
+  "memory": {
+    "compact": {
+      "models": {
+        "amazon-bedrock/us.anthropic.claude-opus-5-5": { "softTokens": 250000, "hardTokens": 300000 }
+      }
+    }
+  }
+}
+```
+
+A larger context costs more per turn, most of all on the first message after a pause long enough for the provider's prompt cache to expire, when the whole conversation is read again at full price.
+
+`flushModel` names a second, usually cheaper model for the flush and the summary. It has no prompt cache for the conversation, so it reads all of it again each time, and it is skipped once the conversation is larger than its own window.
 
 Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, etc.
 
