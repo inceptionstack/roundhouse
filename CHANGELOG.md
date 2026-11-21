@@ -16,6 +16,44 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 >   the real @username. On Slack a name no longer grants access at all;
 >   Slack users are admitted by paired id.
 
+### Changed — long conversations on large-window models
+- **Compaction follows the model's context window.** The thresholds were
+  capped at 130k/150k tokens, which suited 200k-token models and compacted a
+  1M-token model at 15% full, every half hour of tool-heavy work. They are
+  now fractions of the window (save memory at 45%, compact at 60%), with
+  optional absolute caps and per-model overrides (`memory.compact.models`).
+  `/status` shows where they sit. On a 200k model compaction moves from 100k
+  to 120k.
+- **The flush model is opt-in.** The flush turn and the summary used to go to
+  a hard-coded Haiku 4.5 id; the flush turn then re-read the whole
+  conversation without the prompt cache each time. Both now use the
+  conversation model unless `memory.compact.flushModel` is set, and a
+  configured flush model is skipped when the conversation no longer fits its
+  window. Thinking is switched off for the summary on both paths.
+- **Memory flushes are spaced by growth.** Between the two thresholds the
+  agent is asked to save memory again only after the conversation has grown
+  by a third of the gap, and what it just wrote is no longer injected back
+  into the next turn.
+- **Persona and tool notes are sent once.** With pi they are part of the
+  system prompt instead of about a thousand tokens in front of every user
+  message. They survive compaction and are rebuilt when the files change.
+- **A provider error is reported only if the run ends with it.** Errors pi
+  retries or recovers from by compacting no longer post "Agent error", and
+  pi's own retry no longer triggers the "waiting for follow-up" notice.
+- **Edited Telegram messages are ignored**, as requests and as commands. The
+  adapter delivers an edit as a new message; it used to run again.
+
+### Fixed — restart
+- **A restart could leave two gateways running.** `roundhouse run` started
+  the gateway as a child process, and shutdown waited for the turn in flight.
+  A service restart then started a second gateway while the first finished
+  its turn: both polled the bot, the session file forked, and a compaction
+  in one left the other with the full context. The gateway now runs in the
+  `run` process itself, shutdown starts nothing new, interrupts turns and is
+  bounded (20 s; the systemd unit's stop timeout is now 30 s), and a lock
+  file allows one gateway per home directory: a successor waits for a
+  stopping gateway and refuses to start next to a running one.
+
 ### Security
 - **Allowlist bypass by display name (Telegram).** The allowlist matched the
   Chat SDK's `author.userName`, which the Telegram adapter builds as

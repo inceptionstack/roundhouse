@@ -19,8 +19,11 @@ const __piAdapterDir = dirname(fileURLToPath(import.meta.url));
 
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -31,6 +34,7 @@ import { isToolPairingError } from "../shared/error-classifiers";
 import { repairSessionFile } from "../shared/session-repair";
 import { softResetSessionFile, type SoftResetReport } from "../shared/session-soft-reset";
 import { SESSIONS_DIR } from "../../config";
+import { COMPACT_HEADROOM_TOKENS } from "../../memory/policy";
 import { DEBUG_STREAM, threadIdToDir } from "../../util";
 
 interface SessionEntry {
@@ -39,6 +43,8 @@ interface SessionEntry {
   inFlight: number;
   /** Captured config used to recreate the session after disk-level repair. */
   threadId?: string;
+  /** Standing context this session's system prompt was built with. */
+  standingText?: string;
 }
 
 const DEFAULT_SESSIONS_DIR = SESSIONS_DIR;
@@ -65,10 +71,76 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     }
     return modelRuntimePromise;
   }
+  // Persona and tool notes from the gateway, carried in the system prompt
+  // instead of in front of every user message. Absent for callers that give
+  // none (cron runs, `roundhouse agent`).
+  const standingContext = typeof config.standingContext === "function"
+    ? (config.standingContext as () => string)
+    : undefined;
+  const currentStandingText = (): string => {
+    if (!standingContext) return "";
+    try { return standingContext() ?? ""; } catch (err) {
+      console.warn(`[pi-agent] standing context unavailable:`, (err as Error).message);
+      return "";
+    }
+  };
+
+  /**
+   * Options for createAgentSession. With a standing context this builds the
+   * same resource loader pi would build by default, plus one extra block at
+   * the end of the system prompt. The block is read each time the loader
+   * reloads, so `session.reload()` picks up an edited soul.md or tools.md.
+   */
+  async function sessionOptions(sessionManager: SessionManager) {
+    const base = { cwd, sessionManager, modelRuntime: await getModelRuntime() };
+    if (!standingContext) return { options: base, standingText: undefined };
+    const agentDir = getAgentDir();
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    let standingText = "";
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager,
+      appendSystemPromptOverride: (appended) => {
+        standingText = currentStandingText();
+        return standingText ? [...appended, standingText] : appended;
+      },
+    });
+    await resourceLoader.reload();
+    return { options: { ...base, settingsManager, resourceLoader }, standingText };
+  }
+
+  /** Rebuild the system prompt when the standing context changed on disk. */
+  async function refreshStandingContext(entry: SessionEntry): Promise<void> {
+    if (!standingContext || entry.standingText === undefined) return;
+    const now = currentStandingText();
+    if (now === entry.standingText) return;
+    try {
+      await entry.session.reload();
+      entry.standingText = now;
+      console.log(`[pi-agent] standing context changed; system prompt rebuilt for ${entry.threadId ?? "?"}`);
+    } catch (err) {
+      console.warn(`[pi-agent] could not rebuild the system prompt:`, (err as Error).message);
+    }
+  }
+
+  /**
+   * Whether the conversation fits in another model's context window, with
+   * room for the summary. A flush or compaction model with a smaller window
+   * than the conversation model cannot take a conversation that has outgrown
+   * it; the provider would reject the request.
+   */
+  function fitsModel(session: AgentSession, model: { contextWindow?: number }): boolean {
+    const used = session.getContextUsage()?.tokens;
+    if (!used || !model.contextWindow) return true;
+    return used + COMPACT_HEADROOM_TOKENS <= model.contextWindow;
+  }
+
   const sessions = new Map<string, SessionEntry>();
   const creating = new Map<string, Promise<SessionEntry>>();
   let memoryCapabilities: { hasMemoryExtension: boolean; memoryTools: string[]; extensions: string[] } | undefined;
   let reapInterval: ReturnType<typeof setInterval> | undefined;
+  let disposed = false;
 
   /**
    * Wait until the session has nothing left to do.
@@ -126,6 +198,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // would throw "already processing" or, during agent_settled handlers,
         // defer the prompt and return before it ran.
         await waitUntilIdle(entry.session);
+        await refreshStandingContext(entry);
         await entry.session.prompt(text);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult
@@ -226,11 +299,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     // session files in the directory (F4).
     const sessionManager = SessionManager.open(repairedSessionFile, threadDir, cwd);
     console.log(`[pi-agent] reloaded session for ${threadId}: ${sessionManager.getSessionFile()}`);
-    const result = await createAgentSession({
-      cwd,
-      sessionManager,
-      modelRuntime: await getModelRuntime(),
-    });
+    const { options, standingText } = await sessionOptions(sessionManager);
+    const result = await createAgentSession(options);
+    entry.standingText = standingText;
     return { session: result.session };
   }
 
@@ -256,11 +327,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       );
     }
 
-    const result = await createAgentSession({
-      cwd,
-      sessionManager,
-      modelRuntime: await getModelRuntime(),
-    });
+    const { options, standingText } = await sessionOptions(sessionManager);
+    const result = await createAgentSession(options);
 
     if (result.extensionsResult.extensions.length > 0) {
       console.log(
@@ -279,7 +347,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       console.log(`[pi-agent] model fallback: ${result.modelFallbackMessage}`);
     }
 
-    const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0, threadId };
+    const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0, threadId, standingText };
     sessions.set(threadId, entry);
 
     // Detect memory capabilities from loaded extensions (first session only)
@@ -326,6 +394,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function getOrCreate(threadId: string): Promise<SessionEntry> {
+    // After dispose() (gateway shutdown) a queued prompt must fail, not open
+    // a fresh session and start a model call the exit is about to kill.
+    if (disposed) throw new Error("pi adapter is shut down");
     const existing = sessions.get(threadId);
     if (existing) return existing;
 
@@ -369,6 +440,71 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   /**
+   * Compact a thread's session, optionally with another model for the summary.
+   *
+   * Thinking is switched off for the summary in both cases: summarization
+   * gains nothing from reasoning, pays for it, and the thinking budget eats
+   * into the output limit the summary has to fit in. Model and thinking level
+   * are swapped in memory and restored; `setModel()` / `setThinkingLevel()`
+   * would write the change into the transcript.
+   */
+  function compactSession(threadId: string, modelId: string | undefined): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+    return enqueue(threadId, async () => {
+      const entry = sessions.get(threadId);
+      if (!entry) return null;
+
+      const agentState = (entry.session as any).agent?.state;
+      let currentModel: any;
+      let currentThinkingLevel: any;
+      let modelSwapped = false;
+      let thinkingSwapped = false;
+
+      if (!agentState) {
+        console.warn(`[pi-agent] cannot access agent state for compact, using the session's model and thinking level`);
+      } else {
+        if (modelId) {
+          const modelRuntime = await getModelRuntime();
+          const [provider, ...rest] = modelId.split("/");
+          const id = rest.join("/");
+          const targetModel = (provider && id) ? modelRuntime.getModel(provider, id) : null;
+          if (!targetModel) {
+            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
+          } else if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
+            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
+          } else if (!fitsModel(entry.session, targetModel)) {
+            console.warn(`[pi-agent] conversation is larger than compact model "${modelId}" can take, using the conversation model`);
+          } else {
+            currentModel = agentState.model;
+            agentState.model = targetModel;
+            modelSwapped = true;
+            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
+          }
+        }
+
+        if (agentState.thinkingLevel && agentState.thinkingLevel !== "off") {
+          currentThinkingLevel = agentState.thinkingLevel;
+          agentState.thinkingLevel = "off";
+          thinkingSwapped = true;
+          console.log(`[pi-agent] compact forcing thinkingLevel=off (was ${currentThinkingLevel})`);
+        }
+      }
+
+      try {
+        const result = await entry.session.compact();
+        const usage = entry.session.getContextUsage();
+        return {
+          tokensBefore: result.tokensBefore,
+          // pi reports no live count until the next response; its own estimate fills the gap.
+          tokensAfter: usage?.tokens ?? result.estimatedTokensAfter ?? null,
+        };
+      } finally {
+        if (modelSwapped) agentState.model = currentModel;
+        if (thinkingSwapped) agentState.thinkingLevel = currentThinkingLevel;
+      }
+    });
+  }
+
+  /**
    * Format an AgentMessage into the text string sent to the Pi session.
    * Attachments are rendered as a fenced JSON manifest appended to the user text.
    */
@@ -401,6 +537,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // Verify auth is available for the target model
         if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
           console.warn(`[pi-agent] no auth for flush model "${modelId}", using default`);
+          return doPrompt(threadId, formatMessage(message));
+        }
+
+        if (!fitsModel(entry.session, targetModel)) {
+          console.warn(`[pi-agent] conversation is larger than flush model "${modelId}" can take, using the conversation model`);
           return doPrompt(threadId, formatMessage(message));
         }
 
@@ -451,6 +592,18 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             // through these so the user gets one notice, not two.
             let runEnded = false;
             let draining = false;
+            // Provider error of the latest assistant message, reported only
+            // if the run settles without pi having recovered from it.
+            let pendingError: string | null = null;
+            // pi announced a retry, or a compaction after an overflow; the next
+            // run is pi asking again, not follow-up work.
+            let recovering = false;
+            const reportPendingError = () => {
+              if (pendingError === null) return;
+              eventQueue.push({ type: "model_error", message: pendingError });
+              pendingError = null;
+              resolve?.();
+            };
             const notifyDraining = () => {
               if (draining) return;
               draining = true;
@@ -486,10 +639,39 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
               // Retries are the same run from the user's point of view.
               if (event.type === "agent_end") {
                 if (!event.willRetry) runEnded = true;
+              } else if (event.type === "auto_retry_start") {
+                // pi is retrying the failed request itself.
+                pendingError = null;
+                recovering = true;
+              } else if (event.type === "compaction_start") {
+                // After an overflow pi compacts and asks again. The error
+                // stays held until that is known to have worked: a failed
+                // summary ends the run with no new assistant message, and the
+                // overflow is then all there is to report (and what starts
+                // roundhouse's own recovery).
+                if (event.reason === "overflow") recovering = true;
+              } else if (event.type === "compaction_end") {
+                if (event.reason === "overflow") {
+                  if (event.willRetry && !event.errorMessage && !event.aborted) pendingError = null;
+                  else recovering = false;
+                }
               } else if (event.type === "agent_start") {
-                if (runEnded) notifyDraining();
+                if (recovering) {
+                  // pi's own retry: the same answer continuing.
+                  recovering = false;
+                } else if (runEnded) {
+                  // Follow-up work queued by an extension. If the run before
+                  // it ended in an error, that error belongs to the owner's
+                  // request: report it now, or the follow-up's success would
+                  // bury it.
+                  reportPendingError();
+                  notifyDraining();
+                }
               } else if (event.type === "agent_settled") {
                 runEnded = false;
+                recovering = false;
+                // The run is over and pi did not recover from the error.
+                reportPendingError();
                 notifyDrainComplete();
               }
 
@@ -508,9 +690,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 } else if (event.type === "message_end") {
                   // Pi records provider failures (auth, throttling, etc.) on the
                   // assistant message instead of throwing — surface them.
+                  // Hold it until the run settles: pi retries transient errors
+                  // and compacts on overflow by itself, and reporting each
+                  // failed attempt would post an error the user never needs
+                  // to act on (and start roundhouse's own recovery on top).
                   const msg = (event as any).message;
-                  if (msg?.role === "assistant" && msg.stopReason === "error" && msg.errorMessage) {
-                    streamEvent = { type: "model_error", message: msg.errorMessage };
+                  if (msg?.role === "assistant") {
+                    pendingError = msg.stopReason === "error" && msg.errorMessage ? String(msg.errorMessage) : null;
                   }
                 }
               }
@@ -538,6 +724,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
               );
             } finally {
               try { unsub(); } catch { /* ignore */ }
+              // Safety net: an error still held here was never reported.
+              reportPendingError();
               eventQueue.push({ type: "agent_end" });
               done = true;
               resolve?.();
@@ -569,6 +757,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     async dispose(): Promise<void> {
+      disposed = true;
       if (reapInterval) clearInterval(reapInterval);
       for (const [, entry] of sessions) {
         entry.session.dispose();
@@ -592,79 +781,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     async compact(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
-      return enqueue(threadId, async () => {
-        const entry = sessions.get(threadId);
-        if (!entry) return null;
-
-        const result = await entry.session.compact();
-        const usage = entry.session.getContextUsage();
-        return {
-          tokensBefore: result.tokensBefore,
-          tokensAfter: usage?.tokens ?? null,
-        };
-      });
+      return compactSession(threadId, undefined);
     },
 
     async compactWithModel(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
-      return enqueue(threadId, async () => {
-        const entry = sessions.get(threadId);
-        if (!entry) return null;
-
-        const agentState = (entry.session as any).agent?.state;
-        let currentModel: any;
-        let currentThinkingLevel: any;
-        let modelSwapped = false;
-        let thinkingSwapped = false;
-
-        // Resolve and swap model for compact
-        if (!agentState) {
-          console.warn(`[pi-agent] cannot access agent state for compact model swap, using default`);
-        } else {
-          const modelRuntime = await getModelRuntime();
-          const [provider, ...rest] = modelId.split("/");
-          const id = rest.join("/");
-          const targetModel = (provider && id) ? modelRuntime.getModel(provider, id) : null;
-          if (!targetModel) {
-            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
-          } else if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
-            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
-          } else {
-            currentModel = agentState.model;
-            agentState.model = targetModel;
-            modelSwapped = true;
-            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
-          }
-
-          // Force thinking off for compact regardless of agent's default.
-          // Summarization doesn't benefit from reasoning, costs more tokens,
-          // and complicates the maxTokens math (adjustMaxTokensForThinking adds
-          // up to 16k thinking budget). Direct state mutation matches the model
-          // swap above and avoids setThinkingLevel(), which would persist to
-          // settings.json.
-          if (agentState.thinkingLevel && agentState.thinkingLevel !== "off") {
-            currentThinkingLevel = agentState.thinkingLevel;
-            agentState.thinkingLevel = "off";
-            thinkingSwapped = true;
-            console.log(`[pi-agent] compact forcing thinkingLevel=off (was ${currentThinkingLevel})`);
-          }
-        }
-
-        try {
-          const result = await entry.session.compact();
-          const usage = entry.session.getContextUsage();
-          return {
-            tokensBefore: result.tokensBefore,
-            tokensAfter: usage?.tokens ?? null,
-          };
-        } finally {
-          if (modelSwapped) {
-            agentState.model = currentModel;
-          }
-          if (thinkingSwapped) {
-            agentState.thinkingLevel = currentThinkingLevel;
-          }
-        }
-      });
+      return compactSession(threadId, modelId);
     },
 
     /**
@@ -788,6 +909,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         hasMemoryExtension: memoryCapabilities?.hasMemoryExtension ?? null,
         memoryTools: memoryCapabilities?.memoryTools ?? [],
         extensions: memoryCapabilities?.extensions ?? [],
+        ...(standingContext ? { standingContext: "system-prompt" as const } : {}),
       };
     },
 

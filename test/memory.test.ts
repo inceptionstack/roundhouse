@@ -6,7 +6,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } from "../src/memory/policy";
+import { shouldInjectMemory, classifyContextPressure, contextThresholds, isSoftFlushOnCooldown } from "../src/memory/policy";
 import { buildMemoryInjection, injectMemoryIntoMessage } from "../src/memory/inject";
 import { buildFlushPrompt } from "../src/memory/prompts";
 import { determineMemoryMode, flushMemoryThenCompact } from "../src/memory/lifecycle";
@@ -103,15 +103,62 @@ describe("classifyContextPressure", () => {
       .toBe("soft");
   });
 
-  it("returns hard at 50%", () => {
-    expect(classifyContextPressure({ contextTokens: 100000, contextWindow: 200000, contextPercent: 50 }))
+  it("returns hard at 60% of the window", () => {
+    expect(classifyContextPressure({ contextTokens: 119_999, contextWindow: 200000, contextPercent: 60 }))
+      .toBe("soft");
+    expect(classifyContextPressure({ contextTokens: 120_000, contextWindow: 200000, contextPercent: 60 }))
       .toBe("hard");
   });
 
-  it("returns hard at absolute token threshold", () => {
-    // 200K tokens on 1M window = 20% — below percent threshold but above absolute
-    expect(classifyContextPressure({ contextTokens: 200000, contextWindow: 1000000, contextPercent: 20 }))
+  it("scales with the model: a 1M-window model is not compacted at 200k-model sizes", () => {
+    // What a 200k model would already compact at is 15% of a 1M window.
+    expect(classifyContextPressure({ contextTokens: 150_000, contextWindow: 1_000_000, contextPercent: 15 }))
+      .toBe("none");
+    expect(classifyContextPressure({ contextTokens: 449_999, contextWindow: 1_000_000, contextPercent: 45 }))
+      .toBe("none");
+    expect(classifyContextPressure({ contextTokens: 450_000, contextWindow: 1_000_000, contextPercent: 45 }))
+      .toBe("soft");
+    expect(classifyContextPressure({ contextTokens: 600_000, contextWindow: 1_000_000, contextPercent: 60 }))
       .toBe("hard");
+    expect(contextThresholds(1_000_000)).toEqual({ soft: 450_000, hard: 600_000, emergencyRemaining: 32_768 });
+    expect(contextThresholds(200_000)).toEqual({ soft: 90_000, hard: 120_000, emergencyRemaining: 32_768 });
+  });
+
+  it("honours an absolute cap when one is configured", () => {
+    const config = { hardTokens: 300_000, softTokens: 250_000 };
+    expect(classifyContextPressure({ contextTokens: 260_000, contextWindow: 1_000_000, contextPercent: 26 }, config))
+      .toBe("soft");
+    expect(classifyContextPressure({ contextTokens: 300_000, contextWindow: 1_000_000, contextPercent: 30 }, config))
+      .toBe("hard");
+  });
+
+  it("ignores settings that make no sense instead of obeying them", () => {
+    const sane = contextThresholds(1_000_000);
+    // 60 meant as a percentage, zero, negative, NaN and strings fall back to the defaults.
+    for (const bad of [60, 0, -0.5, Number.NaN, "0.6" as unknown as number]) {
+      expect(contextThresholds(1_000_000, { hardPercent: bad, softPercent: bad })).toEqual(sane);
+      expect(contextThresholds(1_000_000, { hardTokens: bad === 60 ? 0 : bad, softTokens: 0 })).toEqual(sane);
+    }
+    // A zero threshold would compact on every turn.
+    expect(classifyContextPressure({ contextTokens: 5_000, contextWindow: 1_000_000, contextPercent: 0 }, { hardTokens: 0, hardPercent: 0 }))
+      .toBe("none");
+  });
+
+  it("keeps soft in proportion when only hard is capped", () => {
+    // Not one token below hard: the reminder to save memory needs room to act.
+    expect(contextThresholds(1_000_000, { hardTokens: 300_000 })).toMatchObject({ soft: 225_000, hard: 300_000 });
+  });
+
+  it("applies per-model overrides to that model only", () => {
+    const config = { models: { "bedrock/big": { hardTokens: 300_000 } } };
+    const at = (model: string) =>
+      classifyContextPressure({ contextTokens: 320_000, contextWindow: 1_000_000, contextPercent: 32, model }, config);
+    expect(at("bedrock/big")).toBe("hard");
+    expect(at("bedrock/other")).toBe("none");
+    // Inherited keys never match.
+    expect(classifyContextPressure({ contextTokens: 10, contextWindow: 1_000_000, contextPercent: 0, model: "constructor" }, config))
+      .toBe("none");
+    expect(contextThresholds(1_000_000, config, "bedrock/big").hard).toBe(300_000);
   });
 
   it("returns emergency when remaining below threshold", () => {
@@ -128,21 +175,17 @@ describe("classifyContextPressure", () => {
   });
 
   it("clamps absolute thresholds to window minus headroom on small-window models", () => {
-    // 128k window: default hardTokens=150_000 would exceed window. Clamp to
-    // window - 50k headroom = 78k. tokens=80k should fire hard via the
-    // clamped absolute threshold even though percent (62.5%) is also above
-    // the 50% hardPercent (so this also exercises the OR branch).
+    // 128k window: 60% is 76.8k, and no threshold may sit above
+    // window - 50k headroom = 78k.
     expect(classifyContextPressure({ contextTokens: 80_000, contextWindow: 128_000, contextPercent: 62 }))
       .toBe("hard");
-    // tokens=75k on 128k window: percent ~58% → still hard via percent.
-    // Switch to a percent below hardPct to isolate the absolute clamp:
     expect(classifyContextPressure({ contextTokens: 79_000, contextWindow: 128_000, contextPercent: 40 }))
       .toBe("hard");
   });
 
   it("never reports hard threshold above window on tiny-window models", () => {
     // 64k window: ceiling = max(0, 64_000 - 50_000) = 14_000.
-    // tokens=15k, percent=23% — below hardPct (50%), but above clamped hardTok.
+    // tokens=15k is 23% of the window, far below 60%, but above the ceiling.
     expect(classifyContextPressure({ contextTokens: 15_000, contextWindow: 64_000, contextPercent: 23 }))
       .toBe("hard");
   });

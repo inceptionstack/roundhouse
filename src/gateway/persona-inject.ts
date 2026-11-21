@@ -73,11 +73,10 @@ export function reloadPersona(): void {
 }
 
 /**
- * Prepend a <persona> section to the prompt text.
- * Only injects if soul.md or user.md have content.
- * Auto-reloads if files have been modified since last load.
+ * The <persona> block, or "" when soul.md and user.md are empty.
+ * Auto-reloads if the files have been modified since the last load.
  */
-export function injectPersonaSection(text: string): string {
+export function personaSection(): string {
   if (cachedPersona === null) {
     loadPersona();
   } else {
@@ -87,8 +86,17 @@ export function injectPersonaSection(text: string): string {
       reloadPersona();
     }
   }
-  if (!cachedPersona) return text;
+  if (!cachedPersona) return "";
   // Escape any literal </persona> in content to prevent XML injection
   const safe = cachedPersona.replace(/<\/persona>/gi, "&lt;/persona&gt;");
-  return `<persona>\n${safe}\n</persona>\n\n${text}`;
+  return `<persona>\n${safe}\n</persona>`;
+}
+
+/**
+ * Prepend the <persona> section to the prompt text.
+ * Only injects if soul.md or user.md have content.
+ */
+export function injectPersonaSection(text: string): string {
+  const section = personaSection();
+  return section ? `${section}\n\n${text}` : text;
 }

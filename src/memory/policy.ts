@@ -9,10 +9,13 @@ import { formatDate } from "./files";
 
 // ── Defaults ─────────────────────────────────────────
 
+// Thresholds are fractions of the conversation model's context window, so
+// they follow the model: 90k / 120k on a 200k model, 450k / 600k on a 1M one.
+// (They used to be capped at 130k / 150k absolute, which suited 200k models
+// and made a 1M model compact at 15% full.) Absolute caps are still honoured
+// when configured, for someone who wants to bound cost per turn.
 const DEFAULT_SOFT_PERCENT = 0.45;
-const DEFAULT_SOFT_TOKENS = 130_000;
-const DEFAULT_HARD_PERCENT = 0.50;
-const DEFAULT_HARD_TOKENS = 150_000;
+const DEFAULT_HARD_PERCENT = 0.60;
 const DEFAULT_EMERGENCY_THRESHOLD = 32_768;
 const DEFAULT_COOLDOWN_MS = 10 * 60_000; // 10 minutes
 
@@ -21,14 +24,9 @@ const DEFAULT_COOLDOWN_MS = 10 * 60_000; // 10 minutes
 // than ~20k of recent tokens) plus scaffolding plus previous summary, then
 // asks the model to summarize. If the prompt itself overflows the model
 // context, compact() throws. 50k is the empirical headroom that fits a
-// typical summarization prompt on Claude family.
-const COMPACT_HEADROOM_TOKENS = 50_000;
-
-// Why 130k/150k as the default absolute thresholds against a 200k window:
-// see COMPACT_HEADROOM_TOKENS above and
-// ~/.roundhouse/workspace/compaction-loop-diagnosis.md (Bug B).
-// For smaller-window models, classifyContextPressure() clamps the absolute
-// thresholds to `window - HEADROOM` so they never exceed the window.
+// typical summarization prompt on Claude family. No threshold is ever placed
+// above `window - HEADROOM`, whatever the percentages say.
+export const COMPACT_HEADROOM_TOKENS = 50_000;
 
 // ── Injection policy ─────────────────────────────────
 
@@ -76,6 +74,65 @@ export interface ContextInfo {
   contextTokens: number | null;
   contextWindow: number | null;
   contextPercent: number | null;
+  /** Conversation model as "provider/model-id", for per-model overrides. */
+  model?: string | null;
+}
+
+type CompactConfig = NonNullable<MemoryConfig["compact"]>;
+
+/**
+ * The compaction settings that apply to one model: the base settings with
+ * that model's entry under `compact.models` laid over them.
+ */
+export function resolveCompactConfig(config: MemoryConfig["compact"], model?: string | null): CompactConfig {
+  const base = config ?? {};
+  const override = model && base.models && Object.hasOwn(base.models, model) ? base.models[model] : undefined;
+  return override ? { ...base, ...override } : base;
+}
+
+export interface ContextThresholds {
+  /** Token count at which the agent is asked to save memory (no compaction). */
+  soft: number;
+  /** Token count at which memory is flushed and the session compacted. */
+  hard: number;
+  /** Free tokens at or below which compaction runs without a flush first. */
+  emergencyRemaining: number;
+}
+
+/**
+ * Where the thresholds sit, in tokens, for a model with this context window.
+ * Each is the smallest of: its fraction of the window, its absolute cap if one
+ * is configured, and the ceiling that leaves room for the summarizer.
+ */
+export function contextThresholds(
+  window: number,
+  config?: MemoryConfig["compact"],
+  model?: string | null,
+): ContextThresholds {
+  const c = resolveCompactConfig(config, model);
+  // A value that makes no sense is ignored, not obeyed: 0 would compact on
+  // every turn, 60 (meant as a percentage) would never compact, and NaN
+  // would switch both thresholds off without a word.
+  const fraction = (v: unknown, fallback: number) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1 ? v : fallback;
+  const cap = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : Number.POSITIVE_INFINITY;
+  const hardPct = fraction(c.hardPercent, DEFAULT_HARD_PERCENT);
+  const softPct = fraction(c.softPercent, DEFAULT_SOFT_PERCENT);
+
+  const ceiling = Math.max(0, window - COMPACT_HEADROOM_TOKENS);
+  const hard = Math.min(Math.floor(hardPct * window), cap(c.hardTokens), ceiling);
+  // Soft sits below hard, so the reminder to save memory comes first. When
+  // only hard was capped, soft keeps its usual proportion to it instead of
+  // landing one token below.
+  const softByProportion = Math.floor(hard * Math.min(softPct / hardPct, 0.9));
+  const soft = Math.min(Math.floor(softPct * window), cap(c.softTokens), Math.max(0, softByProportion));
+  const emergency = c.emergencyThresholdTokens;
+  return {
+    soft,
+    hard,
+    emergencyRemaining: typeof emergency === "number" && Number.isFinite(emergency) && emergency >= 0 ? emergency : DEFAULT_EMERGENCY_THRESHOLD,
+  };
 }
 
 /**
@@ -88,36 +145,16 @@ export function classifyContextPressure(
 ): PressureLevel {
   const tokens = info.contextTokens;
   const window = info.contextWindow;
-  const percent = info.contextPercent;
 
   // Can't classify without data
   if (tokens == null || window == null) return "none";
 
-  const remaining = window - tokens;
-  const emergencyThreshold = config?.emergencyThresholdTokens ?? DEFAULT_EMERGENCY_THRESHOLD;
+  const t = contextThresholds(window, config, info.model);
 
   // Emergency: running out of room
-  if (remaining <= emergencyThreshold) return "emergency";
-
-  const pctDecimal = percent != null ? percent / 100 : tokens / window;
-
-  // Clamp absolute thresholds so they never exceed `window - HEADROOM`.
-  // Defends against future smaller-window models where the configured
-  // 150k/130k absolute thresholds would otherwise sit above the window.
-  // The percent thresholds already scale with window naturally.
-  const headroom = COMPACT_HEADROOM_TOKENS;
-  const ceiling = Math.max(0, window - headroom);
-
-  // Hard threshold
-  const hardPct = config?.hardPercent ?? DEFAULT_HARD_PERCENT;
-  const hardTok = Math.min(config?.hardTokens ?? DEFAULT_HARD_TOKENS, ceiling);
-  if (pctDecimal >= hardPct || tokens >= hardTok) return "hard";
-
-  // Soft threshold (clamped one step below hard so soft fires first).
-  const softPct = config?.softPercent ?? DEFAULT_SOFT_PERCENT;
-  const softTok = Math.min(config?.softTokens ?? DEFAULT_SOFT_TOKENS, Math.max(0, hardTok - 1));
-  if (pctDecimal >= softPct || tokens >= softTok) return "soft";
-
+  if (window - tokens <= t.emergencyRemaining) return "emergency";
+  if (tokens >= t.hard) return "hard";
+  if (tokens >= t.soft) return "soft";
   return "none";
 }
 

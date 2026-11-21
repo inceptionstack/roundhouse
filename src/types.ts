@@ -83,6 +83,13 @@ export interface AdapterInfo {
   /** List of loaded extension paths/names */
   extensions?: string[];
 
+  /**
+   * "system-prompt" when the adapter carries the gateway's standing context
+   * (persona, tool notes) in its system prompt. The gateway then does not
+   * repeat it in front of every user message.
+   */
+  standingContext?: "system-prompt";
+
   /** Additional adapter-specific fields */
   [key: string]: unknown;
 }

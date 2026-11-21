@@ -12,7 +12,7 @@ import type { AgentAdapter, AgentMessage } from "../types";
 import type { MemoryConfig, MemoryFileSet, MemoryMode, MemorySnapshot, PreparedTurn, PressureLevel, ThreadMemoryState, CompactResult } from "./types";
 import { resolveMemoryFiles, readMemorySnapshot, formatDate } from "./files";
 import { loadThreadMemoryState, saveThreadMemoryState } from "./state";
-import { shouldInjectMemory, classifyContextPressure, isSoftFlushOnCooldown } from "./policy";
+import { shouldInjectMemory, classifyContextPressure, contextThresholds, isSoftFlushOnCooldown } from "./policy";
 import { buildMemoryInjection, injectMemoryIntoMessage } from "./inject";
 import { buildFlushPrompt } from "./prompts";
 import { bootstrapMemoryFiles } from "./bootstrap";
@@ -161,6 +161,7 @@ export async function finalizeMemoryForTurn(
         contextTokens: typeof info.contextTokens === "number" ? info.contextTokens : null,
         contextWindow: typeof info.contextWindow === "number" ? info.contextWindow : null,
         contextPercent: typeof info.contextPercent === "number" ? info.contextPercent : null,
+        model: typeof info.model === "string" ? info.model : null,
       },
       config?.compact,
     );
@@ -179,7 +180,8 @@ export async function finalizeMemoryForTurn(
  * 2. Compact the session
  * 3. Mark force re-inject for Full mode
  *
- * Uses a cheaper model for flush turns if config.compact.flushModel is set.
+ * Uses config.compact.flushModel for the flush turn and the summary when it
+ * is set and the conversation fits in that model's context window.
  *
  * Returns compaction result or null if nothing to compact.
  */
@@ -192,9 +194,12 @@ export async function flushMemoryThenCompact(
   onProgress?: (step: string) => void | Promise<void>,
 ): Promise<CompactResult | null> {
   const mode = getMode(agent);
-  // Default to Sonnet for flush turns (faster). Set to null to use conversation model.
-  const DEFAULT_FLUSH_MODEL = "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0";
-  const flushModel = config?.compact?.flushModel === null ? undefined : (config?.compact?.flushModel ?? DEFAULT_FLUSH_MODEL);
+  // The conversation model does the flush and the summary unless a flush
+  // model is configured. A second model has no prompt cache for this
+  // conversation, so it re-reads all of it at full price and speed on every
+  // flush, and it cannot be used at all once the conversation is larger than
+  // its window (the adapter checks that and falls back).
+  const flushModel = config?.compact?.flushModel || undefined;
 
   /** Send flush prompt, preferring flushModel if available */
   async function sendFlush(text: string): Promise<void> {
@@ -213,10 +218,38 @@ export async function flushMemoryThenCompact(
       return null;
     }
 
+    // The soft band is wide on a large-window model (450k to 600k tokens on
+    // 1M). A flush every cooldown period while the conversation sits in it
+    // would be dozens of extra full-context turns before one compaction. Ask
+    // again only after the conversation has grown by a third of the band.
+    const info = agent.getInfo?.(threadId) ?? {};
+    const tokens = typeof info.contextTokens === "number" ? info.contextTokens : null;
+    const window = typeof info.contextWindow === "number" ? info.contextWindow : null;
+    if (tokens !== null && window !== null && typeof state.lastSoftFlushTokens === "number") {
+      const t = contextThresholds(window, config?.compact, typeof info.model === "string" ? info.model : null);
+      const step = Math.max(1, Math.floor((t.hard - t.soft) / 3));
+      const grewEnough = tokens >= state.lastSoftFlushTokens + step;
+      const newCycle = tokens < state.lastSoftFlushTokens; // compacted or reset since
+      if (!grewEnough && !newCycle) {
+        console.log(`[memory] soft flush skipped for ${threadId} — only ${tokens - state.lastSoftFlushTokens} tokens since the last one`);
+        return null;
+      }
+    }
+
     try {
       const flushText = buildFlushPrompt(mode === "unknown" ? "full" : mode, "soft");
       await sendFlush(flushText);
       state.lastSoftFlushAt = new Date().toISOString();
+      if (tokens !== null) state.lastSoftFlushTokens = tokens;
+      // The agent has just written the memory files itself. Record them as
+      // seen, or the next user turn would inject them back as "changed".
+      if (mode !== "complement") {
+        try {
+          const snapshot = await readMemorySnapshot(resolveMemoryFiles(rootDir, config), config?.inject?.maxBytes);
+          state.lastInjectedDigest = snapshot.digest;
+          state.lastKnownDigest = snapshot.digest;
+        } catch { /* the next turn's digest check covers it */ }
+      }
       await saveThreadMemoryState(threadId, state);
       console.log(`[memory] soft flush completed for ${threadId}${flushModel ? ` (model: ${flushModel})` : ""}`);
     } catch (err) {

@@ -12,6 +12,15 @@ import { getAgentFactory } from "./agents/registry";
 import { SingleAgentRouter } from "./router";
 import { Gateway } from "./gateway";
 import { loadConfig } from "./config";
+import { buildStandingContext } from "./gateway/standing-context";
+import { acquireInstanceLock, GatewayAlreadyRunningError } from "./instance-lock";
+
+/**
+ * A stop that takes longer than this is cut short: the process exits anyway.
+ * Longer than the sum of the bounded steps in Gateway.stop() (3 x 5 s), and
+ * shorter than the service manager's own kill timeout (systemd unit: 30 s).
+ */
+const SHUTDOWN_TIMEOUT_MS = 20_000;
 
 // ── Crash protection ─────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -31,10 +40,27 @@ async function main() {
     process.exit(1);
   }
 
+  // ── One gateway per host ───────────────────────────
+  // Taken before anything polls a chat platform or opens a session.
+  let lock;
+  try {
+    lock = await acquireInstanceLock();
+  } catch (err) {
+    if (err instanceof GatewayAlreadyRunningError) {
+      console.error(`[roundhouse] ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  process.on("exit", () => lock.release());
+
   // ── Create agent ───────────────────────────────────
   const { type, ...agentConfig } = config.agent;
   const factory = getAgentFactory(type);
-  const agent = factory(agentConfig);
+  // Persona and tool notes go to the adapter as a function: one that can put
+  // them in its system prompt does (pi), and the gateway then skips the
+  // per-message copy. Others ignore it and keep the per-message copy.
+  const agent = factory({ ...agentConfig, standingContext: buildStandingContext });
   console.log(`[roundhouse] agent: ${agent.name}`);
 
   // ── Create router (single agent for now) ───────────
@@ -44,9 +70,30 @@ async function main() {
   const gateway = new Gateway(router, config);
 
   // ── Graceful shutdown ──────────────────────────────
+  // A stop must end the process, whatever is in flight: a gateway that
+  // lingers after its service was restarted shares the bot and the session
+  // files with its successor. So: say we are stopping (the successor waits
+  // for that), stop, and exit when the stop is done or the deadline passes.
+  let stopping = false;
   const shutdown = async (signal: string) => {
+    if (stopping) {
+      // Asked twice: the person at the terminal wants out now.
+      console.error(`[roundhouse] received ${signal} again, exiting now`);
+      process.exit(1);
+    }
+    stopping = true;
     console.log(`\n[roundhouse] received ${signal}, shutting down…`);
-    await gateway.stop();
+    lock.markStopping();
+    const deadline = setTimeout(() => {
+      console.error(`[roundhouse] shutdown did not finish in ${SHUTDOWN_TIMEOUT_MS / 1000}s; exiting`);
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    try {
+      await gateway.stop();
+    } catch (err) {
+      console.error("[roundhouse] error during shutdown:", err);
+    }
+    clearTimeout(deadline);
     process.exit(0);
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
