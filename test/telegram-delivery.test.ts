@@ -362,6 +362,39 @@ describe("a Telegram rate limit (HTTP 429) during streaming", () => {
     expect(t.visible()[0]).toBe(answer.slice(0, answer.length - lost));
   });
 
+  it("stops a streamed answer after a part that a rate limit holds back", async () => {
+    const clock = fakeClock();
+    let sends = 0;
+    const t = fakeTelegram({
+      now: clock.now,
+      // The message that would open the second bubble is refused for ten minutes.
+      fail: (call) => (call.method === "sendMessage" && ++sends === 2 ? rateLimitError(600) : null),
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const all = lines(0, 220);
+    const answer = all.join("\n");
+    async function* pieces() {
+      for (let i = 0; i < all.length; i++) {
+        // The second bubble fills up while the limit is on. Then the stream
+        // pauses for longer than the limit lasts, and goes on.
+        clock.advance(i === 170 ? 700_000 : 50);
+        yield all[i] + (i < all.length - 1 ? "\n" : "");
+      }
+    }
+
+    await handleTelegramHtmlStream(t, pieces(), clock);
+
+    // The first bubble arrived. The second was held back, so the third is not
+    // sent either, although Telegram would take it by then: it would follow
+    // the first with a hole in between.
+    expect(t.messages()).toHaveLength(1);
+    expect(t.calls.filter((c) => c.failed)).toHaveLength(1);
+    expect(errors).toHaveBeenCalledTimes(1);
+    const lost = Number(/(\d+) characters not delivered/.exec(String(errors.mock.calls[0][0]))?.[1]);
+    expect(lost).toBeGreaterThan(8000);
+    expect(t.visible()[0].trimEnd()).toBe(answer.slice(0, answer.length - lost).trimEnd());
+  });
+
   it("waits 90 seconds for one answer in total, not for each message", async () => {
     const clock = fakeClock();
     // Every message is refused once, with a wait of 40 seconds.
@@ -569,6 +602,32 @@ describe("a stream that goes quiet", () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     await delivery;
+  });
+
+  it("does not keep the answer waiting for a rate limit once the stream has ended", async () => {
+    vi.useFakeTimers();
+    const t = fakeTelegram({
+      now: Date.now,
+      fail: (call) => (call.method === "editMessageText" ? rateLimitError(600) : null),
+    });
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    async function* pieces() {
+      yield "One.";
+      await pause(1200);
+      yield " Two."; // this edit is refused for ten minutes
+      await pause(2000);
+    }
+    const started = Date.now();
+    let finishedAfter = -1;
+
+    const delivery = handleTelegramHtmlStream(t, pieces()).then(() => { finishedAfter = Date.now() - started; });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await delivery;
+
+    // Done when the stream was, not ten minutes later, and no timer is left behind.
+    expect(finishedAfter).toBeLessThanOrEqual(3300);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(t.visible().join("")).toBe("One. Two.");
   });
 });
 

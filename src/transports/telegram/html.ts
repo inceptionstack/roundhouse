@@ -276,14 +276,16 @@ export async function postTelegramHtml(
 ): Promise<void> {
   const { chatId, messageThreadId } = parseTelegramThreadId(thread.id);
   const limiter = new RateLimiter(options, thread.adapter, chatId);
-  await postChunks(limiter, thread.adapter, chatId, messageThreadId, markdown, "");
+  const heldBack = await postChunks(limiter, thread.adapter, chatId, messageThreadId, markdown, "");
+  if (heldBack > 0) reportHeldBack(limiter, heldBack);
 }
 
 /**
  * Post `markdown` as one message per chunk. `prefix` is as in `takeMarkdownChunk`.
  *
  * Stops at the first chunk a rate limit keeps back: the chunks after it would
- * arrive without it. What was not sent is logged once.
+ * arrive without it. Returns how many characters, counted from the end of
+ * `markdown`, were not sent for that reason (0 if none).
  */
 async function postChunks(
   limiter: RateLimiter,
@@ -292,18 +294,16 @@ async function postChunks(
   messageThreadId: number | undefined,
   markdown: string,
   prefix: string,
-): Promise<void> {
+): Promise<number> {
   const chunks = splitMarkdownForTelegram(markdown, TELEGRAM_MESSAGE_LIMIT, prefix);
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     // Telegram refuses a message with nothing to show.
     if (!hasVisibleText(chunk.html)) continue;
     const outcome = await sendHtmlOrPlain(limiter, adapter, chatId, messageThreadId, chunk.html, chunk.text);
-    if (outcome === "rate-limited") {
-      reportHeldBack(limiter, markdown.length - chunk.start);
-      return;
-    }
+    if (outcome === "rate-limited") return markdown.length - chunk.start;
   }
+  return 0;
 }
 
 /** Log text that a rate limit kept from being sent */
@@ -311,7 +311,8 @@ function reportHeldBack(limiter: RateLimiter, characters: number): void {
   const wait = Math.max(0, Math.ceil((limiter.until("send") - limiter.now()) / 1000));
   console.error(
     `[roundhouse] Telegram rate limit: ${characters} characters not delivered. ` +
-      `Telegram asked for a wait of ${wait} s, more than is left of the ${MAX_RATE_LIMIT_WAIT_MS / 1000} s an answer waits.`,
+      (wait > 0 ? `Telegram asks for another ${wait} s; an ` : "An ") +
+      `answer waits ${MAX_RATE_LIMIT_WAIT_MS / 1000} s in total.`,
   );
 }
 
@@ -331,6 +332,10 @@ function reportHeldBack(limiter: RateLimiter, characters: number): void {
  * last update of a bubble may not be skipped: after a rate limit it is tried
  * again once Telegram allows, and if the bubble still cannot be edited, the
  * text it does not show is posted as a new message.
+ *
+ * Once a rate limit has held back part of the answer (see `RateLimiter`),
+ * nothing after that part is sent: it would arrive with a gap. The stream is
+ * still read to its end, and what was not sent is logged once.
  *
  * If the stream itself fails, what has arrived is still delivered, and the
  * error is thrown afterwards.
@@ -363,6 +368,8 @@ export async function handleTelegramHtmlStream(
   let latest = "";
   /** A text Telegram refused for the open bubble for another reason than a rate limit */
   let refused: string | null = null;
+  /** Source offset from which a rate limit held the text back, or -1. Nothing is sent after it. */
+  let heldBackFrom = -1;
 
   /** The source of the open bubble */
   const body = () => accumulated.slice(committed);
@@ -397,7 +404,10 @@ export async function handleTelegramHtmlStream(
 
   /** True if the open bubble has text that is not on screen and is worth trying */
   const updatePending = (): boolean =>
-    hasVisibleText(latest) && latest !== refused && (messageId === null || !sameText(latest, shown));
+    heldBackFrom === -1 &&
+    hasVisibleText(latest) &&
+    latest !== refused &&
+    (messageId === null || !sameText(latest, shown));
 
   /** The earliest time an update of the open bubble may be tried */
   const updateDueAt = (): number => Math.max(lastAttemptAt + editInterval, limiter.until(updateKind()));
@@ -469,7 +479,7 @@ export async function handleTelegramHtmlStream(
       // Nothing of this bubble is on screen yet: post it whole.
       if (hasVisibleText(chunk.html)) {
         const outcome = await sendHtmlOrPlain(limiter, thread.adapter, chatId, messageThreadId, chunk.html, chunk.text);
-        if (outcome === "rate-limited") reportHeldBack(limiter, source.length);
+        if (outcome === "rate-limited") heldBackFrom = committed;
         lastAttemptAt = limiter.now();
       }
     } else if (!sameText(chunk.html, shown)) {
@@ -481,7 +491,8 @@ export async function handleTelegramHtmlStream(
           const resume = resumeMarkdownAt(prefix, source, shownLength);
           const rest = source.slice(resume.offset);
           if (rest.trim()) {
-            await postChunks(limiter, thread.adapter, chatId, messageThreadId, rest, resume.prefix);
+            const heldBack = await postChunks(limiter, thread.adapter, chatId, messageThreadId, rest, resume.prefix);
+            if (heldBack > 0) heldBackFrom = end - heldBack;
           }
         } else {
           // It shows more than the chunk: the start of a line that belongs
@@ -534,15 +545,17 @@ export async function handleTelegramHtmlStream(
       next = null;
       if (result.done) break;
       accumulated += result.value;
+      // Nothing more is sent after a part that was held back.
+      if (heldBackFrom !== -1) continue;
       // Half of a character that takes two code units: Telegram refuses it.
       // The other half comes with the next piece.
       if (endsInHalfCharacter(accumulated)) continue;
       let html = renderOpen();
-      while (html === null) {
+      while (html === null && heldBackFrom === -1) {
         await closeBubble(takeMarkdownChunk(prefix, body()));
         html = renderOpen();
       }
-      await updateBubble(html);
+      if (html !== null) await updateBubble(html);
     }
   } catch (err) {
     failed = true;
@@ -551,8 +564,9 @@ export async function handleTelegramHtmlStream(
 
   // Final: whatever the open bubble holds. It fits one message, unless
   // closing a code block that is still open pushes it over.
-  while (body().trim()) {
+  while (heldBackFrom === -1 && body().trim()) {
     await closeBubble(takeMarkdownChunk(prefix, body()));
   }
+  if (heldBackFrom !== -1) reportHeldBack(limiter, accumulated.length - heldBackFrom);
   if (failed) throw failure;
 }
