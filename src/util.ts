@@ -15,6 +15,10 @@ export const DEBUG_STREAM = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
 /**
  * Split a long message into chunks that fit within maxLen.
  * Prefers splitting at newline boundaries.
+ *
+ * This knows nothing about markdown: a cut can land inside a code block.
+ * Telegram output is split with `splitMarkdownForTelegram`
+ * (src/transports/telegram/format.ts) instead, which reopens the block.
  */
 export function splitMessage(text: string, maxLen: number): string[] {
   if (maxLen <= 0) throw new Error(`splitMessage: maxLen must be > 0, got ${maxLen}`);
@@ -28,6 +32,10 @@ export function splitMessage(text: string, maxLen: number): string[] {
     }
     let splitAt = remaining.lastIndexOf("\n", maxLen);
     if (splitAt < maxLen / 2) splitAt = maxLen;
+    // Keep the two halves of a surrogate pair (an emoji) together.
+    const before = remaining.charCodeAt(splitAt - 1);
+    const after = remaining.charCodeAt(splitAt);
+    if (splitAt > 1 && before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) splitAt--;
     chunks.push(remaining.slice(0, splitAt));
     // If we split at a newline, consume it so next chunk doesn't start with \n
     if (splitAt < remaining.length && remaining[splitAt] === "\n") {
