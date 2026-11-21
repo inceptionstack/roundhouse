@@ -111,6 +111,14 @@ export async function pairTelegram(
     log(`   Waiting... (Ctrl+C to skip)\n`);
   }
 
+  // Each distinct hint is printed once, and at most a handful in total.
+  const hinted = new Set<string>();
+  const hint = (message: string) => {
+    if (hinted.has(message) || hinted.size >= 8) return;
+    hinted.add(message);
+    log(`   ↪ ${message}`);
+  };
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const pollTimeout = Math.min(10, Math.floor((deadline - Date.now()) / 1000));
@@ -122,13 +130,29 @@ export async function pairTelegram(
       for (const update of updates.result ?? []) {
         offset = update.update_id + 1;
         const msg = update.message;
-        if (!msg?.from?.username) continue;
+        if (!msg?.from) continue;
 
-        const fromUser = msg.from.username.toLowerCase();
         const text = (msg.text ?? "").trim();
+        const fromUser = typeof msg.from.username === "string" ? msg.from.username.toLowerCase() : "";
+
+        // Say in the terminal why a message did not pair. Waiting in silence
+        // is indistinguishable from a broken bot. Nothing is sent to the chat:
+        // a stranger writing to the bot learns nothing.
+        if (!fromUser) {
+          hint(`a message arrived from an account with no @username (id ${msg.from.id}). Set one in Telegram → Settings → Username, then tap the link again.`);
+          continue;
+        }
+        if (!normalizedUsers.includes(fromUser)) {
+          hint(`ignored a message from @${msg.from.username}: pairing is waiting for ${normalizedUsers.map((u) => "@" + u).join(", ")}. If that is you, run pairing again with --user ${msg.from.username}.`);
+          continue;
+        }
+        if (text !== `/start ${nonce}` && text !== nonce) {
+          hint(`@${msg.from.username} wrote to the bot, but without the pairing code. Open the link above, or send it this exact message: /start ${nonce}`);
+          continue;
+        }
 
         // Accept /start <nonce> from allowed user (exact match)
-        if (normalizedUsers.includes(fromUser) && (text === `/start ${nonce}` || text === nonce)) {
+        {
           // Send welcome
           await telegramApi(token, "sendMessage", {
             chat_id: msg.chat.id,
@@ -146,7 +170,9 @@ export async function pairTelegram(
         }
       }
     } catch (err) {
-      // Network hiccup — retry
+      // Network hiccup or an API error (another program polling this bot, a
+      // webhook): say so once per distinct error, then retry.
+      hint(`Telegram: ${(err as Error).message}`);
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
