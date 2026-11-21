@@ -273,12 +273,13 @@ export class Gateway {
         console.warn("   Run: roundhouse setup --telegram --user <your-username>\n");
       }
     }
-    // Ids win: once one is recorded, usernames are ignored. Say so when the
-    // config still lists names, or a second person allowed by name only is
-    // refused without knowing why.
-    if (allowedUsers.length > 0 && allowedUserIds.length > 0) {
-      console.warn(`[roundhouse] allowedUserIds is set, so the ${allowedUsers.length} name(s) in allowedUsers no longer grant access.`);
-      console.warn(`[roundhouse] Anyone listed by name only must be paired (roundhouse pair --user NAME) to get in.`);
+    // Ids win: once one is recorded, usernames are ignored. More names than
+    // ids means someone is listed by name only and will be refused without
+    // knowing why, so say it. (One name and its one paired id is the normal
+    // result of setup and needs no warning.)
+    if (allowedUserIds.length > 0 && allowedUsers.length > allowedUserIds.length) {
+      console.warn(`[roundhouse] ${allowedUsers.length} names in allowedUsers but only ${allowedUserIds.length} paired id(s): names grant no access once an id is paired.`);
+      console.warn(`[roundhouse] Pair anyone who is listed by name only: roundhouse pair --user NAME`);
     }
     // `allowedUserIds` is the live config array, so ids added by pairing apply
     // at once (and from then on usernames no longer grant access).

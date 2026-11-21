@@ -11,7 +11,7 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 >   longer grant access. A config that lists several names but has paired
 >   only one of them (`setup --user a --user b`) now admits only the paired
 >   one: run `roundhouse pair --user NAME` for each of the others. The
->   gateway and `doctor` warn about this at start.
+>   gateway and `doctor` warn when there are more names than paired ids.
 > - Telegram deployments that list only usernames keep working, matched on
 >   the real @username. On Slack a name no longer grants access at all;
 >   Slack users are admitted by paired id.
