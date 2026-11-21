@@ -133,6 +133,14 @@ Belongs with A1.
 - **A turn whose answer was delivered but which is still in post-turn work** (memory finalize, flush) when the gateway stops is reported as unfinished at the next start.
 - **Expired OAuth credentials** produce pi's "Run '/login x'" text in chat, which is not a roundhouse command.
 - **Hard cuts** of a single line longer than Telegram's limit can land inside inline markup, so both halves show the markers literally. Nothing is lost.
+- **Telegram delivery, left from the review of the rendering fix:**
+  - A message with more than 100 formatted spans may exceed Telegram's entity limit (recalled, not verified); the splitter counts characters only.
+  - A line of several thousand `>` or `-` characters loses a few of them or turns into rules, and a table header of about 4,090 characters produces one chunk over the limit.
+  - An edit that Telegram applied but whose response was lost is posted again as a new message.
+  - A stream of one-character pieces costs more per piece as the answer grows; a 1M-character answer streamed that way is slow.
+  - A rate limit longer than 90 s per answer drops the rest of that answer with a log line; the owner is not told in chat.
+  - Tilde fences (`~~~`) are not read as code blocks, and a closing fence followed by text on the same line does not close the block (as in CommonMark).
+  - `telegramFetch` is called without a timeout of its own.
 - **Slack pairing** has no one-time code: the first user whose display name matches is paired. Slack users are admitted by id only, but the pairing step is the weak link.
 - **`roundhouse setup` and `roundhouse update`** install unpinned software: latest npm packages, a skills repository at its default branch, and the uv installer piped to a shell.
 - **The CI workflow does not run the typecheck.** Adding it needs a token with the `workflow` scope.
