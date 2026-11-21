@@ -346,8 +346,13 @@ describe("subagents", () => {
     const watcher = new SubAgentWatcher(orchestrator, watcherNotify, 50);
     watcher.start();
 
-    // Wait for at least one poll cycle
-    await new Promise((r) => setTimeout(r, 150));
+    // Wait until a poll cycle has delivered both notifications. A fixed sleep
+    // here (it was 150 ms) is a race on a loaded CI runner: the poll reads and
+    // rewrites status files, and can take longer than that.
+    await vi.waitFor(() => {
+      expect(completionCb).toHaveBeenCalledTimes(1);
+      expect(watcherNotify).toHaveBeenCalledTimes(1);
+    }, { timeout: 5000, interval: 20 });
     watcher.stop();
 
     // onCompletion listener should have fired (from recoverRun — process dead, deadline not yet)
