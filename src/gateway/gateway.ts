@@ -480,6 +480,12 @@ export class Gateway {
           logBlocked({ author: event.user }, "button press, not in allowlist");
           return;
         }
+        // chat.dmOnly covers buttons too: a menu posted in a group before the
+        // setting was turned on must not keep working there.
+        if (dmOnly && !(event.thread && _isPrivateChat(event.thread, undefined))) {
+          logIgnoredPlace(String(event.thread?.id ?? event.threadId ?? "unknown"), "chat.dmOnly is set; button press");
+          return;
+        }
         const result = await handler({ value: event.value, thread: event.thread });
         await this.postCommandResult(event.thread, result);
       });

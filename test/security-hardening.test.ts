@@ -279,6 +279,17 @@ describe("gateway admission", () => {
     expect(byId.prompts.length).toBe(1);
   });
 
+  it("chat.dmOnly ignores the owner's button press in a group, and accepts it in a private chat", async () => {
+    const { transport } = await startGateway({ allowedUserIds: [OWNER_ID], dmOnly: true });
+    const owner = { userId: String(OWNER_ID), userName: "alice" };
+    const press = wired.actions.get("topic_select") ?? [...wired.actions.values()][0];
+    await press({ value: "__proto__", thread: tgThread(-100500), threadId: "telegram:-100500", user: owner, raw: { from: { id: OWNER_ID, username: "alice" } } });
+    expect(transport.postRich).not.toHaveBeenCalled();
+    const logged = (console.log as any).mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+    expect(logged).toMatch(/ignoring telegram:-100500 \(chat\.dmOnly is set; button press\)/);
+    expect(logged).not.toMatch(/blocked userId=111/);
+  });
+
   it("ignores a button press from someone who is not allowed", async () => {
     const { transport } = await startGateway({ allowedUserIds: [OWNER_ID] });
     expect(wired.actions.size).toBeGreaterThan(0);
