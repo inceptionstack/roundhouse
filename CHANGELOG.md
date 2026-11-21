@@ -21,20 +21,25 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   polling waits for the message handler, and the handler waited for the
   whole agent turn, so `/cancel` could not interrupt anything and messages
   sent meanwhile were not delivered until the turn ended. Handlers now return
-  at once; messages keep their order per chat and commands are handled
-  immediately.
-- **A turn cut off by a restart** is reported by the next gateway ("I was
-  restarted while working on …") instead of being silently dropped or run
-  a second time.
+  at once. Messages, `/new`, `/topic`, `/compact` and commands meant for the
+  agent keep their order per chat; commands about the running turn or the
+  gateway are handled immediately. Button presses no longer block either.
+- **Requests cut off by a restart**, running or still waiting their turn,
+  are listed by the next gateway instead of being silently dropped or run a
+  second time.
+- **`/cancel`** stops the turn that is running in the chat, also before it
+  has reached the model and after `/topic` switched the chat to another
+  session, and says so when nothing is running.
 - **`/new` reopened the conversation it had just closed.** It now starts an
   empty session, also if the gateway restarts before the next message, and
   the new session gets the memory files.
 - **`/model` never reached a conversation that already existed**: it only
   changed the default. It now switches the conversation it is sent in (after
-  the current turn, if one is running) and says so when it cannot, for
-  example when the conversation no longer fits the other model's window.
-- No "Agent returned no response" after `/cancel`, and no phantom typing
-  indicator after each Telegram answer.
+  the current turn, if one is running), keeps its thinking level, and says
+  so when it cannot, for example when the conversation no longer fits the
+  other model's window. A model pi does not know or has no credentials for
+  is no longer written as the default.
+- No phantom typing indicator after each Telegram answer.
 
 ### Added
 - `/think [level]` shows or sets the thinking level of the conversation.

@@ -15,6 +15,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import type { AgentRouter, GatewayConfig } from "../src/types";
 
+// Everything this file reads or writes under "~/.roundhouse" gets a directory
+// of its own, so it cannot touch a real install or another test file's state
+// (the in-flight markers in particular are shared per directory).
+const sandbox = vi.hoisted(() => {
+  const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  return { dir: mkdtempSync(join(tmpdir(), "rh-test-")) };
+});
+vi.mock("../src/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config")>();
+  return { ...actual, ROUNDHOUSE_DIR: sandbox.dir, CONFIG_DIR: sandbox.dir };
+});
+
 let adapter: any;
 
 vi.mock("../src/transports", async (importOriginal) => {

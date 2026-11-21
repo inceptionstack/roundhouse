@@ -11,7 +11,7 @@
 
 import { mkdir, readFile } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -354,7 +354,20 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     // newest transcript. The marker stays until the new session has a turn
     // on disk, so a restart in between does not fall back to the old one.
     const markerPath = join(threadDir, NEW_SESSION_MARKER);
-    const startFresh = existsSync(markerPath);
+    let startFresh = existsSync(markerPath);
+    if (startFresh) {
+      // The marker names the fresh session once one was started. If that file
+      // is on disk, the new conversation has begun (pi writes the transcript
+      // as soon as the first message is appended) and this is a resume of it,
+      // for example after a restart in the middle of its first turn. Starting
+      // another empty session there would orphan the interrupted one.
+      let started = "";
+      try { started = readFileSync(markerPath, "utf8").split("\n")[1]?.trim() ?? ""; } catch { /* treat as not started */ }
+      if (started && existsSync(join(threadDir, started))) {
+        try { rmSync(markerPath, { force: true }); } catch { /* harmless: checked again next time */ }
+        startFresh = false;
+      }
+    }
 
     try {
       if (startFresh) throw new Error("start fresh");
@@ -393,7 +406,14 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     }
 
     const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0, threadId, standingText };
-    if (startFresh) entry.freshMarker = markerPath;
+    if (startFresh) {
+      entry.freshMarker = markerPath;
+      // Record which file the fresh session will be (see above).
+      const file = sessionManager.getSessionFile();
+      if (file) {
+        try { writeFileSync(markerPath, `${new Date().toISOString()}\n${basename(file)}\n`, { mode: 0o600 }); } catch { /* best effort */ }
+      }
+    }
     sessions.set(threadId, entry);
 
     // Detect memory capabilities from loaded extensions (first session only)
@@ -899,21 +919,40 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
      * session's model from its transcript, so changing the default in pi's
      * settings alone never reaches a conversation that already exists.
      */
-    async setModel(threadId: string, modelRef: string): Promise<{ applied: boolean; deferred?: boolean; detail?: string }> {
+    async setModel(
+      threadId: string,
+      modelRef: string,
+      onDeferred?: (result: { applied: boolean; detail?: string }) => void,
+    ): Promise<{ applied: boolean; deferred?: boolean; usable?: boolean; detail?: string }> {
       const slash = modelRef.indexOf("/");
-      const model = slash > 0
-        ? (await getModelRuntime()).getModel(modelRef.slice(0, slash), modelRef.slice(slash + 1))
-        : undefined;
-      if (!model) return { applied: false, detail: `pi does not know the model ${modelRef}` };
+      const modelRuntime = await getModelRuntime();
+      const model = slash > 0 ? modelRuntime.getModel(modelRef.slice(0, slash), modelRef.slice(slash + 1)) : undefined;
+      // `usable: false`: nobody can use this model here, so it must not
+      // become the default for new conversations either.
+      if (!model) return { applied: false, usable: false, detail: `pi does not know the model ${modelRef}` };
+      if (!modelRuntime.hasConfiguredAuth(model.provider)) {
+        return { applied: false, usable: false, detail: `there are no credentials for ${model.provider}` };
+      }
+
+      /** Why this conversation cannot move to the model, if it cannot. */
+      const tooLarge = (session: AgentSession): string | undefined => {
+        if (fitsModel(session, model)) return undefined;
+        const used = session.getContextUsage()?.tokens ?? 0;
+        return `this conversation (${Math.round(used / 1000)}K tokens) does not fit its ${Math.round((model.contextWindow ?? 0) / 1000)}K window; /compact or /new first`;
+      };
 
       const apply = () => enqueue(threadId, async () => {
         const entry = await getOrCreate(threadId);
-        if (!fitsModel(entry.session, model)) {
-          const used = entry.session.getContextUsage()?.tokens ?? 0;
-          return { applied: false, detail: `this conversation (${Math.round(used / 1000)}K tokens) does not fit its ${Math.round((model.contextWindow ?? 0) / 1000)}K window; /compact or /new first` };
-        }
+        const reason = tooLarge(entry.session);
+        if (reason) return { applied: false, detail: reason };
+        // pi's setModel resets the thinking level to the default for the new
+        // model; keep the level this conversation was on when the model has it.
+        const thinking = entry.session.thinkingLevel;
         try {
           await entry.session.setModel(model);
+          if (entry.session.thinkingLevel !== thinking && entry.session.getAvailableThinkingLevels().includes(thinking)) {
+            entry.session.setThinkingLevel(thinking);
+          }
         } catch (err) {
           return { applied: false, detail: (err as Error).message };
         }
@@ -921,26 +960,46 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         return { applied: true };
       });
 
-      // A turn is running: answer now, switch when it ends.
-      if ((sessions.get(threadId)?.inFlight ?? 0) > 0) {
-        void apply().then((r) => { if (!r.applied) console.warn(`[pi-agent] deferred model switch for ${threadId} failed: ${r.detail}`); })
-          .catch((err) => console.warn(`[pi-agent] deferred model switch for ${threadId} failed:`, (err as Error).message));
+      // Something is running or queued for this thread (a turn, a flush, a
+      // compaction): answer now, switch when it is this request's turn. What
+      // can be checked already is checked, so "will switch" is not said for a
+      // switch that is known to fail.
+      if (threadQueues.has(threadId)) {
+        const live = sessions.get(threadId);
+        const reason = live ? tooLarge(live.session) : undefined;
+        if (reason) return { applied: false, detail: reason };
+        void apply()
+          .catch((err) => ({ applied: false, detail: (err as Error).message }))
+          .then((r) => {
+            if (!r.applied) console.warn(`[pi-agent] deferred model switch for ${threadId} failed: ${r.detail}`);
+            try { onDeferred?.(r); } catch { /* the caller's reporting must not break the queue */ }
+          });
         return { applied: true, deferred: true };
       }
       return apply();
     },
 
     /** Read (no level) or set the thinking level of this thread's conversation. */
-    async thinkingLevel(threadId: string, level?: string): Promise<{ level: string; available: string[] } | null> {
-      return enqueue(threadId, async () => {
+    async thinkingLevel(threadId: string, level?: string): Promise<{ level: string; available: string[]; deferred?: boolean } | null> {
+      const act = async () => {
         const entry = await getOrCreate(threadId);
         const available = entry.session.getAvailableThinkingLevels().map(String);
-        if (level !== undefined) {
-          if (!available.includes(level)) return { level: String(entry.session.thinkingLevel), available };
+        if (level !== undefined && available.includes(level)) {
           entry.session.setThinkingLevel(level as Parameters<AgentSession["setThinkingLevel"]>[0]);
         }
         return { level: String(entry.session.thinkingLevel), available };
-      });
+      };
+      // A turn is running: answer from the live session instead of waiting
+      // for the turn to end, and apply a change when it has.
+      const live = sessions.get(threadId);
+      if (live && threadQueues.has(threadId)) {
+        const available = live.session.getAvailableThinkingLevels().map(String);
+        const current = String(live.session.thinkingLevel);
+        if (level === undefined || !available.includes(level) || level === current) return { level: current, available };
+        void enqueue(threadId, act).catch((err) => console.warn(`[pi-agent] deferred thinking level for ${threadId} failed:`, (err as Error).message));
+        return { level, available, deferred: true };
+      }
+      return enqueue(threadId, act);
     },
 
     async abort(threadId: string): Promise<void> {

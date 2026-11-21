@@ -153,16 +153,23 @@ export interface AgentAdapter {
 
   /**
    * Switch the conversation in this thread to another model ("provider/id").
-   * `applied: false` leaves it as it is and says why in `detail`. `deferred`
-   * means a turn is running and the switch happens when it ends.
+   * `applied: false` leaves it as it is and says why in `detail`; with
+   * `usable: false` the model cannot be used here at all (unknown, or no
+   * credentials). `deferred` means a turn is running and the switch happens
+   * when it ends.
    */
-  setModel?(threadId: string, model: string): Promise<{ applied: boolean; deferred?: boolean; detail?: string }>;
+  setModel?(
+    threadId: string,
+    model: string,
+    /** Called with the outcome of a deferred switch, once it has been tried. */
+    onDeferred?: (result: { applied: boolean; detail?: string }) => void,
+  ): Promise<{ applied: boolean; deferred?: boolean; usable?: boolean; detail?: string }>;
 
   /**
    * Read or set the thinking level of the conversation in this thread.
    * Returns the level now in effect and the levels its model supports.
    */
-  thinkingLevel?(threadId: string, level?: string): Promise<{ level: string; available: string[] } | null>;
+  thinkingLevel?(threadId: string, level?: string): Promise<{ level: string; available: string[]; deferred?: boolean } | null>;
 
   /** Return runtime info about the agent (model, version, etc.). */
   getInfo?(threadId?: string): AdapterInfo;

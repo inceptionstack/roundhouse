@@ -15,6 +15,20 @@ import type { AgentRouter, GatewayConfig } from "../src/types";
 
 // ── Fakes for everything Gateway.start() would otherwise open ─────────────
 
+// Everything this file reads or writes under "~/.roundhouse" gets a directory
+// of its own, so it cannot touch a real install or another test file's state
+// (the in-flight markers in particular are shared per directory).
+const sandbox = vi.hoisted(() => {
+  const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  return { dir: mkdtempSync(join(tmpdir(), "rh-test-")) };
+});
+vi.mock("../src/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config")>();
+  return { ...actual, ROUNDHOUSE_DIR: sandbox.dir, CONFIG_DIR: sandbox.dir };
+});
+
 type Handler = (...args: any[]) => Promise<void> | void;
 const wired: {
   dm?: Handler; mention?: Handler; subscribed?: Handler; slash?: Handler;

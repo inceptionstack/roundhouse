@@ -14,8 +14,8 @@
  *   button click      \u2192 RichResponse with confirmation text only
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import type { RichResponse } from "../transports";
 import { buildSelectableMenu } from "../transports";
@@ -113,25 +113,28 @@ export function aliasFromCallback(value: string, choices: { aliases: Record<stri
 /** Action ID for model selection callbacks */
 export const MODEL_ACTION_ID = "model_select";
 
-const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
+// pi's own settings file, wherever pi keeps it (PI_CODING_AGENT_DIR moves it).
+const settingsPath = () => join(getAgentDir(), "settings.json");
 
 export interface ModelCommandContext {
   text: string;
   /** Switches the conversation the command was sent in, when the agent supports it. */
-  applyToConversation?: (model: string) => Promise<{ applied: boolean; deferred?: boolean; detail?: string }>;
+  applyToConversation?: ApplyToConversation;
+  /** The model this conversation is on ("provider/id"), when it differs from the default. */
+  conversationModel?: string;
 }
 
 function readSettings(): Record<string, any> {
   try {
-    return JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+    return JSON.parse(readFileSync(settingsPath(), "utf8"));
   } catch {
     return {};
   }
 }
 
 function writeSettings(settings: Record<string, any>): void {
-  mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+  mkdirSync(getAgentDir(), { recursive: true });
+  writeFileSync(settingsPath(), JSON.stringify(settings, null, 2) + "\n");
 }
 
 function getCurrentModelLabel(settings: Record<string, any>): string {
@@ -181,16 +184,22 @@ export async function handleModel(ctx: ModelCommandContext): Promise<RichRespons
 
   const settings = readSettings();
 
-  // No argument: show menu (current model + clickable list).
+  // No argument: show menu (current model + clickable list). "Current" is
+  // the model of this conversation when it is known: that is what answers.
   if (!target) {
-    return buildModelMenu(getCurrentModelLabel(settings), settings);
+    const conv = ctx.conversationModel;
+    const slash = conv ? conv.indexOf("/") : -1;
+    const shown = conv && slash > 0
+      ? { ...settings, defaultProvider: conv.slice(0, slash), defaultModel: conv.slice(slash + 1) }
+      : settings;
+    return buildModelMenu(getCurrentModelLabel(shown), settings);
   }
 
   return applyModelSelection(target, settings, ctx.applyToConversation);
 }
 
 /** Switches the running conversation; supplied by the gateway when the agent can. */
-export type ApplyToConversation = (model: string) => Promise<{ applied: boolean; deferred?: boolean; detail?: string }>;
+export type ApplyToConversation = (model: string) => Promise<{ applied: boolean; deferred?: boolean; usable?: boolean; detail?: string }>;
 
 /**
  * Apply a model selection (used by both `/model <arg>` and the menu callback).
@@ -233,9 +242,10 @@ export async function applyModelSelection(
     } catch (err) {
       outcome = { applied: false, detail: (err as Error).message };
     }
-    // Refused for this conversation and unknown to pi: do not make it the default either.
-    if (!outcome.applied && /does not know the model/.test(outcome.detail ?? "")) {
-      return { text: `\u274c ${outcome.detail}` };
+    // Nobody can use it here (unknown to pi, or no credentials): making it
+    // the default would break every new conversation.
+    if (!outcome.applied && outcome.usable === false) {
+      return { text: `\u274c Not switched: ${outcome.detail}.` };
     }
   }
 

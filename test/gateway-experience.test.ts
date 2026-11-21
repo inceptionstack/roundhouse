@@ -22,7 +22,10 @@ const sandbox = vi.hoisted(() => {
   const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
-  return { dir: mkdtempSync(join(tmpdir(), "rh-experience-")) };
+  const dir = mkdtempSync(join(tmpdir(), "rh-experience-"));
+  // pi's settings too: /model writes the default model there.
+  process.env.PI_CODING_AGENT_DIR = join(dir, "pi-agent");
+  return { dir };
 });
 vi.mock("../src/config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/config")>();
@@ -30,7 +33,13 @@ vi.mock("../src/config", async (importOriginal) => {
 });
 
 type Handler = (...args: any[]) => Promise<void> | void;
-const wired: { dm?: Handler; rawDm?: Handler; slash?: Handler; rawSlash?: Handler; shutdown: () => Promise<void> } = { shutdown: async () => {} };
+const wired: {
+  dm?: Handler; rawDm?: Handler; slash?: Handler; rawSlash?: Handler;
+  actions: Map<string, Handler>;
+  /** Runs inside chat.initialize(): messages that were waiting at the platform arrive here. */
+  onInitialize?: () => Promise<void> | void;
+  shutdown: () => Promise<void>;
+} = { actions: new Map(), shutdown: async () => {} };
 
 let currentGateway: { whenIdle(): Promise<void> } | undefined;
 const threads = new Map<string, any>();
@@ -44,8 +53,8 @@ vi.mock("chat", async (importOriginal) => {
     onSubscribedMessage() {}
     onSlashCommand(h: Handler) { wired.rawSlash = h; wired.slash = async (...a: any[]) => { await h(...a); await currentGateway?.whenIdle(); }; }
     thread(id: string) { return threads.get(id); }
-    onAction() {}
-    async initialize() {}
+    onAction(id: string, h: Handler) { wired.actions.set(id, h); }
+    async initialize() { await wired.onInitialize?.(); }
     shutdown() { return wired.shutdown(); }
     getAdapter() { return undefined; }
   }
@@ -106,14 +115,17 @@ async function startGateway(info: Record<string, unknown> = {}, agentExtra: Reco
   transport.isPairingPending = async () => false;
   transport.registerCommands = async () => {};
   transport.notify = async () => {};
-  transport.postMessage = async () => {};
+  const posted: string[] = []; // what went out through the transport (markdown replies)
+  transport.postMessage = async (_t: unknown, text: string) => { posted.push(text); };
   await gw.start();
   currentGateway = gw;
-  return { gw, prompts, disposed };
+  return { gw, prompts, disposed, posted };
 }
 
 beforeEach(() => {
   wired.dm = undefined;
+  wired.onInitialize = undefined;
+  wired.actions.clear();
   wired.shutdown = async () => {};
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -334,7 +346,7 @@ describe("commands that act on the conversation", () => {
     await startGateway({}, { setModel });
     const t = thread();
     await wired.slash!(slash("/model", "provider-x/model-y"));
-    expect(setModel).toHaveBeenCalledWith("main", "provider-x/model-y");
+    expect(setModel.mock.calls[0].slice(0, 2)).toEqual(["main", "provider-x/model-y"]);
   });
 
   it("/think shows the level, sets one, and says so when the model lacks it", async () => {
@@ -343,12 +355,11 @@ describe("commands that act on the conversation", () => {
       if (wanted && ["off", "low", "high"].includes(wanted)) level = wanted;
       return { level, available: ["off", "low", "high"] };
     });
-    await startGateway({}, { thinkingLevel });
-    const t = thread();
+    const { posted: posts } = await startGateway({}, { thinkingLevel });
+    thread();
     await wired.slash!(slash("/think"));
     await wired.slash!(slash("/think", "low"));
     await wired.slash!(slash("/think", "ultra"));
-    const posts = t.post.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(posts[0]).toMatch(/Thinking: \*high\*/);
     expect(posts[1]).toMatch(/set to \*low\*/);
     expect(posts[2]).toMatch(/not a level this model has/);
@@ -381,7 +392,7 @@ describe("a restart in the middle of a turn", () => {
     await first.gw.whenIdle();
 
     const second = await startGateway({ standingContext: "system-prompt" });
-    const notices = t.post.mock.calls.map((c: unknown[]) => String(c[0])).filter((m) => m.includes("restarted while working"));
+    const notices = t.post.mock.calls.map((c: unknown[]) => String(c[0])).filter((m) => m.includes("restarted before I finished"));
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain("migrate the database and restart the service");
     expect(second.prompts).toEqual([]);          // not run again
@@ -398,5 +409,141 @@ describe("a restart in the middle of a turn", () => {
     t.post.mockClear();
     await startGateway({ standingContext: "system-prompt" });
     expect(t.post).not.toHaveBeenCalled();
+  });
+});
+
+describe("requests the previous gateway did not finish", () => {
+  const blockedAgent = () => {
+    const gates: Array<() => void> = [];
+    const started: string[] = [];
+    return {
+      gates, started,
+      extra: {
+        prompt: async (_t: string, m: { text: string }) => {
+          started.push(m.text.split("\n")[0]);
+          await new Promise<void>((r) => gates.push(r));
+          return { text: "" };
+        },
+      },
+    };
+  };
+  const notices = (t: { post: { mock: { calls: unknown[][] } } }) =>
+    t.post.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("restarted before I finished"));
+
+  it("a message that was waiting at Telegram and starts during start-up is not reported as interrupted", async () => {
+    const agent = blockedAgent();
+    const t = thread();
+    // The message is delivered as soon as polling starts, i.e. inside initialize().
+    wired.onInitialize = () => wired.rawDm!(t, message("deploy X"));
+    const { gw } = await startGateway({ standingContext: "system-prompt" }, agent.extra);
+    await vi.waitFor(() => expect(agent.started).toEqual(["deploy X"]));
+    expect(notices(t)).toEqual([]);
+
+    // And if this gateway now really is stopped mid-turn, the next one says so.
+    wired.onInitialize = undefined;
+    await gw.stop();
+    agent.gates.shift()!();
+    await gw.whenIdle();
+    await startGateway({ standingContext: "system-prompt" });
+    expect(notices(t)).toHaveLength(1);
+  });
+
+  it("a message that was accepted but still waiting its turn is reported too, in one notice", async () => {
+    const agent = blockedAgent();
+    const { gw } = await startGateway({ standingContext: "system-prompt" }, agent.extra);
+    const t = thread();
+    await wired.rawDm!(t, message("first request"));
+    await vi.waitFor(() => expect(agent.started).toEqual(["first request"]));
+    await wired.rawDm!(t, message("second request"));   // queued behind the first
+    await gw.stop();
+    agent.gates.shift()!();
+    await gw.whenIdle();
+    expect(agent.started).toEqual(["first request"]);     // the second never started
+
+    await startGateway({ standingContext: "system-prompt" });
+    const n = notices(t);
+    expect(n).toHaveLength(1);
+    expect(n[0]).toContain("first request");
+    expect(n[0]).toContain("second request");
+    expect(n[0].indexOf("first request")).toBeLessThan(n[0].indexOf("second request"));
+  });
+});
+
+describe("what waits its turn and what does not", () => {
+  it("a command the gateway does not know, and /new, keep their place in line", async () => {
+    const order: string[] = [];
+    const gates: Array<() => void> = [];
+    const restart = vi.fn(async () => { order.push("restart"); });
+    await startGateway({ standingContext: "system-prompt" }, {
+      prompt: async (_t: string, m: { text: string }) => {
+        order.push(m.text.split("\n")[0]);
+        await new Promise<void>((r) => gates.push(r));
+        return { text: "" };
+      },
+      restart,
+    });
+    const t = thread();
+    await wired.rawDm!(t, message("first"));
+    await vi.waitFor(() => expect(order).toEqual(["first"]));
+    await wired.rawDm!(t, message("second"));
+    await wired.rawSlash!(slash("/skill", "third"));  // a prompt for the agent, not a gateway command
+    await wired.rawSlash!(slash("/new"));              // must not move "second" into the new conversation
+
+    for (const expected of [["first", "second"], ["first", "second", "/skill third"]]) {
+      gates.shift()!();
+      await vi.waitFor(() => expect(order).toEqual(expected));
+    }
+    gates.shift()!();
+    await currentGateway!.whenIdle();
+    expect(order).toEqual(["first", "second", "/skill third", "restart"]);
+  });
+
+  it("/cancel stops the turn that is running, also before it has reached the model, and says when there is none", async () => {
+    const abort = vi.fn(async () => {});
+    const gates: Array<() => void> = [];
+    const { prompts } = await startGateway({ standingContext: "system-prompt" }, {
+      abort,
+      // prepareMessage runs before the prompt: a turn can be cancelled while it waits here.
+      prompt: async (_t: string, m: { text: string }) => { prompts.push(m.text); return { text: "" }; },
+    });
+    const t = thread();
+
+    await wired.slash!(slash("/cancel"));
+    expect(String(t.post.mock.calls.at(-1)![0])).toMatch(/Nothing is running/);
+
+    // Hold the turn in preparation by making the transport's prompt enrichment wait.
+    const transport = (currentGateway as any).transport;
+    const realProgress = transport.progress;
+    void realProgress;
+    const sttGate = new Promise<void>((r) => gates.push(r));
+    (currentGateway as any).enrichWithStt = async () => { await sttGate; };
+    await wired.rawDm!(t, message("slow to prepare"));
+    await vi.waitFor(() => expect((currentGateway as any).runningTurns.size).toBe(1));
+    await wired.rawSlash!(slash("/cancel"));
+    await vi.waitFor(() => expect(String(t.post.mock.calls.at(-1)![0])).toMatch(/^⏹️ Cancelled\.$/));
+    gates.shift()!();
+    await currentGateway!.whenIdle();
+    expect(prompts).toEqual([]);                       // never reached the model
+    expect(abort).toHaveBeenCalledWith("main");
+  });
+
+  it("a button press does not hold up the SDK while the agent is busy, and a failed deferred switch is reported", async () => {
+    let settle!: (r: { applied: boolean; detail?: string }) => void;
+    const setModel = vi.fn(async (_t: string, _m: string, onDeferred?: (r: { applied: boolean; detail?: string }) => void) => {
+      settle = onDeferred!;
+      return { applied: true, deferred: true };
+    });
+    const { posted } = await startGateway({ standingContext: "system-prompt" }, { setModel });
+    const t = thread();
+    const press = wired.actions.get("model_select")!;
+    let returned = false;
+    await Promise.resolve(press({ value: "opus", thread: t, threadId: t.id, user: { userId: String(OWNER), userName: "alice" }, raw: { from: { id: OWNER, username: "alice" } } }))
+      .then(() => { returned = true; });
+    expect(returned).toBe(true);
+    await currentGateway!.whenIdle();
+    expect(setModel).toHaveBeenCalledTimes(1);
+
+    settle({ applied: false, detail: "it no longer fits" });
+    await vi.waitFor(() => expect(posted.some((p) => /did not happen after all: it no longer fits/.test(p))).toBe(true));
   });
 });

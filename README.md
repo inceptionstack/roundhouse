@@ -367,9 +367,9 @@ Fast operations that complete within 2 seconds show no extra messages.
 
 ## While the agent is working
 
-Messages are received while a turn runs. A command (`/cancel`, `/status`, `/model`, …) is handled at once; an ordinary message waits its turn and runs after the current one, in the order sent.
+Messages are received while a turn runs. Commands about the turn in progress or the gateway (`/cancel`, `/status`, `/model`, `/think`, `/verbose`, `/doctor`, `/crons`, `/restart`, `/later`) are handled at once; `/model` and `/think` answer at once and take effect when the turn ends. Everything else waits its turn in the order sent: ordinary messages, `/new`, `/topic`, `/compact`, and commands meant for the agent.
 
-If the gateway is restarted or dies in the middle of a turn, the request is not run again. The next gateway tells you which request was cut off; say "continue" or send it again.
+If the gateway is restarted or dies before it has finished your requests, they are not run again. The next gateway lists the requests that were cut off or still waiting; say "continue" or send them again.
 
 ## Prompt cache and long pauses
 

@@ -30,6 +30,8 @@ export interface CommandContext {
   postWithFallback: (thread: any, text: string) => Promise<void>;
   /** Open a transport-rendered progress message (post + edit-in-place). */
   progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
+  /** What a typing loop should drive for this thread (see Gateway.typingTarget). */
+  typingTarget?: (thread: any) => { startTyping: (status?: string) => Promise<void>; stopTyping?: () => Promise<void> | void };
   stopGateway: () => Promise<void>;
 }
 
@@ -139,7 +141,7 @@ export async function handleCompact(ctx: CommandContext): Promise<void> {
   if (prevLock) await prevLock;
 
   const progress = await ctx.progress(thread, "📝 Saving memory and compacting...");
-  const stopTyping = startTypingLoop(thread);
+  const stopTyping = startTypingLoop(ctx.typingTarget ? ctx.typingTarget(thread) : thread);
   try {
     const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
     const memoryRoot = config.memory?.rootDir ?? agentCwd;
@@ -198,13 +200,15 @@ function cachedAvailableUpdate(): string {
   if ((!updateCheck || Date.now() - updateCheck.at > UPDATE_CHECK_TTL_MS) && !updateCheckRunning) {
     updateCheckRunning = true;
     void checkAvailableUpdate()
-      .then((latest) => { updateCheck = { at: Date.now(), latest }; })
+      // A lookup that failed (null) is tried again in ten minutes rather
+      // than remembered as "no update" for hours.
+      .then((latest) => { updateCheck = { at: latest === null ? Date.now() - UPDATE_CHECK_TTL_MS + 10 * 60_000 : Date.now(), latest: latest ?? updateCheck?.latest ?? "" }; })
       .finally(() => { updateCheckRunning = false; });
   }
   return updateCheck?.latest ?? "";
 }
 
-async function checkAvailableUpdate(): Promise<string> {
+async function checkAvailableUpdate(): Promise<string | null> {
   try {
     const { exec } = await import("node:child_process");
     const { promisify } = await import("node:util");
@@ -218,7 +222,9 @@ async function checkAvailableUpdate(): Promise<string> {
         return latest;
       }
     }
-  } catch { /* network unavailable */ }
+  } catch {
+    return null; // network unavailable
+  }
   return "";
 }
 
@@ -346,14 +352,22 @@ export interface CancelContext {
   agentThreadId: string;
   agent: AgentAdapter;
   abortControllers: Map<string, AbortController>;
+  /** Abort signal of the turn running in this chat, if the gateway knows of one. */
+  running?: AbortController;
 }
 
 export async function handleCancel(ctx: CancelContext): Promise<void> {
   const { thread, agentThreadId, agent, abortControllers } = ctx;
   if (agent.abort) {
+    const controller = ctx.running ?? abortControllers.get(agentThreadId);
+    // The gateway's signal first: it also stops a turn that has not reached
+    // the model yet. Then the agent, for whatever it is doing right now
+    // (a tool, a model call, a compaction).
+    controller?.abort();
     await agent.abort(agentThreadId);
-    abortControllers.get(agentThreadId)?.abort();
-    try { await thread.post("⏹️ Cancelled."); } catch {}
+    try {
+      await thread.post(controller ? "⏹️ Cancelled." : "⏹️ Nothing is running in this chat right now.");
+    } catch {}
   } else {
     try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
   }
@@ -510,29 +524,33 @@ export async function handleCrons(ctx: CronsContext): Promise<RichResponse | voi
 
 /** Show or set the thinking level of the conversation the command was sent in. */
 export async function handleThink(opts: {
-  thread: { post(content: string): Promise<unknown> };
+  thread: any;
   text: string;
   agentThreadId: string;
   agent: AgentAdapter;
+  /** Posts markdown through the transport; a bare thread.post would show the markup literally. */
+  postWithFallback: (thread: any, text: string) => Promise<void>;
 }): Promise<void> {
-  const { thread, text, agentThreadId, agent } = opts;
+  const { thread, text, agentThreadId, agent, postWithFallback: post } = opts;
   if (!agent.thinkingLevel) {
-    await thread.post("⚠️ This agent has no thinking level to set.");
+    await post(thread, "⚠️ This agent has no thinking level to set.");
     return;
   }
   const wanted = text.split(/\s+/).slice(1)[0]?.toLowerCase();
   const result = await agent.thinkingLevel(agentThreadId, wanted);
   if (!result) {
-    await thread.post("⚠️ No conversation to set it on yet. Send a message first.");
+    await post(thread, "⚠️ No conversation to set it on yet. Send a message first.");
     return;
   }
   const levels = result.available.join(", ");
   if (!wanted) {
-    await thread.post(`🧠 Thinking: *${result.level}*\nAvailable on this model: ${levels}\nUsage: \`/think ${result.available.find((l) => l !== result.level) ?? "high"}\``);
+    await post(thread, `🧠 Thinking: *${result.level}*\nAvailable on this model: ${levels}\nUsage: \`/think ${result.available.find((l) => l !== result.level) ?? "high"}\``);
   } else if (result.level === wanted) {
-    await thread.post(`✅ Thinking set to *${result.level}* for this conversation.`);
+    await post(thread, result.deferred
+      ? `✅ Thinking will be *${result.level}* from the next turn of this conversation.`
+      : `✅ Thinking set to *${result.level}* for this conversation.`);
   } else {
-    await thread.post(`⚠️ \`${wanted}\` is not a level this model has. Thinking stays at *${result.level}*. Available: ${levels}`);
+    await post(thread, `⚠️ \`${wanted}\` is not a level this model has. Thinking stays at *${result.level}*. Available: ${levels}`);
   }
   console.log(`[roundhouse] /think ${wanted ?? ""} for agentThread=${agentThreadId} -> ${result.level}`);
 }

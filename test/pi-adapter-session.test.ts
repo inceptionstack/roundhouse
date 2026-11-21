@@ -25,6 +25,7 @@ const sdk = {
     "small/tiny": { provider: "small", id: "tiny", contextWindow: 200_000 },
   } as Record<string, { provider: string; id: string; contextWindow: number }>,
   noAuth: new Set<string>(),
+  failSetModel: "" as string,
 };
 
 vi.mock("@earendil-works/pi-coding-agent", () => {
@@ -38,15 +39,18 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     subscribe() { return () => {}; }
     async prompt(text: string, options?: { images?: unknown[] }) {
       sdk.prompts.push({ text, images: options?.images?.length ?? 0, model: `${this.model.provider}/${this.model.id}` });
+      // pi writes the transcript as soon as the user message is appended,
+      // long before the turn ends.
+      writeFileSync(this.sessionFile, "{}\n");
       if (sdk.holdPrompt) await sdk.holdPrompt;
-      writeFileSync(this.sessionFile, "{}\n"); // pi persists the turn
     }
     async waitForIdle() {}
     async reload() {}
     async setModel(model: { provider: string; id: string }) {
-      if (sdk.noAuth.has(model.provider)) throw new Error(`No API key for ${model.provider}/${model.id}`);
+      if (sdk.failSetModel) throw new Error(sdk.failSetModel);
       sdk.setModelCalls.push(`${model.provider}/${model.id}`);
       this.agent.state.model = model as any;
+      this.agent.state.thinkingLevel = "medium"; // pi resets it to the default for the new model
     }
     getAvailableThinkingLevels() { return ["off", "low", "medium", "high"]; }
     setThinkingLevel(level: string) { this.agent.state.thinkingLevel = level; }
@@ -78,7 +82,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     ModelRuntime: {
       create: async () => ({
         getModel: (p: string, id: string) => sdk.models[`${p}/${id}`],
-        hasConfiguredAuth: () => true,
+        hasConfiguredAuth: (provider: string) => !sdk.noAuth.has(provider),
       }),
     },
   };
@@ -92,7 +96,7 @@ const make = () => { adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir 
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "rh-pi-session-"));
-  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.holdPrompt = undefined; sdk.noAuth.clear();
+  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -132,6 +136,25 @@ describe("/new", () => {
   });
 });
 
+describe("/new, then a restart in the middle of its first turn", () => {
+  it("resumes the conversation that was begun instead of starting another empty one", async () => {
+    make();
+    await adapter.prompt("main", { text: "one" });
+    await adapter.restart("main");
+
+    sdk.holdPrompt = new Promise<void>(() => {}); // the turn never finishes: the gateway dies
+    void adapter.prompt("main", { text: "do X" }).catch(() => {});
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(2));
+    expect(sdk.opened).toEqual(["continue:main", "create:main"]);
+    sdk.holdPrompt = undefined;
+
+    make(); // the next gateway; the owner says "continue"
+    await adapter.prompt("main", { text: "continue" });
+    expect(sdk.opened).toEqual(["continue:main", "create:main", "continue:main"]);
+    expect(existsSync(join(dir, "main", ".new-session"))).toBe(false);
+  });
+});
+
 describe("/model", () => {
   it("switches the conversation that is already going", async () => {
     make();
@@ -147,8 +170,10 @@ describe("/model", () => {
 
     expect(await adapter.setModel("main", "nope/none")).toMatchObject({ applied: false, detail: expect.stringMatching(/does not know/) });
 
+    // Unknown, or no credentials: unusable here at all, so not a default either.
+    expect((await adapter.setModel("main", "nope/none")).usable).toBe(false);
     sdk.noAuth.add("big");
-    expect(await adapter.setModel("main", "big/other")).toMatchObject({ applied: false, detail: expect.stringMatching(/No API key/) });
+    expect(await adapter.setModel("main", "big/other")).toMatchObject({ applied: false, usable: false, detail: expect.stringMatching(/no credentials for big/) });
     sdk.noAuth.clear();
 
     sdk.contextTokens = 450_000;
@@ -169,6 +194,50 @@ describe("/model", () => {
     release();
     await turn;
     await vi.waitFor(() => expect(sdk.setModelCalls).toEqual(["big/other"]));
+  });
+});
+
+describe("/model while a turn is running", () => {
+  const busy = async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    const turn = adapter.prompt("main", { text: "long turn" });
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1));
+    return { turn, release };
+  };
+
+  it("refuses at once what it already knows cannot work, instead of promising a switch", async () => {
+    const { turn, release } = await busy();
+    sdk.contextTokens = 450_000;
+    expect(await adapter.setModel("main", "small/tiny")).toMatchObject({ applied: false, detail: expect.stringMatching(/does not fit/) });
+    release(); await turn;
+    expect(sdk.setModelCalls).toEqual([]);
+  });
+
+  it("reports a deferred switch that failed when it was finally tried", async () => {
+    const { turn, release } = await busy();
+    sdk.failSetModel = "provider said no";
+    const outcomes: unknown[] = [];
+    expect(await adapter.setModel("main", "big/other", (r: unknown) => outcomes.push(r))).toEqual({ applied: true, deferred: true });
+    release(); await turn;
+    await vi.waitFor(() => expect(outcomes).toEqual([{ applied: false, detail: "provider said no" }]));
+  });
+
+  it("keeps the conversation's thinking level across the switch", async () => {
+    make();
+    await adapter.prompt("main", { text: "one" });
+    await adapter.thinkingLevel("main", "high");
+    await adapter.setModel("main", "big/other");
+    expect((await adapter.thinkingLevel("main")).level).toBe("high");
+  });
+
+  it("/think answers during a turn and applies the change after it", async () => {
+    const { turn, release } = await busy();
+    expect(await adapter.thinkingLevel("main")).toMatchObject({ level: "high" });
+    expect(await adapter.thinkingLevel("main", "low")).toMatchObject({ level: "low", deferred: true });
+    release(); await turn;
+    await vi.waitFor(async () => expect((await adapter.thinkingLevel("main")).level).toBe("low"));
   });
 });
 
@@ -205,7 +274,7 @@ describe("image attachments", () => {
     const sent = sdk.prompts.at(-1)!;
     expect(sent.images).toBe(1);
     expect(sent.text).toContain('"attachedAsImage": true');
-    expect(sent.text).toContain("already in this message as images");
+    expect(sent.text).toContain("were also sent with this message as images");
     // The text file is still described, and not as an image.
     expect(sent.text.match(/attachedAsImage/g)).toHaveLength(2); // one entry + the sentence
   });
