@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markdownToTelegramHtml, truncateHtmlSafe } from "../src/transports/telegram/format";
+import { markdownToTelegramHtml } from "../src/transports/telegram/format";
 import { telegramHtmlProblem, htmlToVisible } from "./telegram-test-helpers";
 
 describe("markdownToTelegramHtml", () => {
@@ -463,25 +463,30 @@ describe("markdownToTelegramHtml — fenced code", () => {
   });
 });
 
-describe("truncateHtmlSafe", () => {
-  it("returns short html unchanged", () => {
-    expect(truncateHtmlSafe("<b>hello</b>", 100)).toBe("<b>hello</b>");
+
+describe("markdownToTelegramHtml — found in review", () => {
+  it("reads lines that end in CR LF like any other", () => {
+    expect(markdownToTelegramHtml("# Title\r\n\r\ntext **b**\r\n---\r\n> q\r\n")).toBe(
+      "<b>Title</b>\n\ntext <b>b</b>\n───────────────\n<blockquote>q</blockquote>\n",
+    );
+    expect(markdownToTelegramHtml("```sh\r\nnpm test\r\n```\r\nafter")).toBe("<pre>npm test</pre>\nafter");
   });
 
-  it("truncates at last > before limit", () => {
-    const html = "<b>hello</b> <i>world</i> more text here that is very long";
-    const result = truncateHtmlSafe(html, 30);
-    expect(result.endsWith("...")).toBe(true);
-    expect(result.length).toBeLessThanOrEqual(30);
-    // Should not cut inside a tag
-    expect(result).not.toMatch(/<[^>]*$/);
+  it("makes text bold when the closing marker follows punctuation and a letter comes next", () => {
+    expect(markdownToTelegramHtml("**注意：**这是重点")).toBe("<b>注意：</b>这是重点");
+    expect(markdownToTelegramHtml("**Step 1:**Do it")).toBe("<b>Step 1:</b>Do it");
+    expect(markdownToTelegramHtml('He said**"no"**twice')).toBe('He said<b>"no"</b>twice');
   });
 
-  it("does not produce broken tags", () => {
-    const html = '<a href="https://example.com">click here</a> and some more text padding';
-    const result = truncateHtmlSafe(html, 40);
-    expect(result.endsWith("...")).toBe(true);
-    // The > in the opening tag should be a valid cut point
-    expect(result).not.toContain('href="https://example.com">click here</a> and some more text pa...');
+  it("still leaves arithmetic, globs and spaced markers alone", () => {
+    expect(markdownToTelegramHtml("2**10 and x**2 and a ** b")).toBe("2**10 and x**2 and a ** b");
+    expect(markdownToTelegramHtml("**bold **")).toBe("**bold **");
+    expect(markdownToTelegramHtml("match `src/**/*.ts` only")).toBe("match <code>src/**/*.ts</code> only");
+  });
+
+  it("keeps the cells of a row that has more of them than the header", () => {
+    const html = markdownToTelegramHtml("| Command | What |\n|---|---|\n| cat x | grep y | finds y |");
+    expect(html).toContain("│ cat x   │ grep y │ finds y │");
+    expect(html).toContain("│ Command │ What   │         │");
   });
 });

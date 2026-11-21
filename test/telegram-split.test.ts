@@ -16,6 +16,7 @@ import {
   splitMarkdownForTelegram,
   takeMarkdownChunk,
   type MarkdownChunk,
+  hasVisibleText,
 } from "../src/transports/telegram/format";
 import { htmlToVisible, outsidePre, telegramHtmlProblem } from "./telegram-test-helpers";
 import { CODE_MARK, PROSE_MARK, genDocument } from "./telegram-doc-generator";
@@ -350,5 +351,56 @@ describe("splitMarkdownForTelegram — generated documents", () => {
     expect(repeatedTable).toBeGreaterThan(20);
     expect(hardCut).toBeGreaterThan(100);
     expect(longest).toBeGreaterThan(30_000);
+  });
+});
+
+describe("splitMarkdownForTelegram — found in review", () => {
+  const shows = (md: string) => splitMarkdownForTelegram(md).map((c) => hasVisibleText(c.html));
+
+  it("never makes a message of a code fence alone when the block's first line is too long", () => {
+    const md = "Here is the file:\n\n```json\n" + '{"k":"' + "x".repeat(5000) + '"}' + "\n```\nDone.";
+    const chunks = splitMarkdownForTelegram(md);
+    expect(chunks.map((c) => hasVisibleText(c.html))).toEqual([true, true, true]);
+    expect(chunks.map((c) => md.slice(c.start, c.end)).join("")).toBe(md);
+    for (const c of chunks) expect(c.html.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+  });
+
+  it("never makes a message of blank lines alone before a line that is too long", () => {
+    expect(shows("\n" + "x".repeat(5000))).toEqual([true, true]);
+    expect(shows("intro\n\n\n" + "x".repeat(9000)).every(Boolean)).toBe(true);
+  });
+
+  it("still splits a table that is too wide to box in one message", () => {
+    const cells = (text: (i: number) => string) => "| " + Array.from({ length: 30 }, (_, i) => text(i)).join(" | ") + " |";
+    const md = [
+      cells((i) => `Column number ${i} with a long title`),
+      "|" + "---|".repeat(30),
+      ...[1, 2, 3].map((n) => cells((i) => `value ${n}-${i}`)),
+    ].join("\n");
+
+    const chunks = splitMarkdownForTelegram(md);
+
+    // A handful of messages, not one per character.
+    expect(chunks.length).toBeLessThanOrEqual(6);
+    expect(chunks.map((c) => md.slice(c.start, c.end)).join("")).toBe(md);
+    for (const c of chunks) {
+      expect(c.html.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+      expect(hasVisibleText(c.html)).toBe(true);
+    }
+  });
+
+  it("knows a cut before a half-written row is inside the table", () => {
+    const prose = Array.from({ length: 60 }, (_, i) => `Line ${i} of prose with some words to fill the line up nicely.`).join("\n");
+    const head = "| Name | Value |\n|------|-------|\n";
+    const rows = "| item 0 | 0 |\n| item 1 | 7 |\n";
+    // The text so far ends in the middle of a row, as it does while streaming,
+    // and that row is what no longer fits.
+    const halfRow = "| item 2 | " + "y".repeat(400);
+    const body = `${prose}\n\n${head}${rows}${halfRow}`;
+
+    const taken = takeMarkdownChunk("", body);
+
+    expect(body.slice(taken.length)).toBe(halfRow);
+    expect(taken.nextPrefix).toBe(head);
   });
 });

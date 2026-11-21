@@ -63,28 +63,6 @@ function matchLink(str: string, startIdx: number): { full: string; text: string;
   return { full: str.slice(startIdx, i + 1), text, url, end: i + 1 };
 }
 
-/**
- * Truncate HTML safely — avoids cutting inside tags.
- * Finds the last '>' before the limit, or falls back to the limit itself.
- *
- * Message delivery does not use this: it drops text. Long answers are split
- * with `splitMarkdownForTelegram` instead.
- */
-export function truncateHtmlSafe(html: string, limit: number): string {
-  if (html.length <= limit) return html;
-  if (limit <= 3) return "...";
-  const cutoff = limit - 3; // room for "..."
-  // Find the last '>' at or before cutoff to avoid splitting a tag
-  let safeEnd = cutoff;
-  for (let i = cutoff - 1; i >= Math.max(0, cutoff - 200); i--) {
-    if (html[i] === ">") {
-      safeEnd = i + 1;
-      break;
-    }
-  }
-  return html.slice(0, safeEnd) + "...";
-}
-
 // ── Inline formatting ─────────────────────────────────
 
 /** A run of `*`, `_` or `~~` that may open or close emphasis */
@@ -179,8 +157,12 @@ function delimiterAt(src: string, i: number, n: number, ch: "*" | "_" | "~"): De
     } else {
       // `2*3*4` and `2**10` are arithmetic, not emphasis.
       const arithmetic = ASCII_DIGIT.test(prev) && ASCII_DIGIT.test(next);
-      canOpen = leftFlanking && !arithmetic;
-      canClose = rightFlanking && !arithmetic;
+      // Bold needs only a non-space character on its inside edge. CommonMark's
+      // punctuation rule would leave `**Note:**text` and `**注意：**这是重点`
+      // literal, and models write both (text without spaces has no other way).
+      const bold = n >= 2;
+      canOpen = (bold ? !nextSpace : leftFlanking) && !arithmetic;
+      canClose = (bold ? !prevSpace : rightFlanking) && !arithmetic;
     }
   }
   return canOpen || canClose ? { type: "delim", ch, count: n, length: n, canOpen, canClose } : null;
@@ -447,7 +429,9 @@ function formatTable(lines: string[]): string {
   const headerCells = splitTableRow(lines[0]);
   // lines[1] is the separator row (|---|---|) — skip it
   const dataRows = lines.slice(2).map(splitTableRow);
-  const colCount = headerCells.length;
+  // As many columns as the widest row: a row with more cells than the header
+  // keeps them.
+  const colCount = Math.max(headerCells.length, ...dataRows.map((row) => row.length));
 
   // Display width of a single Unicode code point in a monospace font.
   // Emoji and CJK characters typically occupy 2 columns.
@@ -628,16 +612,27 @@ function isFenceClose(line: string, fence: Fence): boolean {
  * indentation, followed by an optional info string) and closes on a line of
  * at least as many backticks and nothing else. One that is never closed runs
  * to the end of the text.
+ *
+ * `openLastRow` is for text that is still being written: a last line that
+ * starts with `|` inside a table is then a row that has not got its closing
+ * `|` yet. The splitter uses it to know that a cut before that line is inside
+ * the table. The converter does not: it renders such a line as text.
  */
-function scanLines(md: string): Line[] {
+function scanLines(md: string, openLastRow = false): Line[] {
   const lines: Line[] = [];
   for (let start = 0; ; ) {
     const newline = md.indexOf("\n", start);
     const end = newline === -1 ? md.length : newline;
-    lines.push({ start, end, text: md.slice(start, end), kind: "text" });
+    // A line ending of CR LF: the CR is not part of the line's text.
+    const textEnd = end > start && md.charCodeAt(end - 1) === 13 ? end - 1 : end;
+    lines.push({ start, end, text: md.slice(start, textEnd), kind: "text" });
     if (newline === -1) break;
     start = newline + 1;
   }
+
+  /** A row that continues the open table */
+  const isRow = (i: number): boolean =>
+    TABLE_ROW.test(lines[i].text) || (openLastRow && i === lines.length - 1 && lines[i].text.startsWith("|"));
 
   let fence: Fence | null = null;
   let table: TableHead | null = null;
@@ -656,7 +651,7 @@ function scanLines(md: string): Line[] {
       table = null;
       continue;
     }
-    if (table && TABLE_ROW.test(line.text)) {
+    if (table && isRow(i)) {
       line.kind = "table-row";
       line.table = table;
       continue;
@@ -721,6 +716,14 @@ export function markdownToTelegramHtml(md: string): string {
 
   // Merge adjacent blockquotes
   return out.join("\n").replace(/<\/blockquote>\n<blockquote>/g, "\n");
+}
+
+/**
+ * True if Telegram HTML has something to show. Telegram refuses a message
+ * that has none, such as an empty code block.
+ */
+export function hasVisibleText(html: string): boolean {
+  return html.replace(/<[^>]*>/g, "").trim() !== "";
 }
 
 // ── Splitting ─────────────────────────────────────────
@@ -850,7 +853,8 @@ export function takeMarkdownChunk(prefix: string, body: string, limit = TELEGRAM
   }
   const doc = prefix + body.slice(0, reach);
   const base = prefix.length;
-  const lines = scanLines(doc);
+  // The end of the body may be the middle of a row (a stream).
+  const lines = scanLines(doc, reach === body.length);
 
   /** The chunk that ends at `end`, or null if it does not fit (unless forced) */
   const chunkTo = (end: number, force = false): TakenChunk | null => {
@@ -890,15 +894,20 @@ export function takeMarkdownChunk(prefix: string, body: string, limit = TELEGRAM
     for (let index = best; index > first && index > best - 4; index--) {
       if (isAwkwardCut(lines, index, base)) continue;
       const chunk = index === best ? bestChunk : chunkTo(lines[index].start);
-      if (chunk) return chunk;
+      if (chunk && hasVisibleText(chunk.html)) return chunk;
     }
-    return bestChunk;
+    // Every cut near the end is awkward. Take the last one, unless the chunk
+    // would show nothing: blank lines, or a fence line and its closing fence
+    // when the first line of a code block is too long. Telegram refuses such
+    // a message, so cut inside the line after it instead.
+    if (hasVisibleText(bestChunk.html)) return bestChunk;
   }
 
-  // The first line alone is too long: cut inside it.
-  const line = lines[first];
+  // One line alone is too long: cut inside it.
+  const line = lines[bestChunk ? best : first];
+  const floor = Math.max(line.start, base);
   let cut = -1;
-  lo = base + 1;
+  lo = floor + 1;
   hi = Math.min(line.end, base + limit);
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
@@ -910,10 +919,11 @@ export function takeMarkdownChunk(prefix: string, body: string, limit = TELEGRAM
     }
   }
   if (cut === -1) {
+    if (bestChunk) return bestChunk;
     // Not even one character fits beside the prefix. Move forward anyway.
-    cut = base + 1;
+    cut = floor + 1;
   } else if (cut < line.end) {
-    for (let at = cut; at > base + ((cut - base) >> 1); at--) {
+    for (let at = cut; at > floor + ((cut - floor) >> 1); at--) {
       if (doc[at - 1] === " " || doc[at - 1] === "\t") {
         cut = at;
         break;
@@ -934,10 +944,10 @@ export function takeMarkdownChunk(prefix: string, body: string, limit = TELEGRAM
   };
   const unsafe = (at: number) => isSurrogatePairAt(doc, at) || changesMeaning(at);
   const preferred = cut;
-  for (let n = 0; n < MAX_CUT_BACKOFF && cut > base + 1 && unsafe(cut); n++) cut--;
+  for (let n = 0; n < MAX_CUT_BACKOFF && cut > floor + 1 && unsafe(cut); n++) cut--;
   if (unsafe(cut)) {
     cut = preferred;
-    if (isSurrogatePairAt(doc, cut)) cut += cut > base + 1 ? -1 : 1;
+    if (isSurrogatePairAt(doc, cut)) cut += cut > floor + 1 ? -1 : 1;
   }
 
   return chunkTo(cut, true)!;
@@ -992,7 +1002,7 @@ export function splitMarkdownForTelegram(
  */
 export function resumeMarkdownAt(prefix: string, body: string, offset: number): { offset: number; prefix: string } {
   const doc = prefix + body;
-  const lines = scanLines(doc);
+  const lines = scanLines(doc, true);
   const at = prefix.length + offset;
   const line = lines[lineIndexAt(lines, at)];
   const afterLine = Math.min(line.end + 1, doc.length) - prefix.length;

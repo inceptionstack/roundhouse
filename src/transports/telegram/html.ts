@@ -10,11 +10,14 @@
  * Two rules hold for everything sent from here:
  *   - Nothing is truncated. A text too long for one message is split in its
  *     markdown source, so that each piece renders within Telegram's limit.
- *   - A rate limit (HTTP 429) is waited out, not ignored.
+ *   - A rate limit (HTTP 429) is waited out, not ignored, for up to
+ *     `MAX_RATE_LIMIT_WAIT_MS` per answer. Telegram is never called inside a
+ *     wait it asked for.
  */
 
 import {
   TELEGRAM_MESSAGE_LIMIT,
+  hasVisibleText,
   markdownToTelegramHtml,
   resumeMarkdownAt,
   splitMarkdownForTelegram,
@@ -35,8 +38,12 @@ export const STREAM_EDIT_INTERVAL_MS = 1100;
  */
 export const STREAM_EDIT_INTERVAL_GROUP_MS = 3100;
 
-/** Longest time spent waiting out rate limits for one call that must get through (ms) */
-export const MAX_RATE_LIMIT_WAIT_MS = 30_000;
+/**
+ * Longest time one answer (one post, or one stream) spends waiting out rate
+ * limits (ms). A wait that does not fit in what is left is not started: the
+ * text is reported as not delivered instead.
+ */
+export const MAX_RATE_LIMIT_WAIT_MS = 90_000;
 
 /** Tries for one call that must get through */
 const MAX_DELIVERY_ATTEMPTS = 4;
@@ -103,67 +110,113 @@ function isNotModified(err: unknown): boolean {
   return /message is not modified/i.test(String((err as Error | undefined)?.message ?? ""));
 }
 
-/** Remembers when Telegram will accept calls again, and waits for it */
+/** A new message, or an edit of a message already sent */
+type CallKind = "send" | "edit";
+
+/**
+ * Per adapter and chat: the time before which Telegram refuses new messages.
+ * Kept across answers, so the next answer to the same chat knows about a wait
+ * that is still running.
+ */
+const sendBlocks = new WeakMap<object, Map<string, number>>();
+
+/**
+ * Remembers when Telegram will accept calls again, and waits for it.
+ *
+ * Two waits are kept apart. A refused `sendMessage` blocks the chat: nothing
+ * goes out until it is over. A refused `editMessageText` blocks edits only:
+ * Telegram limits edits of one message more tightly than new messages, so a
+ * new message is still tried, and is refused with its own wait if the limit
+ * turns out to cover it.
+ */
 class RateLimiter {
   readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
-  /** Time before which Telegram asked for no more calls */
-  private blockedUntil = 0;
+  private readonly sends: Map<string, number>;
+  /** Time before which Telegram asked for no more edits (this answer only) */
+  private editBlockedUntil = 0;
+  /** What is left of `MAX_RATE_LIMIT_WAIT_MS` for this answer */
+  private budget = MAX_RATE_LIMIT_WAIT_MS;
 
-  constructor(options: TelegramDeliveryOptions) {
+  constructor(options: TelegramDeliveryOptions, adapter: object, private readonly chatId: string) {
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    let sends = sendBlocks.get(adapter);
+    if (!sends) sendBlocks.set(adapter, (sends = new Map()));
+    this.sends = sends;
+  }
+
+  /** The time from which Telegram accepts a call of this kind again */
+  until(kind: CallKind): number {
+    const send = this.sends.get(this.chatId) ?? 0;
+    return kind === "send" ? send : Math.max(send, this.editBlockedUntil);
+  }
+
+  blocked(kind: CallKind): boolean {
+    return this.now() < this.until(kind);
   }
 
   /** Record a rate limit. Returns false if `err` is some other error. */
-  note(err: unknown): boolean {
+  note(kind: CallKind, err: unknown): boolean {
     const delay = rateLimitDelayMs(err);
     if (delay === null) return false;
-    this.blockedUntil = Math.max(this.blockedUntil, this.now() + delay);
+    const until = this.now() + delay;
+    if (kind === "send") this.sends.set(this.chatId, Math.max(this.until("send"), until));
+    else this.editBlockedUntil = Math.max(this.editBlockedUntil, until);
     return true;
   }
 
-  blocked(): boolean {
-    return this.now() < this.blockedUntil;
+  private accepted(kind: CallKind): void {
+    if (kind === "send") this.sends.delete(this.chatId);
+    else this.editBlockedUntil = 0;
+  }
+
+  /** Wait until `time`. Pacing, not a rate limit: it does not use the budget. */
+  async pace(time: number): Promise<void> {
+    const wait = time - this.now();
+    if (wait > 0) await this.sleep(wait);
   }
 
   /**
-   * Make a call that must get through, waiting for at most
-   * `MAX_RATE_LIMIT_WAIT_MS` in total.
+   * Make a call that must get through. Waits until Telegram accepts calls of
+   * this kind, and after a rate limit waits as long as Telegram said and tries
+   * again. Telegram is never called inside a wait: such a call is refused
+   * again and can lengthen the wait.
    *
-   * Blocked by an earlier call: wait for it, up to the budget, then try. This
-   * call can be accepted where that one was not (Telegram refuses edits of one
-   * message for minutes and still takes a new message).
-   *
-   * Refused itself: wait as long as Telegram said and try again. If that is
-   * longer than the budget left, throw without another try: the same call
-   * inside its own wait is refused again and can lengthen the wait.
-   *
-   * Any error that is not a rate limit is thrown at once.
+   * Throws a rate limit error, without calling, when the wait is longer than
+   * what is left of this answer's budget. Any other error is thrown at once.
    */
-  async deliver<T>(call: () => Promise<T>): Promise<T> {
-    let budget = MAX_RATE_LIMIT_WAIT_MS;
-    const pause = async (ms: number) => {
-      if (ms <= 0) return;
-      await this.sleep(ms);
-      budget -= ms;
-    };
-    await pause(Math.min(this.blockedUntil - this.now(), budget));
+  async deliver<T>(kind: CallKind, call: () => Promise<T>): Promise<T> {
     for (let attempt = 1; ; attempt++) {
+      const wait = this.until(kind) - this.now();
+      if (wait > this.budget) throw stillRateLimited(wait);
+      if (wait > 0) {
+        await this.sleep(wait);
+        this.budget -= wait;
+      }
       try {
         const result = await call();
-        this.blockedUntil = 0;
+        this.accepted(kind);
         return result;
       } catch (err) {
-        const delay = rateLimitDelayMs(err);
-        if (delay === null) throw err;
-        this.note(err);
-        if (delay > budget || attempt >= MAX_DELIVERY_ATTEMPTS) throw err;
-        await pause(delay);
+        if (!this.note(kind, err) || attempt >= MAX_DELIVERY_ATTEMPTS) throw err;
       }
     }
   }
 }
+
+/** The error for a call that was not made because Telegram's wait is longer than the budget */
+function stillRateLimited(waitMs: number): Error {
+  const seconds = Math.ceil(waitMs / 1000);
+  return Object.assign(new Error(`Telegram asked for a wait of ${seconds} s`), { retryAfter: seconds });
+}
+
+/** Two texts Telegram shows the same way: it drops whitespace at the end of a message */
+function sameText(a: string, b: string): boolean {
+  return a === b || a.trimEnd() === b.trimEnd();
+}
+
+type SendOutcome = "sent" | "rate-limited" | "refused";
 
 /**
  * Send one HTML message, falling back to plain text on parse error.
@@ -176,31 +229,32 @@ async function sendHtmlOrPlain(
   messageThreadId: number | undefined,
   html: string,
   plainFallback: string,
-): Promise<void> {
+): Promise<SendOutcome> {
   const send = (text: string, parseMode?: "HTML") =>
-    limiter.deliver(() =>
+    limiter.deliver("send", () =>
       adapter.telegramFetch("sendMessage", {
         ...basePayload(chatId, messageThreadId),
         text,
         ...(parseMode && { parse_mode: parseMode }),
       }),
     );
-  const giveUp = (err: unknown) =>
+  try {
+    await send(html, "HTML");
+    return "sent";
+  } catch (err) {
+    // Plain text would be refused as well.
+    if (rateLimitDelayMs(err) !== null) return "rate-limited";
+  }
+  try {
+    await send(plainFallback);
+    return "sent";
+  } catch (err) {
+    if (rateLimitDelayMs(err) !== null) return "rate-limited";
     console.error(
       `[roundhouse] Telegram sendMessage failed, ${plainFallback.length} characters not delivered:`,
       (err as Error).message,
     );
-  try {
-    await send(html, "HTML");
-    return;
-  } catch (err) {
-    // Still rate limited after waiting: plain text would be refused as well.
-    if (rateLimitDelayMs(err) !== null) return giveUp(err);
-  }
-  try {
-    await send(plainFallback);
-  } catch (err) {
-    giveUp(err);
+    return "refused";
   }
 }
 
@@ -215,11 +269,16 @@ export async function postTelegramHtml(
   options: TelegramDeliveryOptions = {},
 ): Promise<void> {
   const { chatId, messageThreadId } = parseTelegramThreadId(thread.id);
-  const limiter = new RateLimiter(options);
+  const limiter = new RateLimiter(options, thread.adapter, chatId);
   await postChunks(limiter, thread.adapter, chatId, messageThreadId, markdown, "");
 }
 
-/** Post `markdown` as one message per chunk. `prefix` is as in `takeMarkdownChunk`. */
+/**
+ * Post `markdown` as one message per chunk. `prefix` is as in `takeMarkdownChunk`.
+ *
+ * Stops at the first chunk a rate limit keeps back: the chunks after it would
+ * arrive without it. What was not sent is logged once.
+ */
 async function postChunks(
   limiter: RateLimiter,
   adapter: any,
@@ -228,11 +287,26 @@ async function postChunks(
   markdown: string,
   prefix: string,
 ): Promise<void> {
-  for (const chunk of splitMarkdownForTelegram(markdown, TELEGRAM_MESSAGE_LIMIT, prefix)) {
+  const chunks = splitMarkdownForTelegram(markdown, TELEGRAM_MESSAGE_LIMIT, prefix);
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     // Telegram refuses a message with nothing to show.
-    if (!markdown.slice(chunk.start, chunk.end).trim()) continue;
-    await sendHtmlOrPlain(limiter, adapter, chatId, messageThreadId, chunk.html, chunk.text);
+    if (!hasVisibleText(chunk.html)) continue;
+    const outcome = await sendHtmlOrPlain(limiter, adapter, chatId, messageThreadId, chunk.html, chunk.text);
+    if (outcome === "rate-limited") {
+      reportHeldBack(limiter, markdown.length - chunk.start);
+      return;
+    }
   }
+}
+
+/** Log text that a rate limit kept from being sent */
+function reportHeldBack(limiter: RateLimiter, characters: number): void {
+  const wait = Math.max(0, Math.ceil((limiter.until("send") - limiter.now()) / 1000));
+  console.error(
+    `[roundhouse] Telegram rate limit: ${characters} characters not delivered. ` +
+      `Telegram asked for a wait of ${wait} s, more than is left of the ${MAX_RATE_LIMIT_WAIT_MS / 1000} s an answer waits.`,
+  );
 }
 
 /**
@@ -246,9 +320,14 @@ async function postChunks(
  * whole text and each starts on a new line.
  *
  * An update in the middle of the stream may be skipped or refused; the next
- * one makes up for it. The last update of a bubble may not: after a rate
- * limit it is tried again once Telegram allows, and if the bubble still
- * cannot be edited, the text it does not show is posted as a new message.
+ * one makes up for it, and when the stream goes quiet (a tool is running) a
+ * timer does, so text does not sit unsent until the next piece arrives. The
+ * last update of a bubble may not be skipped: after a rate limit it is tried
+ * again once Telegram allows, and if the bubble still cannot be edited, the
+ * text it does not show is posted as a new message.
+ *
+ * If the stream itself fails, what has arrived is still delivered, and the
+ * error is thrown afterwards.
  */
 export async function handleTelegramHtmlStream(
   thread: any,
@@ -256,7 +335,7 @@ export async function handleTelegramHtmlStream(
   options: TelegramDeliveryOptions = {},
 ): Promise<void> {
   const { chatId, messageThreadId } = parseTelegramThreadId(thread.id);
-  const limiter = new RateLimiter(options);
+  const limiter = new RateLimiter(options, thread.adapter, chatId);
   const base = basePayload(chatId, messageThreadId);
   // Groups and channels have negative chat ids.
   const editInterval = chatId.startsWith("-") ? STREAM_EDIT_INTERVAL_GROUP_MS : STREAM_EDIT_INTERVAL_MS;
@@ -274,6 +353,10 @@ export async function handleTelegramHtmlStream(
   let shownEnd = 0;
   /** When Telegram was last called for the open bubble, whether or not it worked */
   let lastAttemptAt = Number.NEGATIVE_INFINITY;
+  /** The open bubble as last rendered */
+  let latest = "";
+  /** A text Telegram refused for the open bubble for another reason than a rate limit */
+  let refused: string | null = null;
 
   /** The source of the open bubble */
   const body = () => accumulated.slice(committed);
@@ -303,21 +386,34 @@ export async function handleTelegramHtmlStream(
     return html.length > TELEGRAM_MESSAGE_LIMIT ? null : html;
   };
 
+  /** The call that would update the open bubble now */
+  const updateKind = (): CallKind => (messageId === null ? "send" : "edit");
+
+  /** True if the open bubble has text that is not on screen and is worth trying */
+  const updatePending = (): boolean =>
+    hasVisibleText(latest) && latest !== refused && (messageId === null || !sameText(latest, shown));
+
+  /** The earliest time an update of the open bubble may be tried */
+  const updateDueAt = (): number => Math.max(lastAttemptAt + editInterval, limiter.until(updateKind()));
+
   /** Show the open bubble's current text, if it is time for an update */
   const updateBubble = async (html: string): Promise<void> => {
-    if (!body().trim() || !html.trim()) return;
-    if (messageId !== null && html === shown) return;
-    if (limiter.blocked() || limiter.now() - lastAttemptAt < editInterval) return;
+    latest = html;
+    if (!updatePending() || limiter.now() < updateDueAt()) return;
+    const kind = updateKind();
     try {
       if (messageId === null) messageId = await send(html, true);
       else await edit(html, true);
       shown = html;
       shownEnd = accumulated.length;
+      refused = null;
     } catch (err) {
       // After a rate limit the next update waits for Telegram. A refused edit
       // is left to the next update too: the HTML of a half-written answer can
       // be invalid, and Telegram refuses an edit that changes nothing.
-      if (!limiter.note(err) && messageId === null) {
+      if (limiter.note(kind, err)) return;
+      refused = html;
+      if (messageId === null) {
         // Telegram refused the HTML: open the bubble with the markdown source.
         const plain = prefix + body();
         try {
@@ -325,7 +421,7 @@ export async function handleTelegramHtmlStream(
           shown = plain;
           shownEnd = accumulated.length;
         } catch (plainErr) {
-          if (!limiter.note(plainErr)) {
+          if (!limiter.note("send", plainErr)) {
             console.error(`[roundhouse] Telegram stream initial send failed:`, (plainErr as Error).message);
           }
         }
@@ -337,8 +433,10 @@ export async function handleTelegramHtmlStream(
 
   /** Make the open bubble show `html`. Returns false if Telegram would not take it. */
   const finalEdit = async (html: string, plain: string): Promise<boolean> => {
+    // Not sooner after the last update than any other edit.
+    await limiter.pace(lastAttemptAt + editInterval);
     try {
-      await limiter.deliver(() => edit(html, true));
+      await limiter.deliver("edit", () => edit(html, true));
       return true;
     } catch (err) {
       if (isNotModified(err)) return true;
@@ -346,7 +444,7 @@ export async function handleTelegramHtmlStream(
     }
     // Telegram refused the HTML: show the markdown source instead.
     try {
-      await limiter.deliver(() => edit(plain, false));
+      await limiter.deliver("edit", () => edit(plain, false));
       return true;
     } catch (err) {
       return isNotModified(err);
@@ -363,11 +461,12 @@ export async function handleTelegramHtmlStream(
     const source = accumulated.slice(committed, end);
     if (messageId === null) {
       // Nothing of this bubble is on screen yet: post it whole.
-      if (source.trim()) {
-        await sendHtmlOrPlain(limiter, thread.adapter, chatId, messageThreadId, chunk.html, chunk.text);
+      if (hasVisibleText(chunk.html)) {
+        const outcome = await sendHtmlOrPlain(limiter, thread.adapter, chatId, messageThreadId, chunk.html, chunk.text);
+        if (outcome === "rate-limited") reportHeldBack(limiter, source.length);
         lastAttemptAt = limiter.now();
       }
-    } else if (chunk.html !== shown) {
+    } else if (!sameText(chunk.html, shown)) {
       if (!(await finalEdit(chunk.html, chunk.text))) {
         // The bubble is stuck showing the text up to `shownEnd`.
         const shownLength = shownEnd - committed;
@@ -393,16 +492,52 @@ export async function handleTelegramHtmlStream(
     messageId = null;
     shown = "";
     shownEnd = end;
+    latest = "";
+    refused = null;
   };
 
-  for await (const piece of stream) {
-    accumulated += piece;
-    let html = renderOpen();
-    while (html === null) {
-      await closeBubble(takeMarkdownChunk(prefix, body()));
-      html = renderOpen();
+  // The pieces are read by hand so that a timer can run beside the wait for
+  // the next one.
+  const pieces = stream[Symbol.asyncIterator]();
+  const TICK = Symbol("tick");
+  let failed = false;
+  let failure: unknown;
+  try {
+    /** The request for the next piece, while it is outstanding */
+    let next: Promise<IteratorResult<string>> | null = null;
+    for (;;) {
+      // Ask for a piece only when the last one has been dealt with, as a
+      // `for await` would.
+      next ??= pieces.next();
+      let result: IteratorResult<string> | typeof TICK;
+      if (updatePending()) {
+        // Text is waiting for its turn: wake up when it comes, piece or no piece.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const tick = new Promise<typeof TICK>((resolve) => {
+          timer = setTimeout(() => resolve(TICK), Math.max(0, updateDueAt() - limiter.now()));
+        });
+        result = await Promise.race([next, tick]);
+        clearTimeout(timer);
+      } else {
+        result = await next;
+      }
+      if (result === TICK) {
+        await updateBubble(latest);
+        continue;
+      }
+      next = null;
+      if (result.done) break;
+      accumulated += result.value;
+      let html = renderOpen();
+      while (html === null) {
+        await closeBubble(takeMarkdownChunk(prefix, body()));
+        html = renderOpen();
+      }
+      await updateBubble(html);
     }
-    await updateBubble(html);
+  } catch (err) {
+    failed = true;
+    failure = err;
   }
 
   // Final: whatever the open bubble holds. It fits one message, unless
@@ -410,4 +545,5 @@ export async function handleTelegramHtmlStream(
   while (body().trim()) {
     await closeBubble(takeMarkdownChunk(prefix, body()));
   }
+  if (failed) throw failure;
 }

@@ -217,7 +217,7 @@ describe("a Telegram rate limit (HTTP 429) during streaming", () => {
     }
   });
 
-  it("waits at most 30 seconds for the final edit, then posts the rest as a new message", async () => {
+  it("posts the rest as a new message when edits are refused for longer than an answer waits", async () => {
     const clock = fakeClock();
     // Edits are rejected for good; new messages are accepted.
     const t = fakeTelegram({
@@ -228,8 +228,10 @@ describe("a Telegram rate limit (HTTP 429) during streaming", () => {
 
     await handleTelegramHtmlStream(t, inPieces(text, 6, () => clock.advance(100)), clock);
 
-    expect(clock.sleeps.length).toBeGreaterThan(0);
-    expect(Math.max(...clock.sleeps)).toBeLessThanOrEqual(30_000);
+    // One refused edit says how long. No edit is tried inside those ten
+    // minutes, and nothing waits for them.
+    expect(t.calls.filter((c) => c.method === "editMessageText")).toHaveLength(1);
+    expect(clock.sleeps.reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(1100);
     // The first bubble kept what it had; the rest arrived in a second message.
     const bubbles = t.visible();
     expect(bubbles.length).toBe(2);
@@ -289,27 +291,96 @@ describe("a Telegram rate limit (HTTP 429) during streaming", () => {
     expect(t.messages().map((m) => m.text)).toEqual(["<b>hello</b> world"]);
   });
 
-  it("does not call Telegram again before a wait longer than its patience has run out", async () => {
+  it("does not call Telegram inside a wait that is longer than an answer waits", async () => {
     const clock = fakeClock();
     const t = fakeTelegram({
       now: clock.now,
-      fail: (_call, index) => (index === 0 ? rateLimitError(60) : null),
+      fail: (_call, index) => (index === 0 ? rateLimitError(600) : null),
     });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await postTelegramHtml(t, "**hello** world", clock);
 
-    // One call, refused for 60 s. A second call inside that minute would be
+    // One call, refused for ten minutes. A second call inside them would be
     // refused as well and can lengthen the wait, so none is made.
     expect(t.calls).toHaveLength(1);
     expect(clock.sleeps).toEqual([]);
-    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/not delivered/);
-    errors.mockRestore();
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/15 characters not delivered/);
 
-    // Once the minute is over the next message goes out, without a wait.
+    // The next answer to the same chat knows about the wait.
     clock.advance(60_000);
+    await postTelegramHtml(t, "too early", clock);
+    expect(t.calls).toHaveLength(1);
+
+    // Once it is over, messages go out again.
+    clock.advance(540_000);
     await postTelegramHtml(t, "later", clock);
     expect(t.messages().map((m) => m.text)).toEqual(["later"]);
+  });
+
+  const lines = (from: number, to: number) =>
+    Array.from({ length: to - from }, (_, i) => `Line ${from + i} of the answer with some words to fill it up nicely.`);
+
+  it("waits out a rate limit of 35 seconds in the middle of a long answer", async () => {
+    const clock = fakeClock();
+    let blockedUntil = 0;
+    const t = fakeTelegram({
+      now: clock.now,
+      fail: (_call, index) => {
+        if (index === 1) blockedUntil = clock.now() + 35_000;
+        const left = Math.ceil((blockedUntil - clock.now()) / 1000);
+        return left > 0 ? rateLimitError(left) : null;
+      },
+    });
+
+    await postTelegramHtml(t, lines(0, 200).join("\n"), clock);
+
+    expect(clock.sleeps).toEqual([35_000]);
+    expect(t.calls.filter((c) => c.failed)).toHaveLength(1);
+    expect(t.visible().map((bubble) => bubble.trimEnd()).join("\n").split("\n")).toEqual(lines(0, 200));
+  });
+
+  it("sends nothing after a chunk that a rate limit holds back", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({
+      now: clock.now,
+      fail: (_call, index) => (index >= 1 ? rateLimitError(600) : null),
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = lines(0, 200).join("\n");
+
+    await postTelegramHtml(t, answer, clock);
+
+    // The first message arrived. The second was refused; the third is not
+    // sent on its own, since it would arrive without the second.
+    expect(t.calls).toHaveLength(2);
+    expect(t.messages()).toHaveLength(1);
+    expect(errors).toHaveBeenCalledTimes(1);
+    // What the log says was lost is exactly what the reader did not get.
+    const lost = Number(/(\d+) characters not delivered/.exec(String(errors.mock.calls[0][0]))?.[1]);
+    expect(lost).toBeGreaterThan(4000);
+    expect(t.visible()[0]).toBe(answer.slice(0, answer.length - lost));
+  });
+
+  it("waits 90 seconds for one answer in total, not for each message", async () => {
+    const clock = fakeClock();
+    // Every message is refused once, with a wait of 40 seconds.
+    const refusedOnce = new Set<string>();
+    const t = fakeTelegram({
+      now: clock.now,
+      fail: (call) => {
+        if (refusedOnce.has(call.payload.text)) return null;
+        refusedOnce.add(call.payload.text);
+        return rateLimitError(40);
+      },
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await postTelegramHtml(t, lines(0, 200).join("\n"), clock);
+
+    // Two waits fit; the third does not, so the third message is not retried.
+    expect(clock.sleeps).toEqual([40_000, 40_000]);
+    expect(t.messages()).toHaveLength(2);
   });
 
   it("edits no more often than every 1100 ms while streaming", async () => {
@@ -354,12 +425,54 @@ describe("the last edit of a streamed message", () => {
           : null,
     });
 
-    // The second piece only adds a line break, which Telegram trims.
-    await handleTelegramHtmlStream(t, inPieces("**done**\n", 8, () => clock.advance(10)), clock);
+    await handleTelegramHtmlStream(t, inPieces("**done** now", 8, () => clock.advance(10)), clock);
 
     // No plain-text edit and no second message.
     expect(t.calls.map((c) => c.method)).toEqual(["sendMessage", "editMessageText"]);
+    expect(t.messages()).toHaveLength(1);
+  });
+
+  it("makes no edit for a change Telegram would not show", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({ now: clock.now });
+
+    // The second piece only adds a line break, which Telegram trims.
+    await handleTelegramHtmlStream(t, inPieces("**done**\n", 8, () => clock.advance(10)), clock);
+
+    expect(t.calls.map((c) => c.method)).toEqual(["sendMessage"]);
     expect(t.messages()).toEqual([{ id: 1, text: "<b>done</b>", html: true }]);
+  });
+
+  it("is not made sooner after the previous edit than any other edit", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({ now: clock.now });
+    async function* pieces() {
+      yield "a";
+      clock.advance(1200);
+      yield "b";
+      clock.advance(20);
+      yield "c";
+    }
+
+    await handleTelegramHtmlStream(t, pieces(), clock);
+
+    const edits = t.calls.filter((c) => c.method === "editMessageText");
+    expect(edits.map((c) => c.payload.text)).toEqual(["ab", "abc"]);
+    expect(edits[1].at - edits[0].at).toBeGreaterThanOrEqual(1100);
+  });
+
+  it("delivers what arrived when the stream fails, then reports the failure", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({ now: clock.now });
+    async function* pieces() {
+      yield "The first part. ";
+      yield "The second part, which no edit has shown yet.";
+      throw new Error("model stream broke");
+    }
+
+    await expect(handleTelegramHtmlStream(t, pieces(), clock)).rejects.toThrow("model stream broke");
+
+    expect(t.visible()).toEqual(["The first part. The second part, which no edit has shown yet."]);
   });
 
   it("closes a code block the answer left open", async () => {
@@ -373,6 +486,125 @@ describe("the last edit of a streamed message", () => {
 });
 
 // ── Generated documents ───────────────────────────────
+
+describe("a stream that goes quiet", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows the text it has within about a second, not when the next piece arrives", async () => {
+    vi.useFakeTimers();
+    const t = fakeTelegram({ now: Date.now });
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    async function* pieces() {
+      yield "I";
+      await pause(150);
+      yield "'ll read the config";
+      await pause(300);
+      yield " file and check the retry settings.";
+      await pause(90_000); // a tool runs; no text arrives
+      yield " Done.";
+    }
+    const said = "I'll read the config file and check the retry settings.";
+
+    const delivery = handleTelegramHtmlStream(t, pieces());
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Two seconds in, with 88 seconds of silence still to come.
+    expect(t.visible()).toEqual([said]);
+
+    // And it does not keep calling Telegram while nothing changes.
+    const calls = t.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.calls.length).toBe(calls);
+
+    await vi.advanceTimersByTimeAsync(40_000);
+    await delivery;
+    expect(t.visible()).toEqual([said + " Done."]);
+  });
+
+  it("waits for a rate limit to end, then shows the text", async () => {
+    vi.useFakeTimers();
+    let refused = false;
+    const t = fakeTelegram({
+      now: Date.now,
+      fail: (call) => {
+        if (call.method !== "editMessageText" || refused) return null;
+        refused = true;
+        return rateLimitError(5);
+      },
+    });
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    async function* pieces() {
+      yield "One.";
+      await pause(1200);
+      yield " Two.";
+      await pause(60_000);
+    }
+
+    const delivery = handleTelegramHtmlStream(t, pieces());
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(t.visible()).toEqual(["One."]); // the edit was refused for 5 seconds
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(t.visible()).toEqual(["One. Two."]);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await delivery;
+  });
+});
+
+describe("a table that is being streamed when a message fills up", () => {
+  it("repeats the header for the rows that move to the next message", async () => {
+    let table = "| Name | Value | Note |\n|------|-------|------|\n";
+    for (let i = 0; i < 12; i++) table += `| item ${i} | ${i * 7} | note for row ${i} |\n`;
+    let boundaries = 0;
+    for (const size of [3, 17, 60]) {
+      for (let proseLines = 50; proseLines <= 64; proseLines++) {
+        const prose = Array.from({ length: proseLines }, (_, i) => `Line ${i} of prose with some words to fill the line up nicely.`).join("\n");
+        const clock = fakeClock();
+        const t = fakeTelegram({ now: clock.now });
+
+        await handleTelegramHtmlStream(t, inPieces(`${prose}\n\n${table}`, size, () => clock.advance(40)), clock);
+
+        const bubbles = t.visible();
+        const where = `pieces of ${size}, ${proseLines} prose lines`;
+        // No row is left outside a table, and every boxed row sits under a header.
+        expect(bubbles.join("\n"), where).not.toMatch(/^\| item/m);
+        for (const bubble of bubbles) {
+          if (bubble.includes("│ item")) expect(bubble, where).toContain("│ Name");
+        }
+        for (let i = 0; i < 12; i++) expect(bubbles.join("\n"), where).toContain(`│ item ${i} `);
+        if (bubbles.filter((b) => b.includes("│ item")).length > 1) boundaries++;
+      }
+    }
+    // The table did straddle two messages in a good number of these runs.
+    expect(boundaries).toBeGreaterThan(5);
+  });
+});
+
+describe("a code block whose first line is longer than a message", () => {
+  const answer = "Here is the file:\n\n```json\n" + '{"k":"' + "x".repeat(5000) + '"}' + "\n```\nDone.";
+
+  for (const [how, deliver] of [
+    ["posted", (t: any, clock: any) => postTelegramHtml(t, answer, clock)],
+    ["streamed", (t: any, clock: any) => handleTelegramHtmlStream(t, inPieces(answer, 50, () => clock.advance(40)), clock)],
+  ] as const) {
+    it(`${how}: no message consists of the fence alone`, async () => {
+      const clock = fakeClock();
+      const t = fakeTelegram({ now: clock.now });
+
+      await deliver(t, clock);
+
+      // Nothing was refused (an empty code block is), so nothing fell back to raw markdown.
+      expect(t.calls.filter((c) => c.failed)).toEqual([]);
+      for (const m of t.messages()) expect(m.html).toBe(true);
+      const shown = t.visible().join("");
+      expect(count(shown, "x")).toBe(5000);
+      expect(shown).not.toContain("```");
+      expect(shown.endsWith("Done.")).toBe(true);
+    });
+  }
+});
 
 describe("delivery of generated documents", () => {
   it("delivers every visible character when posting 150 documents", async () => {
@@ -450,6 +682,39 @@ describe("delivery of generated documents", () => {
       expect(firstDifference(flat(t.visible()), whole), `seed ${seed}`).toBeNull();
     }
     expect(limited).toBeGreaterThan(40);
+  });
+
+  it("delivers every table row of 120 documents with tables, and Telegram refuses nothing", async () => {
+    /** The rows of the boxed tables in what a reader sees, without their padding */
+    const tableRows = (visible: string): Map<string, number> => {
+      const rows = new Map<string, number>();
+      for (const line of visible.split("\n")) {
+        if (!line.startsWith("│")) continue;
+        const row = line.replace(/\s+/g, "");
+        rows.set(row, (rows.get(row) ?? 0) + 1);
+      }
+      return rows;
+    };
+    let rowsChecked = 0;
+    for (let seed = 6001; seed <= 6120; seed++) {
+      const md = genDocument(seed, "full");
+      const clock = fakeClock();
+      const t = fakeTelegram({ now: clock.now });
+      if (seed % 2) await postTelegramHtml(t, md, clock);
+      else await handleTelegramHtmlStream(t, streamed(md, rng(seed), clock), clock);
+
+      // The fake refuses what Telegram refuses: empty messages, bad HTML, text over the limit.
+      expect(t.calls.filter((c) => c.failed).map((c) => c.payload.text.slice(0, 80)), `seed ${seed}`).toEqual([]);
+      expectValidBubbles(t, seed);
+      // A table split over two messages repeats its header, so a row may be
+      // there more often than in the whole document, never less.
+      const delivered = tableRows(t.visible().join("\n"));
+      for (const [row, times] of tableRows(htmlToVisible(markdownToTelegramHtml(md)))) {
+        expect(delivered.get(row) ?? 0, `seed ${seed}: ${row}`).toBeGreaterThanOrEqual(times);
+        rowsChecked++;
+      }
+    }
+    expect(rowsChecked).toBeGreaterThan(300);
   });
 
   it("delivers every visible character when some bubbles can never be edited", async () => {

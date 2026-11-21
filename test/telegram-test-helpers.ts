@@ -4,6 +4,10 @@
  * `fakeTelegram` stands in for a Chat SDK thread backed by the Telegram
  * adapter. It records every Bot API call and keeps what each message would
  * show after its edits, so a test can assert on what the reader ends up with.
+ *
+ * Like Telegram, it refuses a message with nothing to show, one that shows
+ * more than 4096 characters, HTML it cannot parse, and an edit that changes
+ * nothing.
  */
 
 export const TELEGRAM_LIMIT = 4096;
@@ -50,12 +54,28 @@ export function fakeTelegram(opts: FakeTelegramOptions = {}): FakeTelegram {
       throw err;
     }
     const html = payload.parse_mode === "HTML";
+    const refuse = (message: string): never => {
+      call.failed = true;
+      throw new Error(`Bad Request: ${message}`);
+    };
+    if (method === "sendMessage" || method === "editMessageText") {
+      const text = payload.text as string;
+      const problem = html ? telegramHtmlProblem(text) : null;
+      if (problem) refuse(`can't parse entities: ${problem}`);
+      const visible = html ? htmlToVisible(text) : text;
+      if (!visible.trim()) refuse("message text is empty");
+      if (visible.length > TELEGRAM_LIMIT) refuse("message is too long");
+    }
     if (method === "sendMessage") {
       const id = nextId++;
       state.set(id, { text: payload.text, html });
       return { message_id: id, chat: { id: Number(chatId) } };
     }
     if (method === "editMessageText") {
+      const current = state.get(payload.message_id);
+      if (current && current.html === html && current.text.trimEnd() === payload.text.trimEnd()) {
+        refuse("message is not modified: specified new message content and reply markup are exactly the same");
+      }
       state.set(payload.message_id, { text: payload.text, html });
       return true;
     }
