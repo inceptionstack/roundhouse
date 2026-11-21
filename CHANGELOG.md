@@ -4,10 +4,17 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [Unreleased]
 
-> **Upgrade notes.** Needs Node >= 22.19 and pi 1.x. An empty allowlist now
-> refuses everyone: set `chat.allowAll: true` if an open bot is intended.
-> Once `chat.allowedUserIds` has an entry, `chat.allowedUsers` no longer
-> grants access; run `roundhouse pair` on deployments that only list usernames.
+> **Upgrade notes.** Needs Node >= 22.19 and pi 1.x.
+> - An empty allowlist now refuses everyone: set `chat.allowAll: true` if an
+>   open bot is intended.
+> - Once `chat.allowedUserIds` has an entry, names in `chat.allowedUsers` no
+>   longer grant access. A config that lists several names but has paired
+>   only one of them (`setup --user a --user b`) now admits only the paired
+>   one: run `roundhouse pair --user NAME` for each of the others. The
+>   gateway and `doctor` warn about this at start.
+> - Telegram deployments that list only usernames keep working, matched on
+>   the real @username. On Slack a name no longer grants access at all;
+>   Slack users are admitted by paired id.
 
 ### Security
 - **Allowlist bypass by display name (Telegram).** The allowlist matched the
@@ -18,6 +25,10 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   and are ignored entirely once an id is paired.
 - **Fail closed.** With no `allowedUsers` and no `allowedUserIds` every
   message is refused; `chat.allowAll: true` is the explicit opt-in.
+- **Slack display names no longer authorize.** The Chat SDK's Slack
+  `userName` is the display name, which any workspace member can set.
+  Slack users are admitted by id only. (Slack pairing itself still matches
+  the display name and has no one-time code.)
 - Inline-button presses are authorized like messages. Threads are subscribed
   only for allowed authors (a group member's mention used to subscribe the
   thread, after which the owner's messages there ran as prompts).
@@ -35,6 +46,11 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 - Dependencies: 25 known advisories (17 high) in the lockfile, now 0.
 
 ### Changed
+- **Telegram slash commands** are handled through the Chat SDK's
+  `onSlashCommand`. From 4.3x the Telegram adapter stopped delivering a
+  message that starts with a bot command to the message handlers, so without
+  this every `/status`, `/cancel`, `/new` and gateway-side `/start <code>`
+  would be dropped silently after the SDK bump.
 - **pi 1.6.** The pi adapter uses `ModelRuntime` and the public
   `session.isIdle` / `waitForIdle()` instead of `AuthStorage`,
   `ModelRegistry` and the private `_agentEventQueue`, all removed upstream.
@@ -61,6 +77,12 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 - `/cmd@otherbot` in a group was sent to the agent as a prompt.
 - `doctor` on macOS checked systemd and GNU `df`; it now checks the
   LaunchAgent and reads free disk space portably.
+- `chat.dmOnly` treats a Slack direct message as private.
+- `setup --psst` after a plain-text setup left the bot token in `.env`.
+- `/model`: thinking-level suffixes, dotted versions (`gpt-5.1`), globs and
+  same-named models on two providers are handled; menu buttons stay within
+  Telegram's callback-data limit.
+- Sub-agent liveness on macOS no longer depends on locale or time zone.
 
 ## [0.6.0] — 2026-05-26
 

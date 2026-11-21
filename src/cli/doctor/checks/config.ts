@@ -78,6 +78,8 @@ export const configChecks: DoctorCheck[] = [
             : "No allowedUserIds or allowedUsers (every message is refused)");
         } else if (!hasIds) {
           issues.push("Not paired: access is by username until an id is recorded (run: roundhouse pair)");
+        } else if (hasUsers) {
+          issues.push(`allowedUserIds is set, so the ${cfg.chat.allowedUsers.length} name(s) in allowedUsers grant nothing: pair anyone listed by name only`);
         }
 
         if (issues.length === 0) {

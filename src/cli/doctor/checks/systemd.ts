@@ -128,13 +128,15 @@ export const launchdChecks: DoctorCheck[] = [
       if (Date.now() - stat.mtimeMs > 60 * 60 * 1000) {
         return { id: "systemd-errors", category: "systemd", name: "Recent errors", status: "pass", summary: "none in last hour" };
       }
-      const tail = await run("tail", ["-n", "5", errLog]);
-      const lines = (tail ?? "").split("\n").filter(Boolean);
+      // The file is the service's stderr, which also carries ordinary
+      // warnings; report only lines that look like failures.
+      const tail = await run("tail", ["-n", "200", errLog]);
+      const lines = (tail ?? "").split("\n").filter((l) => /error|fatal|uncaught|unhandled|EADDR|ECONN/i.test(l));
       return {
         id: "systemd-errors", category: "systemd", name: "Recent errors",
         status: lines.length ? "warn" : "pass",
-        summary: lines.length ? "error log written in the last hour" : "none in last hour",
-        details: lines.length ? lines.map(redactSecrets) : undefined,
+        summary: lines.length ? `${lines.length} error line(s) in the recent log` : "none in last hour",
+        details: lines.length ? lines.slice(-5).map(redactSecrets) : undefined,
       };
     },
   },

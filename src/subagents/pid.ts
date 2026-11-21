@@ -46,7 +46,10 @@ const HAS_PROC = process.platform === "linux";
 
 function psField(pid: number, field: "lstart" | "stat"): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile("ps", ["-o", `${field}=`, "-p", String(pid)], { timeout: 5_000 }, (err, stdout) => {
+    // The start time is compared as text between the process that launched
+    // the sub-agent and the gateway, so pin how `ps` formats it.
+    const env = { ...process.env, LC_ALL: "C", TZ: "UTC" };
+    execFile("ps", ["-o", `${field}=`, "-p", String(pid)], { timeout: 5_000, env }, (err, stdout) => {
       const value = String(stdout ?? "").trim();
       if (err || !value) return reject(err ?? new Error(`ps: no process ${pid}`));
       resolve(value);

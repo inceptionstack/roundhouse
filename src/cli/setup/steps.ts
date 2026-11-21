@@ -476,7 +476,12 @@ export async function stepConfigure(
   // TAVILY_API_KEY, ROUNDHOUSE_DEBUG_STREAM, anything added by hand).
   // parseEnvFile returns the value as written, quotes included, so it goes
   // back unchanged: quoting it again would corrupt it.
+  // With --psst these three live in the vault: an earlier plain-text run must
+  // not leave them behind in the file (ALLOWED_USERS would also keep
+  // overriding the config).
+  const vaulted = opts.psst ? new Set(["TELEGRAM_BOT_TOKEN", "BOT_USERNAME", "ALLOWED_USERS"]) : new Set<string>();
   for (const [key, value] of existingEnv) {
+    if (vaulted.has(key)) continue;
     if (!envLines.some((l) => l.startsWith(key + "="))) {
       envLines.push(`${key}=${value}`);
     }

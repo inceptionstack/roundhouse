@@ -19,7 +19,7 @@ import { recoverFromAgentTurnOverflow, type TurnSource } from "./overflow";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
 // progress messages now flow through the transport via this.transport.progress().
-import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, getSystemResources as _getSysRes } from "./helpers";
+import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, isPrivateChat as _isPrivateChat, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream, StreamModelOverflowError } from "./streaming";
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleCancel, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
@@ -273,6 +273,13 @@ export class Gateway {
         console.warn("   Run: roundhouse setup --telegram --user <your-username>\n");
       }
     }
+    // Ids win: once one is recorded, usernames are ignored. Say so when the
+    // config still lists names, or a second person allowed by name only is
+    // refused without knowing why.
+    if (allowedUsers.length > 0 && allowedUserIds.length > 0) {
+      console.warn(`[roundhouse] allowedUserIds is set, so the ${allowedUsers.length} name(s) in allowedUsers no longer grant access.`);
+      console.warn(`[roundhouse] Anyone listed by name only must be paired (roundhouse pair --user NAME) to get in.`);
+    }
     // `allowedUserIds` is the live config array, so ids added by pairing apply
     // at once (and from then on usernames no longer grant access).
     const allowed = (message: any) => isAllowed(message, allowedUsers, allowedUserIds, { allowAll });
@@ -284,6 +291,15 @@ export class Gateway {
       if (blockedLogged.has(who) || blockedLogged.size >= 500) return;
       blockedLogged.add(who);
       console.log(`[roundhouse] blocked userId=${who} (${why}); further messages from this id are dropped silently`);
+    };
+    // Same idea for places the gateway ignores on purpose (chat.dmOnly), kept
+    // apart from the per-person lines above: the owner writing in a group is
+    // not a blocked person.
+    const logIgnoredPlace = (where: string, why: string) => {
+      const key = `place:${where}`;
+      if (blockedLogged.has(key) || blockedLogged.size >= 500) return;
+      blockedLogged.add(key);
+      console.log(`[roundhouse] ignoring ${where.replace(/[^\w:@.-]/g, "_").slice(0, 80)} (${why}); further messages there are dropped silently`);
     };
 
     // Per-thread verbose toggle (shows tool_start messages)
@@ -348,6 +364,7 @@ export class Gateway {
       // a prompt for our agent either.
       const addressedTo = trimmed.match(/^\/[A-Za-z0-9_]+@([A-Za-z0-9_]+)/)?.[1];
       if (addressedTo && botUsername && addressedTo.toLowerCase() !== botUsername.toLowerCase()) {
+        console.log(`[roundhouse] ignoring a command addressed to @${addressedTo} in ${thread.id}`);
         return;
       }
       if (await this.dispatchInTurnCommand(inTurnCommands, thread, botUsername, message, trimmed, agentThreadId)) {
@@ -361,10 +378,10 @@ export class Gateway {
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
       const baseThreadId = _resolveThread(thread, message);
-      // `chat.dmOnly`: the agent answers in private chats only. Every private
-      // chat resolves to "main"; anything else is a group, channel or topic.
-      if (dmOnly && baseThreadId !== "main") {
-        logBlocked(message, `chat.dmOnly is set; ignoring ${baseThreadId}`);
+      // `chat.dmOnly`: the agent answers in one-to-one chats only, and
+      // ignores groups, channels and topics.
+      if (dmOnly && !_isPrivateChat(thread, message)) {
+        logIgnoredPlace(String(thread?.id ?? baseThreadId), "chat.dmOnly is set");
         return;
       }
       const agentThreadId = applyTopicOverride(baseThreadId, thread);
@@ -398,7 +415,7 @@ export class Gateway {
     // decided there, and everything else is refused.
     const subscribeIfAllowed = async (thread: any, message: any) => {
       if (!allowed(message)) return;
-      if (dmOnly && _resolveThread(thread, message) !== "main") return;
+      if (dmOnly && !_isPrivateChat(thread, message)) return;
       await thread.subscribe();
     };
 
@@ -416,6 +433,36 @@ export class Gateway {
       await handleOrAbort(thread, message);
     });
 
+    // Slash commands. Since Chat SDK 4.3x the Telegram adapter no longer
+    // delivers a message that starts with a bot command ("/status", "/cancel",
+    // "/start <code>") to the message handlers above; it raises a slash-command
+    // event instead, and with no handler registered the command vanishes.
+    // Rebuild the message and send it down the same path, so it meets the same
+    // allowlist, pairing and command dispatch as any other message. A command
+    // roundhouse does not know still reaches the agent as text, as before.
+    this.chat.onSlashCommand(async (event: any) => {
+      // Adapters pass the thread id as the channel id.
+      const threadId = typeof event?.channel?.id === "string" ? event.channel.id : "";
+      if (!threadId || typeof event?.command !== "string") return;
+      let thread: any;
+      try {
+        thread = this.chat.thread(threadId);
+      } catch (err) {
+        console.warn(`[roundhouse] slash command in ${threadId}: no thread (${(err as Error).message})`);
+        return;
+      }
+      const args = typeof event.text === "string" ? event.text.trim() : "";
+      const message = {
+        text: args ? `${event.command} ${args}` : event.command,
+        author: event.user,
+        raw: event.raw,
+        threadId,
+        attachments: [],
+      };
+      await subscribeIfAllowed(thread, message);
+      await handleOrAbort(thread, message);
+    });
+
     // ── Load persona files at startup (cached for process lifetime) ───
     loadPersona();
 
@@ -428,7 +475,7 @@ export class Gateway {
       this.chat.onAction(actionId, async (event: any) => {
         // A button press is a command: /model changes the default model for
         // everyone. In a group any member can press the owner's buttons.
-        if (!allowed({ author: event.user, raw: event.raw })) {
+        if (!allowed({ author: event.user, raw: event.raw, threadId: event.threadId })) {
           logBlocked({ author: event.user }, "button press, not in allowlist");
           return;
         }
@@ -1299,8 +1346,9 @@ export class Gateway {
         : `[Sub-agent ${status.role} ${status.status} — no output]`;
 
       const syntheticThread = this.transport.createThread(chatId);
-      // Same session the chat itself uses ("main" for a private chat,
-      // "group:<id>" for a group), not a hard-coded "main".
+      // The chat's base session ("main" for a Telegram private chat,
+      // "group:<id>" for a group), not a hard-coded "main". A chat that is on
+      // a /topic or a forum topic, and Slack threads, still get the base one.
       const agentThreadId = this.transport.encodeParentThreadId(chatId);
       await this.handleAgentTurn(syntheticThread, agentThreadId, resultText, [], this.verboseThreads, this.threadLocks, this.abortControllers, "subagent");
     } catch (err) {

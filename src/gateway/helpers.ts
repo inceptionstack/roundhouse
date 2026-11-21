@@ -74,6 +74,18 @@ export function resolveAgentThreadId(thread: any, message: any): string {
   return String(thread?.id ?? "main");
 }
 
+/**
+ * Whether a message arrived in a one-to-one chat with the bot. Backs
+ * `chat.dmOnly`. Telegram private chats resolve to "main"; Slack direct
+ * messages live in a channel whose id starts with "D" (or carry `isDM`).
+ */
+export function isPrivateChat(thread: any, message: any): boolean {
+  if (thread?.isDM === true) return true;
+  const id = typeof thread?.id === "string" ? thread.id : "";
+  if (id.startsWith("slack:")) return /^slack:D/.test(id);
+  return resolveAgentThreadId(thread, message) === "main";
+}
+
 /** Extract message_thread_id from thread ID string like "telegram:chatId:topicId" */
 function extractTopicFromThreadId(threadId: string | undefined): number | undefined {
   if (!threadId) return undefined;

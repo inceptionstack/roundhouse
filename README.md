@@ -135,7 +135,8 @@ roundhouse install                     # LaunchAgent only
 
 Whoever gets a message accepted by the gateway drives an agent with shell access as the user running it. There is no sandbox.
 
-- **Access is by paired numeric ID.** Usernames only count until pairing records an ID, and are matched against the real @username. An empty allowlist refuses everyone.
+- **Access is by paired ID.** On Telegram, usernames count only until pairing records an ID, and are matched against the real @username. Once any ID is recorded, names in `allowedUsers` grant nothing, so pair everyone who should get in. An empty allowlist refuses everyone.
+- **Slack pairing is weaker than Telegram's.** It has no one-time code: the first Slack user whose display name matches a configured name is paired. Complete Slack pairing right after setup, in a workspace you trust.
 - **The agent can read everything its user can**, including `~/.roundhouse/.env`. Run it as a dedicated user, or in a container or VM, if that matters.
 - **Content is not instructions, but nothing enforces that.** Files, web pages, attachments and voice transcripts reach the model as text. Keep `soul.md` / `tools.md` explicit about what needs your confirmation.
 - **`roundhouse setup` and `/update` install unpinned software** (latest npm packages, a skills repo at its default branch, the uv installer). Set `chat.allowUpdateCommand: false` and use the gateway-only install above on machines where that is not acceptable.
@@ -256,9 +257,9 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `agent.sessionDir` | Override session storage path |
 | `chat.botUsername` | Bot display name for Chat SDK |
 | `chat.allowedUserIds` | Immutable user IDs (Telegram numeric, Slack `Uxxx`); filled in by pairing. Once this has an entry, only these IDs are accepted and usernames are ignored |
-| `chat.allowedUsers` | Telegram / Slack usernames accepted until an ID is paired. Matched against the real @username, never the display name |
+| `chat.allowedUsers` | Telegram usernames accepted until an ID is paired, matched against the real @username, never the display name. Ignored once `allowedUserIds` has an entry. On Slack a name never grants access (its "username" is a display name anyone can set): Slack users get in by paired ID only |
 | `chat.allowAll` | `true` lets anyone use the bot when both lists are empty. Default: an empty allowlist refuses everyone |
-| `chat.dmOnly` | `true` answers in private chats only and ignores groups, channels and topics |
+| `chat.dmOnly` | `true` answers in one-to-one chats only (Telegram private chats, Slack direct messages) and ignores groups, channels and topics |
 | `chat.bootTurn` | `false` skips the greeting agent turn on every start (default `true`) |
 | `chat.allowUpdateCommand` | `false` disables `/update` from chat (default `true`) |
 | `chat.notifyChatIds` | Chat IDs to notify on startup (Telegram numeric, Slack `Cxxx`/`Dxxx`) |

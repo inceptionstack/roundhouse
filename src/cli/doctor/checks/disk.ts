@@ -60,7 +60,9 @@ export const diskChecks: DoctorCheck[] = [
       const df = await run("df", ["-Pk", homedir()]);
       if (!df) return { id: "disk-space", category: "disk", name: "Free disk space", status: "info", summary: "cannot check" };
       const lines = df.split("\n").filter(Boolean);
-      const availKb = parseInt(lines[lines.length - 1].trim().split(/\s+/)[3] ?? "");
+      // blocks, used, available, capacity%: found by shape, because a
+      // filesystem or mount name may contain spaces.
+      const availKb = parseInt(/\s\d+\s+\d+\s+(\d+)\s+\d+%/.exec(lines[lines.length - 1])?.[1] ?? "");
       const avail = Math.floor(availKb / 1024);
       if (isNaN(avail)) return { id: "disk-space", category: "disk", name: "Free disk space", status: "info", summary: "cannot parse" };
       const gb = (avail / 1024).toFixed(1);

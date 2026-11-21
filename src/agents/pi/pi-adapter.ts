@@ -122,6 +122,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     let repairedThisCall = false;
     try {
       try {
+        // A run an extension started on its own may still be going. prompt()
+        // would throw "already processing" or, during agent_settled handlers,
+        // defer the prompt and return before it ran.
+        await waitUntilIdle(entry.session);
         await entry.session.prompt(text);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult

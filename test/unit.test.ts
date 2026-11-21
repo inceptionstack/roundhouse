@@ -98,10 +98,8 @@ describe("isAllowed", () => {
     expect(isAllowed({ author: { userId: "999" } }, [], [12345], { allowAll: true })).toBe(false);
   });
 
-  it("allows matching userName", () => {
-    expect(
-      isAllowed({ author: { userName: "alice" } }, ["alice"])
-    ).toBe(true);
+  it("allows a Telegram user by real @username", () => {
+    expect(isAllowed(tg({ id: 1, username: "alice" }), ["alice"])).toBe(true);
   });
 
   it("allows a platform id listed in allowedUsers (legacy configs)", () => {
@@ -110,9 +108,21 @@ describe("isAllowed", () => {
     ).toBe(true);
   });
 
-  it("is case-insensitive on userName, on both sides, and ignores a leading @", () => {
-    expect(isAllowed({ author: { userName: "Alice" } }, ["alice"])).toBe(true);
-    expect(isAllowed({ author: { userName: "alice" } }, ["@Alice"])).toBe(true);
+  it("is case-insensitive on the username, on both sides, and ignores a leading @", () => {
+    expect(isAllowed(tg({ id: 1, username: "Alice" }), ["alice"])).toBe(true);
+    expect(isAllowed(tg({ id: 1, username: "alice" }), ["@Alice"])).toBe(true);
+  });
+
+  it("SECURITY: a name with no verifiable source never matches (unknown payload, or Slack display name)", () => {
+    // No raw payload at all: nothing proves where "alice" came from.
+    expect(isAllowed({ author: { userName: "alice" } }, ["alice"])).toBe(false);
+    // Slack: userName is the display name, which any member can set.
+    const slack = { threadId: "slack:D0ABC:1711.0001", author: { userId: "U0ATTACKER", userName: "alice" }, raw: { type: "message", user: "U0ATTACKER" } };
+    expect(verifiedHandle(slack)).toBeUndefined();
+    expect(isAllowed(slack, ["alice"])).toBe(false);
+    expect(isAllowed(slack, ["alice"], ["U0ATTACKER"])).toBe(true); // by id it does
+    // A Telegram-looking payload on a non-Telegram thread is not trusted either.
+    expect(isAllowed({ threadId: "slack:D0ABC:1", author: { userName: "alice" }, raw: { from: { id: 1, username: "alice" } } }, ["alice"])).toBe(false);
   });
 
   it("blocks when userName does not match", () => {

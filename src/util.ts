@@ -52,6 +52,8 @@ export function sameId(a: string | number, b: string | number): boolean {
 export interface AuthorizableMessage {
   author?: { userName?: string; userId?: string | number; fullName?: string };
   raw?: unknown;
+  /** Chat SDK thread id, e.g. "telegram:12345" or "slack:C0123:1711.0001". */
+  threadId?: string;
 }
 
 export interface AllowlistOptions {
@@ -63,29 +65,33 @@ export interface AllowlistOptions {
 }
 
 /**
- * The author's platform handle, taken from a field the user cannot spoof.
+ * The author's platform handle, taken from a field the author cannot choose
+ * freely. Only Telegram has one we can read; everything else returns
+ * `undefined`, so it can be authorized by id only.
  *
- * The Chat SDK's `author.userName` is NOT that field on Telegram: the adapter
- * builds it as `from.username ?? from.first_name ?? from.id`, and for channel
- * or anonymous-admin posts from the chat title. An account with no @username
- * can set its first name to anything, including the owner's username. So for
- * Telegram-shaped payloads only `raw.from.username` counts, and a sender
- * without one has no handle. Other platforms (Slack) keep `author.userName`.
+ * The Chat SDK's `author.userName` is not such a field:
+ *  - Telegram: the adapter builds it as `from.username ?? from.first_name ??
+ *    from.id`, and from the chat title for channel or anonymous-admin posts.
+ *    An account with no @username can set its first name to anything. Only
+ *    `raw.from.username` is the real, unique @username.
+ *  - Slack: it is the display name, which any workspace member can change,
+ *    and for bot or webhook posts whatever the poster chose.
+ *
+ * The platform comes from the thread id prefix when the message has one, and
+ * otherwise from the payload's shape. A payload we cannot identify has no
+ * verified handle.
  */
 export function verifiedHandle(message: AuthorizableMessage): string | undefined {
-  const raw = message.raw as { from?: unknown; sender_chat?: unknown; chat?: unknown } | null | undefined;
-  if (raw && typeof raw === "object") {
-    const from = raw.from as { id?: unknown; username?: unknown } | null | undefined;
-    if (from && typeof from === "object" && typeof from.id === "number") {
-      return typeof from.username === "string" && from.username ? from.username : undefined;
-    }
-    // Telegram message with no `from` (channel post, sender_chat): no user handle.
-    if ("sender_chat" in raw || (raw.chat && typeof raw.chat === "object" && "type" in (raw.chat as object))) {
-      return undefined;
-    }
-  }
-  const name = message.author?.userName;
-  return typeof name === "string" && name ? name : undefined;
+  const platform = typeof message.threadId === "string" && message.threadId.includes(":")
+    ? message.threadId.slice(0, message.threadId.indexOf(":"))
+    : undefined;
+  if (platform !== undefined && platform !== "telegram") return undefined;
+
+  const raw = message.raw as { from?: unknown } | null | undefined;
+  if (!raw || typeof raw !== "object") return undefined;
+  const from = raw.from as { id?: unknown; username?: unknown } | null | undefined;
+  if (!from || typeof from !== "object" || typeof from.id !== "number") return undefined;
+  return typeof from.username === "string" && from.username ? from.username : undefined;
 }
 
 /**
@@ -97,7 +103,8 @@ export function verifiedHandle(message: AuthorizableMessage): string | undefined
  *  2. Otherwise `allowedUsers` non-empty (not paired yet, or a legacy config):
  *     the verified handle must match, case-insensitively, or the platform id
  *     must be listed there. Never the display name, and never the SDK's
- *     `userName` fallback (see `verifiedHandle`).
+ *     `userName` (see `verifiedHandle`). Only Telegram has a verified handle,
+ *     so on Slack a username never grants access: pair to record the id.
  *  3. Both empty: denied, unless `allowAll` was set explicitly.
  *
  * Telegram ids are numeric and Slack ids are strings ("U02XXXXX"); both sides
