@@ -211,6 +211,12 @@ function stillRateLimited(waitMs: number): Error {
   return Object.assign(new Error(`Telegram asked for a wait of ${seconds} s`), { retryAfter: seconds });
 }
 
+/** True if the text ends with the first half of a surrogate pair */
+function endsInHalfCharacter(text: string): boolean {
+  const last = text.charCodeAt(text.length - 1);
+  return last >= 0xd800 && last <= 0xdbff;
+}
+
 /** Two texts Telegram shows the same way: it drops whitespace at the end of a message */
 function sameText(a: string, b: string): boolean {
   return a === b || a.trimEnd() === b.trimEnd();
@@ -528,6 +534,9 @@ export async function handleTelegramHtmlStream(
       next = null;
       if (result.done) break;
       accumulated += result.value;
+      // Half of a character that takes two code units: Telegram refuses it.
+      // The other half comes with the next piece.
+      if (endsInHalfCharacter(accumulated)) continue;
       let html = renderOpen();
       while (html === null) {
         await closeBubble(takeMarkdownChunk(prefix, body()));

@@ -461,6 +461,25 @@ describe("the last edit of a streamed message", () => {
     expect(edits[1].at - edits[0].at).toBeGreaterThanOrEqual(1100);
   });
 
+  it("does not send half an emoji when a piece ends in the middle of one", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({ now: clock.now });
+    const text = "Done 😀 and more text after it.";
+    const half = text.indexOf("😀") + 1;
+    async function* pieces() {
+      yield text.slice(0, 3);
+      clock.advance(1200);
+      yield text.slice(3, half); // ends with the first half of the emoji
+      clock.advance(1200);
+      yield text.slice(half);
+    }
+
+    await handleTelegramHtmlStream(t, pieces(), clock);
+
+    for (const call of t.calls) expect(call.payload.text.isWellFormed(), call.payload.text).toBe(true);
+    expect(t.visible()).toEqual([text]);
+  });
+
   it("delivers what arrived when the stream fails, then reports the failure", async () => {
     const clock = fakeClock();
     const t = fakeTelegram({ now: clock.now });
