@@ -99,6 +99,13 @@ export interface CommandDescriptor {
   stage?: CommandStage;
   /** If true, `/cmd arg1 arg2` also matches. Default false. */
   acceptsArgs?: boolean;
+  /**
+   * Handle it as soon as it arrives instead of after the messages queued
+   * before it in the chat: for commands about the turn in progress or about
+   * the gateway itself (/status, /model, /restart). Pre-turn commands always
+   * are. Leave it off for commands that belong in sequence (/new, /topic).
+   */
+  immediate?: boolean;
   /** Do the work. Return (or resolve) when done — gateway will skip further dispatch.
    *  May return a RichResponse for the gateway to render via the active transport. */
   invoke: (inv: CommandInvocation) => Promise<CommandResult> | CommandResult;

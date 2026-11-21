@@ -20,6 +20,8 @@ export interface MessageAttachment {
   sizeBytes: number;
   /** Whether this is user-provided (untrusted) content */
   untrusted: true;
+  /** Set by an adapter that passed this file to the model directly as an image. */
+  inline?: boolean;
   /** Transcript of audio content (populated by STT service) */
   transcript?: import("./voice/types").AttachmentTranscript;
 }
@@ -70,6 +72,12 @@ export interface AdapterInfo {
   contextWindow?: number | null;
   /** Percentage of context used (0-100) */
   contextPercent?: number | null;
+  /** Thinking level of the thread's session, when the agent has one. */
+  thinkingLevel?: string;
+  /** What the thread's session has cost so far, in USD, as the agent accounts it. */
+  sessionCost?: number;
+  /** Tokens the thread's session has used so far. */
+  sessionTokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 
   // ── Memory system integration ──────────────────────
 
@@ -142,6 +150,26 @@ export interface AgentAdapter {
 
   /** Abort the current agent run for a thread. */
   abort?(threadId: string): Promise<void>;
+
+  /**
+   * Switch the conversation in this thread to another model ("provider/id").
+   * `applied: false` leaves it as it is and says why in `detail`; with
+   * `usable: false` the model cannot be used here at all (unknown, or no
+   * credentials). `deferred` means a turn is running and the switch happens
+   * when it ends.
+   */
+  setModel?(
+    threadId: string,
+    model: string,
+    /** Called with the outcome of a deferred switch, once it has been tried. */
+    onDeferred?: (result: { applied: boolean; detail?: string }) => void,
+  ): Promise<{ applied: boolean; deferred?: boolean; usable?: boolean; detail?: string }>;
+
+  /**
+   * Read or set the thinking level of the conversation in this thread.
+   * Returns the level now in effect and the levels its model supports.
+   */
+  thinkingLevel?(threadId: string, level?: string): Promise<{ level: string; available: string[]; deferred?: boolean } | null>;
 
   /** Return runtime info about the agent (model, version, etc.). */
   getInfo?(threadId?: string): AdapterInfo;

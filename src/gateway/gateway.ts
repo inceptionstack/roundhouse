@@ -22,7 +22,7 @@ import type { PressureLevel } from "../memory/types";
 import { isCommand as _isCmd, isCommandWithArgs as _isCmdArgs, resolveAgentThreadId as _resolveThread, isPrivateChat as _isPrivateChat, getSystemResources as _getSysRes } from "./helpers";
 import { saveAttachments, type AttachmentResult } from "./attachments";
 import { handleStreaming as _handleStream, StreamModelOverflowError } from "./streaming";
-import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleCancel, handleVerbose, handleDoctor, handleCrons, type CommandContext } from "./commands";
+import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleCancel, handleVerbose, handleDoctor, handleCrons, handleThink, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
@@ -40,6 +40,8 @@ import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
 import { BotUsernameResolver } from "./bot-username-resolver";
 import { hostname } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { chmod, mkdir, readFile } from "node:fs/promises";
 import { injectToolsSection } from "./tools-inject";
@@ -48,6 +50,9 @@ import { checkVersionChange } from "./whats-new";
 
 /** Origin of an agent turn — used for recovery copy and telemetry. */
 export type { TurnSource };
+
+/** An interrupted request older than this is no longer worth a notice at start. */
+const INTERRUPTED_NOTICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Limits */
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
@@ -106,6 +111,10 @@ export class Gateway {
   private flushInProgress = new Set<string>();
   /** Set by stop(): no new turn, flush or compaction may start. */
   private stopping = false;
+  /** The turn in progress in each chat, by chat thread id: what /cancel acts on. */
+  private runningTurns = new Map<string, { agentThreadId: string; controller: AbortController }>();
+  /** Message handling that is still running; handlers return before it ends. */
+  private inFlightWork = new Set<Promise<void>>();
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -434,19 +443,63 @@ export class Gateway {
       await thread.subscribe();
     };
 
-    this.chat.onDirectMessage(async (thread, message) => {
-      await subscribeIfAllowed(thread, message);
-      await handleOrAbort(thread, message);
-    });
+    // The handlers below return at once and the work runs detached. The chat
+    // SDK's Telegram polling waits for a handler before it asks Telegram for
+    // more updates, so a handler that awaited the agent turn (minutes) made
+    // the bot deaf for that long: /cancel could not interrupt anything and
+    // new messages were not even received until the turn ended.
+    //
+    // Order per chat is kept here instead. Ordinary messages run one after
+    // the other in arrival order (handle() awaits pairing and attachment
+    // downloads before it takes the turn lock, so without this a text could
+    // overtake a photo sent before it). Commands skip the line: /cancel and
+    // /status are for the turn that is running.
+    const intake = new Map<string, Promise<void>>();
+    // Commands that are about the turn in progress, or about the gateway, and
+    // so must not wait behind it: the pre-turn ones (/cancel, /verbose,
+    // /doctor, /crons), the ones marked `immediate` (/status, /model, /think,
+    // /restart, /update, /later) and pairing's /start. Everything else that
+    // starts with "/" keeps its place in line: /new and /topic change where
+    // the messages before them belong, /compact works on the session, and a
+    // command roundhouse does not know is a prompt for the agent.
+    const skipsTheLine = (thread: any, text: string): boolean => {
+      if (!text.startsWith("/")) return false;
+      if (/^\/start(\s|@|$)/.test(text)) return true;
+      const matchers = buildMatchers(this.botUsernameResolver.resolve(thread));
+      return allDescriptors.some((d) => (isPreTurn(d) || d.immediate === true) && matchesDescriptor(d, text, matchers));
+    };
+    const accept = (thread: any, message: any, subscribe: boolean): void => {
+      const key = String(thread?.id ?? "");
+      const text = String(message?.text ?? "").trim();
+      const immediate = skipsTheLine(thread, text);
+      // From here until the work ends, this request is the gateway's to lose:
+      // Telegram is told it was received as soon as this handler returns. The
+      // marker outlives the process only if the work did not finish.
+      const marker = !immediate && !this.stopping && allowed(message)
+        ? this.markTurnInFlight(thread, text)
+        : undefined;
+      const work = async () => {
+        if (this.stopping) return;
+        if (subscribe) await subscribeIfAllowed(thread, message);
+        await handleOrAbort(thread, message);
+      };
+      const started = immediate ? work() : (intake.get(key) ?? Promise.resolve()).then(work);
+      const tracked: Promise<void> = started
+        .catch((err) => console.error(`[roundhouse] handler error in ${key}:`, err))
+        .finally(() => {
+          // Finished, failed or cancelled by the owner: nothing to report
+          // later. Cut short by shutdown: the marker stays for the next start.
+          if (marker && !this.stopping) this.clearTurnInFlight(marker);
+          this.inFlightWork.delete(tracked);
+          if (intake.get(key) === tracked) intake.delete(key);
+        });
+      if (!immediate) intake.set(key, tracked);
+      this.inFlightWork.add(tracked);
+    };
 
-    this.chat.onNewMention(async (thread, message) => {
-      await subscribeIfAllowed(thread, message);
-      await handleOrAbort(thread, message);
-    });
-
-    this.chat.onSubscribedMessage(async (thread, message) => {
-      await handleOrAbort(thread, message);
-    });
+    this.chat.onDirectMessage((thread, message) => accept(thread, message, true));
+    this.chat.onNewMention((thread, message) => accept(thread, message, true));
+    this.chat.onSubscribedMessage((thread, message) => accept(thread, message, false));
 
     // Slash commands. Since Chat SDK 4.3x the Telegram adapter no longer
     // delivers a message that starts with a bot command ("/status", "/cancel",
@@ -455,7 +508,7 @@ export class Gateway {
     // Rebuild the message and send it down the same path, so it meets the same
     // allowlist, pairing and command dispatch as any other message. A command
     // roundhouse does not know still reaches the agent as text, as before.
-    this.chat.onSlashCommand(async (event: any) => {
+    this.chat.onSlashCommand((event: any) => {
       // Adapters pass the thread id as the channel id.
       const threadId = typeof event?.channel?.id === "string" ? event.channel.id : "";
       if (!threadId || typeof event?.command !== "string") return;
@@ -474,8 +527,7 @@ export class Gateway {
         threadId,
         attachments: [],
       };
-      await subscribeIfAllowed(thread, message);
-      await handleOrAbort(thread, message);
+      accept(thread, message, true);
     });
 
     // ── Load persona files at startup (cached for process lifetime) ───
@@ -487,7 +539,11 @@ export class Gateway {
     // action id — duplicates would silently misbehave on chat.onAction, so
     // fail fast at startup.
     for (const { actionId, handler } of collectAndValidateActions(allDescriptors)) {
-      this.chat.onAction(actionId, async (event: any) => {
+      this.chat.onAction(actionId, (event: any) => {
+        // Detached like message handling: polling waits for this handler,
+        // and a button can wait on the agent (a /model press queues behind a
+        // running turn or compaction).
+        const tracked: Promise<void> = (async () => {
         // A button press is a command: /model changes the default model for
         // everyone. In a group any member can press the owner's buttons.
         if (!allowed({ author: event.user, raw: event.raw, threadId: event.threadId })) {
@@ -502,8 +558,18 @@ export class Gateway {
         }
         const result = await handler({ value: event.value, thread: event.thread });
         await this.postCommandResult(event.thread, result);
+        })()
+          .catch((err) => console.error(`[roundhouse] button handler error (${actionId}):`, err))
+          .finally(() => { this.inFlightWork.delete(tracked); });
+        this.inFlightWork.add(tracked);
       });
     }
+
+    // What the previous gateway left unfinished, read before polling starts:
+    // a message that was waiting at Telegram begins its turn (and writes its
+    // own marker) as soon as initialize() returns, and must not be mistaken
+    // for an interrupted one.
+    const interrupted = this.readInterruptedTurns();
 
     await this.chat.initialize();
 
@@ -585,8 +651,85 @@ export class Gateway {
     // Send startup notification (after cron init so we can include job counts)
     await this.notifyStartup(platforms);
 
+    // Tell the owner about requests the previous gateway did not finish.
+    await this.reportInterruptedTurns(interrupted);
+
     // Fire boot turn — agent says hello (seeds session so it's never empty)
     await this.fireBootTurn(verboseThreads, threadLocks, abortControllers);
+  }
+
+  // ── Turns interrupted by a restart ───────────────────
+  //
+  // Handlers return before a turn ends, so Telegram is told the message was
+  // received long before the work is done. A gateway that is killed or
+  // restarted mid-turn therefore neither finishes the request nor gets it
+  // again. Running it again unasked would be worse (the transcript already
+  // holds the request and whatever tools ran; an agent that restarted the
+  // service itself would loop), so the next gateway says what happened and
+  // leaves the decision to the owner.
+
+  private get inFlightDir(): string { return join(ROUNDHOUSE_DIR, "in-flight"); }
+
+  private markTurnInFlight(thread: any, userText: string): string | undefined {
+    const threadId = typeof thread?.id === "string" ? thread.id : "";
+    if (!threadId) return undefined;
+    try {
+      mkdirSync(this.inFlightDir, { recursive: true, mode: 0o700 });
+      const file = join(this.inFlightDir, `${Date.now()}-${randomBytes(4).toString("hex")}.json`);
+      const preview = userText.replace(/\s+/g, " ").trim().slice(0, 160);
+      writeFileSync(file, JSON.stringify({ threadId, preview, startedAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+      return file;
+    } catch (err) {
+      console.warn(`[roundhouse] could not record the request in flight:`, (err as Error).message);
+      return undefined;
+    }
+  }
+
+  private clearTurnInFlight(file: string): void {
+    try { rmSync(file, { force: true }); } catch { /* reported once at next start, at worst */ }
+  }
+
+  /** Markers left by an earlier gateway. Call before this one starts taking messages. */
+  private readInterruptedTurns(): Array<{ file: string; threadId: string; preview: string; startedAt: number }> {
+    let names: string[];
+    try { names = readdirSync(this.inFlightDir).filter((f) => f.endsWith(".json")).sort(); } catch { return []; }
+    const found: Array<{ file: string; threadId: string; preview: string; startedAt: number }> = [];
+    for (const name of names) {
+      const file = join(this.inFlightDir, name);
+      try {
+        const rec = JSON.parse(readFileSync(file, "utf8")) as { threadId?: string; preview?: string; startedAt?: string };
+        const startedAt = Date.parse(rec.startedAt ?? "");
+        // Too old to be news, or unreadable: drop it.
+        if (typeof rec.threadId !== "string" || !rec.threadId || !(Date.now() - startedAt < INTERRUPTED_NOTICE_MAX_AGE_MS)) {
+          this.clearTurnInFlight(file);
+          continue;
+        }
+        found.push({ file, threadId: rec.threadId, preview: typeof rec.preview === "string" ? rec.preview : "", startedAt });
+      } catch {
+        this.clearTurnInFlight(file);
+      }
+    }
+    return found;
+  }
+
+  private async reportInterruptedTurns(interrupted: Array<{ file: string; threadId: string; preview: string }>): Promise<void> {
+    // One notice per chat, listing its requests in the order they were sent.
+    const byThread = new Map<string, typeof interrupted>();
+    for (const rec of interrupted) byThread.set(rec.threadId, [...(byThread.get(rec.threadId) ?? []), rec]);
+    for (const [threadId, recs] of byThread) {
+      const list = recs.map((r) => (r.preview ? `• "${r.preview}"` : "• (a message without text)")).join("\n");
+      const text = recs.length === 1
+        ? `⚠️ I was restarted before I finished your request:\n${list}\nI have not run it again. Anything already done is in the conversation; say "continue" to pick it up, or send it again.`
+        : `⚠️ I was restarted before I finished these requests:\n${list}\nI have not run them again. Anything already done is in the conversation; say "continue", or send again what you still want.`;
+      try {
+        await this.chat.thread(threadId).post(text);
+        console.log(`[roundhouse] reported ${recs.length} interrupted request(s) in ${threadId}`);
+        for (const r of recs) this.clearTurnInFlight(r.file);
+      } catch (err) {
+        // Keep the markers: the next start tries again (until they are a day old).
+        console.warn(`[roundhouse] could not report interrupted requests in ${threadId}:`, (err as Error).message);
+      }
+    }
   }
 
   /**
@@ -598,13 +741,27 @@ export class Gateway {
     verboseThreads: Set<string>, threadLocks: Map<string, Promise<void>>, abortControllers: Map<string, AbortController>,
     turnSource: TurnSource = "user",
   ): Promise<void> {
+    // One abort signal for the whole turn, from the moment it is accepted:
+    // /cancel has to work during attachment download, transcription and
+    // memory preparation too, not only once the model is streaming. It is
+    // registered under the chat as well as the session, because /topic can
+    // switch the chat to another session while this turn is still running.
+    const ac = new AbortController();
+    const chatKey = typeof thread?.id === "string" ? thread.id : agentThreadId;
+    const running = { agentThreadId, controller: ac };
+    this.runningTurns.set(chatKey, running);
+    const turnOver = () => {
+      if (this.runningTurns.get(chatKey) === running) this.runningTurns.delete(chatKey);
+      if (abortControllers.get(agentThreadId) === ac) abortControllers.delete(agentThreadId);
+    };
+
     // Prepare message (save attachments, build AgentMessage)
-    const result = await this.prepareAgentMessage(thread, agentThreadId, userText, rawAttachments);
-    if (!result) return; // nothing to send (empty message after attachment failure)
+    const result = await this.prepareAgentMessage(thread, agentThreadId, userText, rawAttachments).catch((err) => { turnOver(); throw err; });
+    if (!result || ac.signal.aborted) { turnOver(); return; } // nothing to send, or cancelled meanwhile
     let agentMessage = result;
 
     const agent = this.router.resolve(agentThreadId);
-    if (this.stopping) return;
+    if (this.stopping) { turnOver(); return; }
 
     // Serialize prompts per-thread (concurrent mode allows /cancel to bypass)
     const prevLock = threadLocks.get(agentThreadId);
@@ -614,11 +771,13 @@ export class Gateway {
     if (prevLock) await prevLock;
     // A message that waited for the turn before it must not start one now
     // that the gateway is stopping: the agent is being shut down under it.
-    if (this.stopping) {
+    if (this.stopping || ac.signal.aborted) {
       releaseLock!();
       if (threadLocks.get(agentThreadId) === lockPromise) threadLocks.delete(agentThreadId);
+      turnOver();
       return;
     }
+    abortControllers.set(agentThreadId, ac);
 
     let stopTyping: (() => void) | null = null;
     let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
@@ -627,7 +786,7 @@ export class Gateway {
 
       // Enrich audio attachments with transcripts (STT) — show typing while processing
       if (agentMessage.attachments?.some((a: any) => a.mediaType === "audio")) {
-        const sttTyping = startTypingLoop(thread);
+        const sttTyping = startTypingLoop(this.typingTarget(thread));
         try {
           await this.enrichWithStt(thread, agentMessage);
         } finally {
@@ -669,25 +828,7 @@ export class Gateway {
         console.error(`[roundhouse] memory prepare error:`, (err as Error).message);
       }
 
-      // Inject a Slack-specific stopTyping hook when the thread belongs
-      // to Slack — the SDK's default clear path is broken in 4.29.0
-      // (sends `loading_messages: [""]` which Slack rejects). For
-      // non-Slack threads slackStopTyping is null and the typing loop
-      // falls back to thread.startTyping("") (Telegram's sendChatAction
-      // auto-expires anyway so the call is harmless there).
-      //
-      // Wrapper object delegates startTyping back to the original thread
-      // so we keep its `this`-binding. Don't spread the class instance —
-      // that would lose its prototype.
-      const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
-      const slackStopTyping = slackDelegate?.stopTypingFor?.(thread) ?? null;
-      const typingThread = slackStopTyping
-        ? {
-            startTyping: (status?: string) => thread.startTyping(status),
-            stopTyping: slackStopTyping,
-          }
-        : thread;
-      stopTyping = startTypingLoop(typingThread);
+      stopTyping = startTypingLoop(this.typingTarget(thread));
 
       // Pre-turn recovery: if a prior turn failed to compact (state has
       // pendingCompact === "emergency"), the live session is almost certainly
@@ -719,16 +860,12 @@ export class Gateway {
       let streamHadVisibleText = false;
       try {
         let turnUsedTools = false;
-        if (agent.promptStream) {
-          const ac = new AbortController();
-          abortControllers.set(agentThreadId, ac);
-          try {
-            const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
-            turnUsedTools = streamResult.usedTools;
-            streamHadVisibleText = streamResult.hadVisibleText;
-          } finally {
-            abortControllers.delete(agentThreadId);
-          }
+        if (ac.signal.aborted) {
+          // Cancelled while the message was being prepared: do not prompt.
+        } else if (agent.promptStream) {
+          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+          turnUsedTools = streamResult.usedTools;
+          streamHadVisibleText = streamResult.hadVisibleText;
         } else {
           const reply = await agent.prompt(agentThreadId, agentMessage);
           turnUsedTools = true;
@@ -772,6 +909,7 @@ export class Gateway {
         if (stopTyping) stopTyping();
       }
     } finally {
+      turnOver();
       releaseLock!();
       if (threadLocks.get(agentThreadId) === lockPromise) {
         threadLocks.delete(agentThreadId);
@@ -955,6 +1093,7 @@ export class Gateway {
       threadLocks,
       postWithFallback: (t, text) => this.postWithFallback(t, text),
       progress: (t, initialText) => this.transport.progress(t, initialText),
+      typingTarget: (t) => this.typingTarget(t),
       stopGateway: () => this.stop(),
     };
   }
@@ -1001,23 +1140,41 @@ export class Gateway {
     return [
       // ── Standard CommandContext commands (in-turn, no args) ──
       { triggers: ["/new"],     invoke: withCtx(handleNew) },
-      { triggers: ["/restart"], invoke: withCtx(handleRestart) },
-      { triggers: ["/update"],  invoke: withCtx(handleUpdate) },
+      { triggers: ["/restart"], immediate: true, invoke: withCtx(handleRestart) },
+      { triggers: ["/update"],  immediate: true, invoke: withCtx(handleUpdate) },
       { triggers: ["/compact"], invoke: withCtx(handleCompact) },
-      { triggers: ["/status"],  invoke: withCtx(handleStatus) },
+      { triggers: ["/status"],  immediate: true, invoke: withCtx(handleStatus) },
 
       // ── In-turn commands that accept args ──
       {
         triggers: ["/model"],
         acceptsArgs: true,
-        invoke: ({ text }) => handleModel({ text }),
+        immediate: true,
+        invoke: ({ thread, text, agentThreadId }) => handleModel({
+          text,
+          applyToConversation: this.modelSwitcher(agentThreadId, thread),
+          conversationModel: this.conversationModel(agentThreadId),
+        }),
         actions: {
-          [MODEL_ACTION_ID]: (ev) => handleModelAction({ value: ev.value }),
+          [MODEL_ACTION_ID]: (ev) => handleModelAction({
+            value: ev.value,
+            // A button press carries the thread, not the session id: resolve it the way a message would.
+            applyToConversation: ev.thread ? this.modelSwitcher(applyTopicOverride(_resolveThread(ev.thread, undefined), ev.thread), ev.thread) : undefined,
+          }),
         },
+      },
+      {
+        triggers: ["/think"],
+        acceptsArgs: true,
+        immediate: true,
+        invoke: ({ thread, text, agentThreadId }) => handleThink({
+          thread, text, agentThreadId, agent: this.router.resolve(agentThreadId), postWithFallback: post,
+        }),
       },
       {
         triggers: ["/later"],
         acceptsArgs: true,
+        immediate: true,
         invoke: ({ thread, text }) => handleLater({ thread, text, postWithFallback: post }),
       },
       {
@@ -1033,11 +1190,18 @@ export class Gateway {
       {
         triggers: ["/cancel"],
         stage: "pre-turn",
-        invoke: ({ thread, agentThreadId }) => handleCancel({
-          thread, agentThreadId,
-          agent: this.router.resolve(agentThreadId),
-          abortControllers,
-        }),
+        invoke: ({ thread, agentThreadId }) => {
+          // The turn running in this chat, which after a /topic switch is not
+          // the session the chat now points at.
+          const running = this.runningTurns.get(String(thread?.id ?? ""));
+          const target = running?.agentThreadId ?? agentThreadId;
+          return handleCancel({
+            thread, agentThreadId: target,
+            agent: this.router.resolve(target),
+            abortControllers,
+            running: running?.controller,
+          });
+        },
       },
       {
         triggers: ["/verbose"],
@@ -1329,6 +1493,59 @@ export class Gateway {
   }
 
   /**
+   * A function that switches one conversation's model, or undefined if the
+   * agent cannot. A switch that had to wait for the running turn reports back
+   * in the chat only if it then failed; the command already said it would
+   * happen.
+   */
+  private modelSwitcher(agentThreadId: string, thread: any) {
+    const agent = this.router.resolve(agentThreadId);
+    if (!agent.setModel) return undefined;
+    return (model: string) => agent.setModel!(agentThreadId, model, (result) => {
+      if (result.applied) return;
+      void this.postWithFallback(thread, `⚠️ The switch to \`${model}\` did not happen after all: ${result.detail ?? "unknown reason"}. This conversation is still on its previous model.`)
+        .catch((err) => console.warn(`[roundhouse] could not report the failed model switch:`, (err as Error).message));
+    });
+  }
+
+  /** "provider/id" of the model a conversation is on, if it has a live session. */
+  private conversationModel(agentThreadId: string): string | undefined {
+    const info = this.router.resolve(agentThreadId).getInfo?.(agentThreadId);
+    return info?.hasActiveSession === true && typeof info.model === "string" && info.model.includes("/") ? info.model : undefined;
+  }
+
+  /**
+   * What the typing loop should drive for this thread, including how the
+   * indicator is cleared when the turn ends:
+   *  - Slack: its status persists until cleared, and the SDK's own clear is
+   *    broken (it sends `loading_messages: [""]`, which Slack rejects), so
+   *    the Slack delegate supplies a working one.
+   *  - Telegram: the indicator expires by itself after about five seconds
+   *    and cannot be cleared. The loop's default clear, `startTyping("")`, is
+   *    just another "typing" action there, so every answer was followed by
+   *    a few seconds of phantom typing. Give it a clear that does nothing.
+   * The wrapper delegates startTyping to the thread so `this` stays bound.
+   */
+  private typingTarget(thread: any): { startTyping: (status?: string) => Promise<void>; stopTyping?: () => Promise<void> | void } {
+    const slackDelegate = this.transport.delegates.find((d) => d.name === "slack") as SlackAdapter | undefined;
+    const slackStopTyping = slackDelegate?.stopTypingFor?.(thread) ?? null;
+    if (slackStopTyping) {
+      return { startTyping: (status?: string) => thread.startTyping(status), stopTyping: slackStopTyping };
+    }
+    if (this.transport.ownerOf(thread)?.name === "telegram") {
+      return { startTyping: (status?: string) => thread.startTyping(status), stopTyping: () => {} };
+    }
+    return thread;
+  }
+
+  /** Resolves when no accepted message is still being handled. Tests wait on it. */
+  async whenIdle(): Promise<void> {
+    while (this.inFlightWork.size > 0) {
+      await Promise.all([...this.inFlightWork]);
+    }
+  }
+
+  /**
    * Stop the gateway. Every step is bounded: a turn can run for minutes, and
    * a stop that waits for it leaves a process behind that still polls the
    * chat and writes session files after its replacement has started.
@@ -1356,8 +1573,13 @@ export class Gateway {
     if (this.ipcServer) {
       this.ipcServer.stop();
     }
-    // Interrupt turns in flight first; the chat SDK's shutdown waits for its
-    // handlers, and those are the turns.
+    // Stop taking messages before anything else. Handlers no longer wait for
+    // their turn, so a message fetched now would be confirmed to Telegram and
+    // then dropped by a gateway that is shutting down.
+    const telegram = (this.chat as unknown as { getAdapter?(name: string): { stopPolling?(): Promise<void> } | undefined } | undefined)?.getAdapter?.("telegram");
+    if (telegram?.stopPolling) await bounded("polling", telegram.stopPolling(), 3_000);
+    // Then interrupt the turns in flight.
+    for (const turn of this.runningTurns.values()) turn.controller.abort();
     for (const ac of this.abortControllers.values()) ac.abort();
     await bounded("agent", this.router.dispose());
     if (this.cronScheduler) {
