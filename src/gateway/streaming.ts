@@ -278,7 +278,8 @@ export async function handleStreaming(
 
   // Safety net: if the entire turn produced no visible content and no error
   // was already reported, notify the user so they don't stare at "typing" forever.
-  if (!hasContentThisTurn && !modelErrorPosted) {
+  // Not after an abort (/cancel, shutdown): the turn was stopped on purpose.
+  if (!hasContentThisTurn && !modelErrorPosted && !signal?.aborted) {
     console.warn(`[roundhouse] agent returned no content this turn (${eventCount} events received)`);
     try { await thread.post("\u26a0\ufe0f Agent returned no response. Check roundhouse logs."); } catch {}
   }

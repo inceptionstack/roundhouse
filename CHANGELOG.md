@@ -24,19 +24,24 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   optional absolute caps and per-model overrides (`memory.compact.models`).
   `/status` shows where they sit. On a 200k model compaction moves from 100k
   to 120k.
-- **The flush model is opt-in.** The flush and the summary used to go to a
-  hard-coded Haiku 4.5 id, which re-read the whole conversation without the
-  prompt cache each time. They now use the conversation model unless
-  `memory.compact.flushModel` is set, and a configured flush model is skipped
-  when the conversation no longer fits its window.
+- **The flush model is opt-in.** The flush turn and the summary used to go to
+  a hard-coded Haiku 4.5 id; the flush turn then re-read the whole
+  conversation without the prompt cache each time. Both now use the
+  conversation model unless `memory.compact.flushModel` is set, and a
+  configured flush model is skipped when the conversation no longer fits its
+  window. Thinking is switched off for the summary on both paths.
+- **Memory flushes are spaced by growth.** Between the two thresholds the
+  agent is asked to save memory again only after the conversation has grown
+  by a third of the gap, and what it just wrote is no longer injected back
+  into the next turn.
 - **Persona and tool notes are sent once.** With pi they are part of the
   system prompt instead of about a thousand tokens in front of every user
   message. They survive compaction and are rebuilt when the files change.
 - **A provider error is reported only if the run ends with it.** Errors pi
   retries or recovers from by compacting no longer post "Agent error", and
   pi's own retry no longer triggers the "waiting for follow-up" notice.
-- **Edited messages are ignored.** The Telegram adapter delivers an edit as a
-  new message; it used to run again as a new request.
+- **Edited Telegram messages are ignored**, as requests and as commands. The
+  adapter delivers an edit as a new message; it used to run again.
 
 ### Fixed — restart
 - **A restart could leave two gateways running.** `roundhouse run` started
@@ -44,9 +49,10 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   A service restart then started a second gateway while the first finished
   its turn: both polled the bot, the session file forked, and a compaction
   in one left the other with the full context. The gateway now runs in the
-  `run` process itself, shutdown interrupts turns and is bounded (15 s), and
-  a lock file allows one gateway per host: a successor waits for a stopping
-  gateway and refuses to start next to a running one.
+  `run` process itself, shutdown starts nothing new, interrupts turns and is
+  bounded (20 s; the systemd unit's stop timeout is now 30 s), and a lock
+  file allows one gateway per home directory: a successor waits for a
+  stopping gateway and refuses to start next to a running one.
 
 ### Security
 - **Allowlist bypass by display name (Telegram).** The allowlist matched the

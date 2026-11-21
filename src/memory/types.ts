@@ -80,6 +80,8 @@ export interface ThreadMemoryState {
   pendingCompact?: "soft" | "hard" | "emergency";
   /** When last soft flush happened (for cooldown) */
   lastSoftFlushAt?: string;
+  /** Context size at the last soft flush; the next one waits for growth. */
+  lastSoftFlushTokens?: number;
 }
 
 /** Resolved memory file set to inject */

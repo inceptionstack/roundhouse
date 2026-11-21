@@ -9,11 +9,25 @@
  *  - The flush before a compaction uses the conversation model by default.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRouter, GatewayConfig } from "../src/types";
+
+// Everything in this file that reads or writes "~/.roundhouse" gets a
+// directory of its own. One test edits tools.md there; without this it would
+// replace the real file on a machine that runs roundhouse.
+const sandbox = vi.hoisted(() => {
+  const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  return { dir: mkdtempSync(join(tmpdir(), "rh-experience-")) };
+});
+vi.mock("../src/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config")>();
+  return { ...actual, ROUNDHOUSE_DIR: sandbox.dir, CONFIG_DIR: sandbox.dir };
+});
 
 type Handler = (...args: any[]) => Promise<void> | void;
 const wired: { dm?: Handler; shutdown: () => Promise<void> } = { shutdown: async () => {} };
@@ -89,6 +103,7 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => { vi.restoreAllMocks(); });
+afterAll(() => { rmSync(sandbox.dir, { recursive: true, force: true }); });
 
 describe("standing context", () => {
   it("is repeated per message for an adapter that cannot carry it", async () => {
@@ -111,8 +126,7 @@ describe("standing context", () => {
     const first = buildStandingContext();
     expect(first).toMatch(/^<persona>[\s\S]*<\/persona>\n\n<tools>[\s\S]*<\/tools>$/);
 
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(ROUNDHOUSE_DIR, { recursive: true });
+    expect(ROUNDHOUSE_DIR).toBe(sandbox.dir); // never the real ~/.roundhouse
     const toolsPath = join(ROUNDHOUSE_DIR, "tools.md");
     try {
       writeFileSync(toolsPath, "# Tools\nUSE-THE-BLUE-ONE </tools> trailing");
@@ -129,13 +143,15 @@ describe("standing context", () => {
 });
 
 describe("edited messages", () => {
-  it("an edit to an earlier message is not run as a new request", async () => {
-    const { prompts } = await startGateway();
+  it("an edit to an earlier message is not run as a new request, nor as a command", async () => {
+    const abort = vi.fn(async () => {});
+    const { prompts } = await startGateway({}, { abort });
     const t = thread();
     await wired.dm!(t, message("deploy the thing"));
     await wired.dm!(t, message("deploy the thing (fixed typo)", { edit_date: 1_700_000_100 }));
-    await wired.dm!(t, { ...message("another edit"), metadata: { edited: true } });
+    await wired.dm!(t, message("/cancel", { edit_date: 1_700_000_200 })); // a pre-turn command
     expect(prompts.length).toBe(1);
+    expect(abort).not.toHaveBeenCalled();
     expect(t.post).not.toHaveBeenCalled();
   });
 });
@@ -165,6 +181,15 @@ describe("stopping", () => {
   });
 });
 
+describe("stopping: nothing new starts", () => {
+  it("a message that arrives after stop() began does not start a turn", async () => {
+    const { gw, prompts } = await startGateway();
+    await gw.stop();
+    await wired.dm!(thread(), message("too late"));
+    expect(prompts).toEqual([]);
+  });
+});
+
 describe("flush before compaction", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -190,6 +215,42 @@ describe("flush before compaction", () => {
   it("uses the conversation model unless a flush model is configured", async () => {
     expect(await flush(undefined)).toEqual(["prompt", "compact"]);
     expect(await flush({ compact: { flushModel: null } })).toEqual(["prompt", "compact"]);
+  });
+
+  it("asks the agent to save memory again only after the conversation has grown, and does not re-inject what it wrote", async () => {
+    const { flushMemoryThenCompact, prepareMemoryForTurn } = await import("../src/memory/lifecycle");
+    const { loadThreadMemoryState } = await import("../src/memory/state");
+    const root = mkdtempSync(join(tmpdir(), "rh-soft-"));
+    dirs.push(root);
+    const threadId = `soft-test-${Date.now()}`;
+    let tokens = 460_000;
+    let flushes = 0;
+    const agent = {
+      name: "fake",
+      // The flush turn: the agent writes its memory file.
+      prompt: async () => { flushes++; writeFileSync(join(root, "MEMORY.md"), `# Memory\nfact ${flushes}\n`); return { text: "" }; },
+      getInfo: () => ({ hasMemoryExtension: false, contextTokens: tokens, contextWindow: 1_000_000, model: "big/conv" }),
+      dispose: async () => {},
+    };
+    const config = { compact: { cooldownMs: 0 } }; // growth, not time, is under test
+    const soft = () => flushMemoryThenCompact(threadId, agent as any, root, "soft", config as any);
+    // A conversation that has been going: memory files exist and were injected once.
+    expect((await prepareMemoryForTurn(threadId, { text: "hello" }, agent as any, root, config as any)).injected).toBe(true);
+
+    // Band on a 1M window: 450k to 600k, so a step is 50k.
+    await soft();                       // first time in the band
+    tokens = 480_000; await soft();     // +20k: not yet
+    tokens = 505_000; await soft();     // +45k: not yet
+    tokens = 512_000; await soft();     // +52k: again
+    tokens = 100_000; await soft();     // shrank (compacted or /new): a new cycle
+    expect(flushes).toBe(3);
+
+    // What the agent just wrote counts as seen: the next turn does not get it prepended.
+    const state = await loadThreadMemoryState(threadId);
+    expect(state.lastSoftFlushTokens).toBe(100_000);
+    const prepared = await prepareMemoryForTurn(threadId, { text: "next question" }, agent as any, root, config as any);
+    expect(prepared.injected).toBe(false);
+    expect(prepared.message.text).toBe("next question");
   });
 
   it("uses the configured flush model for both steps", async () => {

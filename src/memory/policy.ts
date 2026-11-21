@@ -110,19 +110,29 @@ export function contextThresholds(
   model?: string | null,
 ): ContextThresholds {
   const c = resolveCompactConfig(config, model);
+  // A value that makes no sense is ignored, not obeyed: 0 would compact on
+  // every turn, 60 (meant as a percentage) would never compact, and NaN
+  // would switch both thresholds off without a word.
+  const fraction = (v: unknown, fallback: number) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1 ? v : fallback;
+  const cap = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : Number.POSITIVE_INFINITY;
+  const hardPct = fraction(c.hardPercent, DEFAULT_HARD_PERCENT);
+  const softPct = fraction(c.softPercent, DEFAULT_SOFT_PERCENT);
+
   const ceiling = Math.max(0, window - COMPACT_HEADROOM_TOKENS);
-  const hard = Math.min(
-    Math.floor((c.hardPercent ?? DEFAULT_HARD_PERCENT) * window),
-    c.hardTokens ?? Number.POSITIVE_INFINITY,
-    ceiling,
-  );
-  // Soft sits below hard, so the reminder to save memory comes first.
-  const soft = Math.min(
-    Math.floor((c.softPercent ?? DEFAULT_SOFT_PERCENT) * window),
-    c.softTokens ?? Number.POSITIVE_INFINITY,
-    Math.max(0, hard - 1),
-  );
-  return { soft, hard, emergencyRemaining: c.emergencyThresholdTokens ?? DEFAULT_EMERGENCY_THRESHOLD };
+  const hard = Math.min(Math.floor(hardPct * window), cap(c.hardTokens), ceiling);
+  // Soft sits below hard, so the reminder to save memory comes first. When
+  // only hard was capped, soft keeps its usual proportion to it instead of
+  // landing one token below.
+  const softByProportion = Math.floor(hard * Math.min(softPct / hardPct, 0.9));
+  const soft = Math.min(Math.floor(softPct * window), cap(c.softTokens), Math.max(0, softByProportion));
+  const emergency = c.emergencyThresholdTokens;
+  return {
+    soft,
+    hard,
+    emergencyRemaining: typeof emergency === "number" && Number.isFinite(emergency) && emergency >= 0 ? emergency : DEFAULT_EMERGENCY_THRESHOLD,
+  };
 }
 
 /**

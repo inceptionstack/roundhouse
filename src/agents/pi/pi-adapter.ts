@@ -140,6 +140,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   const creating = new Map<string, Promise<SessionEntry>>();
   let memoryCapabilities: { hasMemoryExtension: boolean; memoryTools: string[]; extensions: string[] } | undefined;
   let reapInterval: ReturnType<typeof setInterval> | undefined;
+  let disposed = false;
 
   /**
    * Wait until the session has nothing left to do.
@@ -393,6 +394,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   }
 
   async function getOrCreate(threadId: string): Promise<SessionEntry> {
+    // After dispose() (gateway shutdown) a queued prompt must fail, not open
+    // a fresh session and start a model call the exit is about to kill.
+    if (disposed) throw new Error("pi adapter is shut down");
     const existing = sessions.get(threadId);
     if (existing) return existing;
 
@@ -431,6 +435,71 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     return current.finally(() => {
       if (threadQueues.get(threadId) === current) {
         threadQueues.delete(threadId);
+      }
+    });
+  }
+
+  /**
+   * Compact a thread's session, optionally with another model for the summary.
+   *
+   * Thinking is switched off for the summary in both cases: summarization
+   * gains nothing from reasoning, pays for it, and the thinking budget eats
+   * into the output limit the summary has to fit in. Model and thinking level
+   * are swapped in memory and restored; `setModel()` / `setThinkingLevel()`
+   * would write the change into the transcript.
+   */
+  function compactSession(threadId: string, modelId: string | undefined): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
+    return enqueue(threadId, async () => {
+      const entry = sessions.get(threadId);
+      if (!entry) return null;
+
+      const agentState = (entry.session as any).agent?.state;
+      let currentModel: any;
+      let currentThinkingLevel: any;
+      let modelSwapped = false;
+      let thinkingSwapped = false;
+
+      if (!agentState) {
+        console.warn(`[pi-agent] cannot access agent state for compact, using the session's model and thinking level`);
+      } else {
+        if (modelId) {
+          const modelRuntime = await getModelRuntime();
+          const [provider, ...rest] = modelId.split("/");
+          const id = rest.join("/");
+          const targetModel = (provider && id) ? modelRuntime.getModel(provider, id) : null;
+          if (!targetModel) {
+            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
+          } else if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
+            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
+          } else if (!fitsModel(entry.session, targetModel)) {
+            console.warn(`[pi-agent] conversation is larger than compact model "${modelId}" can take, using the conversation model`);
+          } else {
+            currentModel = agentState.model;
+            agentState.model = targetModel;
+            modelSwapped = true;
+            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
+          }
+        }
+
+        if (agentState.thinkingLevel && agentState.thinkingLevel !== "off") {
+          currentThinkingLevel = agentState.thinkingLevel;
+          agentState.thinkingLevel = "off";
+          thinkingSwapped = true;
+          console.log(`[pi-agent] compact forcing thinkingLevel=off (was ${currentThinkingLevel})`);
+        }
+      }
+
+      try {
+        const result = await entry.session.compact();
+        const usage = entry.session.getContextUsage();
+        return {
+          tokensBefore: result.tokensBefore,
+          // pi reports no live count until the next response; its own estimate fills the gap.
+          tokensAfter: usage?.tokens ?? result.estimatedTokensAfter ?? null,
+        };
+      } finally {
+        if (modelSwapped) agentState.model = currentModel;
+        if (thinkingSwapped) agentState.thinkingLevel = currentThinkingLevel;
       }
     });
   }
@@ -526,8 +595,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             // Provider error of the latest assistant message, reported only
             // if the run settles without pi having recovered from it.
             let pendingError: string | null = null;
-            // pi announced a retry or a compaction; the next run is its own.
+            // pi announced a retry, or a compaction after an overflow; the next
+            // run is pi asking again, not follow-up work.
             let recovering = false;
+            const reportPendingError = () => {
+              if (pendingError === null) return;
+              eventQueue.push({ type: "model_error", message: pendingError });
+              pendingError = null;
+              resolve?.();
+            };
             const notifyDraining = () => {
               if (draining) return;
               draining = true;
@@ -568,23 +644,34 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 pendingError = null;
                 recovering = true;
               } else if (event.type === "compaction_start") {
-                // pi is making room (and, for "overflow", retrying after it).
-                if (event.reason === "overflow") pendingError = null;
-                recovering = true;
+                // After an overflow pi compacts and asks again. The error
+                // stays held until that is known to have worked: a failed
+                // summary ends the run with no new assistant message, and the
+                // overflow is then all there is to report (and what starts
+                // roundhouse's own recovery).
+                if (event.reason === "overflow") recovering = true;
+              } else if (event.type === "compaction_end") {
+                if (event.reason === "overflow") {
+                  if (event.willRetry && !event.errorMessage && !event.aborted) pendingError = null;
+                  else recovering = false;
+                }
               } else if (event.type === "agent_start") {
-                // A run that follows pi's own retry or compaction is the same
-                // answer continuing, not follow-up work.
-                if (runEnded && !recovering) notifyDraining();
-                recovering = false;
+                if (recovering) {
+                  // pi's own retry: the same answer continuing.
+                  recovering = false;
+                } else if (runEnded) {
+                  // Follow-up work queued by an extension. If the run before
+                  // it ended in an error, that error belongs to the owner's
+                  // request: report it now, or the follow-up's success would
+                  // bury it.
+                  reportPendingError();
+                  notifyDraining();
+                }
               } else if (event.type === "agent_settled") {
                 runEnded = false;
                 recovering = false;
                 // The run is over and pi did not recover from the error.
-                if (pendingError !== null) {
-                  eventQueue.push({ type: "model_error", message: pendingError });
-                  pendingError = null;
-                  resolve?.();
-                }
+                reportPendingError();
                 notifyDrainComplete();
               }
 
@@ -638,10 +725,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             } finally {
               try { unsub(); } catch { /* ignore */ }
               // Safety net: an error still held here was never reported.
-              if (pendingError !== null) {
-                eventQueue.push({ type: "model_error", message: pendingError });
-                pendingError = null;
-              }
+              reportPendingError();
               eventQueue.push({ type: "agent_end" });
               done = true;
               resolve?.();
@@ -673,6 +757,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     async dispose(): Promise<void> {
+      disposed = true;
       if (reapInterval) clearInterval(reapInterval);
       for (const [, entry] of sessions) {
         entry.session.dispose();
@@ -696,83 +781,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     async compact(threadId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
-      return enqueue(threadId, async () => {
-        const entry = sessions.get(threadId);
-        if (!entry) return null;
-
-        const result = await entry.session.compact();
-        const usage = entry.session.getContextUsage();
-        return {
-          tokensBefore: result.tokensBefore,
-          // pi reports no live count until the next response; its own estimate fills the gap.
-            tokensAfter: usage?.tokens ?? result.estimatedTokensAfter ?? null,
-        };
-      });
+      return compactSession(threadId, undefined);
     },
 
     async compactWithModel(threadId: string, modelId: string): Promise<{ tokensBefore: number; tokensAfter: number | null } | null> {
-      return enqueue(threadId, async () => {
-        const entry = sessions.get(threadId);
-        if (!entry) return null;
-
-        const agentState = (entry.session as any).agent?.state;
-        let currentModel: any;
-        let currentThinkingLevel: any;
-        let modelSwapped = false;
-        let thinkingSwapped = false;
-
-        // Resolve and swap model for compact
-        if (!agentState) {
-          console.warn(`[pi-agent] cannot access agent state for compact model swap, using default`);
-        } else {
-          const modelRuntime = await getModelRuntime();
-          const [provider, ...rest] = modelId.split("/");
-          const id = rest.join("/");
-          const targetModel = (provider && id) ? modelRuntime.getModel(provider, id) : null;
-          if (!targetModel) {
-            console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
-          } else if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
-            console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
-          } else if (!fitsModel(entry.session, targetModel)) {
-            console.warn(`[pi-agent] conversation is larger than compact model "${modelId}" can take, using the conversation model`);
-          } else {
-            currentModel = agentState.model;
-            agentState.model = targetModel;
-            modelSwapped = true;
-            console.log(`[pi-agent] compact using model (in-memory): ${modelId}`);
-          }
-
-          // Force thinking off for compact regardless of agent's default.
-          // Summarization doesn't benefit from reasoning, costs more tokens,
-          // and complicates the maxTokens math (adjustMaxTokensForThinking adds
-          // up to 16k thinking budget). Direct state mutation matches the model
-          // swap above and avoids setThinkingLevel(), which would persist to
-          // settings.json.
-          if (agentState.thinkingLevel && agentState.thinkingLevel !== "off") {
-            currentThinkingLevel = agentState.thinkingLevel;
-            agentState.thinkingLevel = "off";
-            thinkingSwapped = true;
-            console.log(`[pi-agent] compact forcing thinkingLevel=off (was ${currentThinkingLevel})`);
-          }
-        }
-
-        try {
-          const result = await entry.session.compact();
-          const usage = entry.session.getContextUsage();
-          return {
-            tokensBefore: result.tokensBefore,
-            // pi reports no live count until the next response; its own estimate fills the gap.
-            tokensAfter: usage?.tokens ?? result.estimatedTokensAfter ?? null,
-          };
-        } finally {
-          if (modelSwapped) {
-            agentState.model = currentModel;
-          }
-          if (thinkingSwapped) {
-            agentState.thinkingLevel = currentThinkingLevel;
-          }
-        }
-      });
+      return compactSession(threadId, modelId);
     },
 
     /**

@@ -294,7 +294,11 @@ The thresholds follow the model. With the defaults, a 200K-token model saves mem
 
 A larger context costs more per turn, most of all on the first message after a pause long enough for the provider's prompt cache to expire, when the whole conversation is read again at full price.
 
-`flushModel` names a second, usually cheaper model for the flush and the summary. It has no prompt cache for the conversation, so it reads all of it again each time, and it is skipped once the conversation is larger than its own window.
+`flushModel` names a second, usually cheaper model for the flush turn and the summary. For the flush turn it has no prompt cache for the conversation, so it reads all of it again each time (the summary request is uncached whichever model runs it). It is skipped once the conversation is larger than its own window.
+
+While the conversation sits between the two thresholds, the agent is asked to save memory again only after it has grown by a third of the gap between them, and what it writes is not fed back into the conversation.
+
+Roundhouse checks the thresholds between turns. pi's own compaction (`compaction.reserveTokens` in pi's settings) acts inside a turn and does not flush memory first; if you raised that reserve, keep roundhouse's `hardPercent` below the point where pi would act.
 
 Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, etc.
 

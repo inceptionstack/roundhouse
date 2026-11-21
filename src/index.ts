@@ -15,8 +15,12 @@ import { loadConfig } from "./config";
 import { buildStandingContext } from "./gateway/standing-context";
 import { acquireInstanceLock, GatewayAlreadyRunningError } from "./instance-lock";
 
-/** A stop that takes longer than this is cut short: the process exits anyway. */
-const SHUTDOWN_TIMEOUT_MS = 15_000;
+/**
+ * A stop that takes longer than this is cut short: the process exits anyway.
+ * Longer than the sum of the bounded steps in Gateway.stop() (3 x 5 s), and
+ * shorter than the service manager's own kill timeout (systemd unit: 30 s).
+ */
+const SHUTDOWN_TIMEOUT_MS = 20_000;
 
 // ── Crash protection ─────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -72,7 +76,11 @@ async function main() {
   // for that), stop, and exit when the stop is done or the deadline passes.
   let stopping = false;
   const shutdown = async (signal: string) => {
-    if (stopping) return;
+    if (stopping) {
+      // Asked twice: the person at the terminal wants out now.
+      console.error(`[roundhouse] received ${signal} again, exiting now`);
+      process.exit(1);
+    }
     stopping = true;
     console.log(`\n[roundhouse] received ${signal}, shutting down…`);
     lock.markStopping();

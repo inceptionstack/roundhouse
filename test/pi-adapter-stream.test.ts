@@ -27,6 +27,8 @@ const sdk = {
   appended: [] as string[],        // extra system prompt blocks at session creation
   reloads: 0,
   contextTokens: 10_000 as number | null,
+  compactThinking: [] as string[],   // thinking level seen by each compact()
+  thinkingAtPrompt: [] as string[],  // thinking level seen by each prompt()
   models: {
     "big/conv": { provider: "big", id: "conv", contextWindow: 1_000_000 },
     "small/flush": { provider: "small", id: "flush", contextWindow: 200_000 },
@@ -44,13 +46,17 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     subscribe(fn: (e: Ev) => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
     async prompt(text: string) {
       sdk.prompts.push({ text, model: `${this.model.provider}/${this.model.id}` });
+      sdk.thinkingAtPrompt.push(this.agent.state.thinkingLevel);
       for (const ev of sdk.scripts.shift() ?? [{ type: "agent_start" }, { type: "agent_end", willRetry: false }, { type: "agent_settled", aborted: false }]) {
         for (const fn of this.listeners) fn(ev);
       }
     }
     async waitForIdle() {}
     async reload() { sdk.reloads++; await this.loader?.reload(); }
-    async compact() { return { tokensBefore: 500_000, estimatedTokensAfter: 42_000, summary: "", firstKeptEntryId: "x" }; }
+    async compact() {
+      sdk.compactThinking.push(this.agent.state.thinkingLevel);
+      return { tokensBefore: 500_000, estimatedTokensAfter: 42_000, summary: "", firstKeptEntryId: "x" };
+    }
     getContextUsage() { return { tokens: sdk.contextTokens, contextWindow: this.model.contextWindow, percent: null }; }
     async abort() {}
     abortCompaction() {}
@@ -105,6 +111,7 @@ async function stream(script: Ev[], config: Record<string, unknown> = {}) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "rh-pi-"));
   sdk.scripts = []; sdk.prompts = []; sdk.appended = []; sdk.reloads = 0; sdk.contextTokens = 10_000;
+  sdk.compactThinking = []; sdk.thinkingAtPrompt = [];
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -150,7 +157,7 @@ describe("pi adapter: provider errors", () => {
     expect(out).toEqual(["text:answer", "agent_end"]);
   });
 
-  it("still reports an overflow that pi's compaction did not fix", async () => {
+  it("still reports an overflow when the retry after pi's compaction overflows again", async () => {
     const overflow = "prompt is too long: 1100000 tokens > 1000000 maximum";
     const out = await stream([
       start, failed(overflow), end(),
@@ -159,6 +166,27 @@ describe("pi adapter: provider errors", () => {
       start, failed(overflow), end(), settled,
     ]);
     expect(out).toEqual([`error:${overflow}`, "agent_end"]);
+  });
+
+  it("reports the overflow when pi's compaction itself fails (no new assistant message follows)", async () => {
+    // This is what starts roundhouse's own recovery (soft reset). Swallowing
+    // it leaves the session over the limit with nothing said.
+    const overflow = "prompt is too long: 1100000 tokens > 1000000 maximum";
+    const out = await stream([
+      start, failed(overflow), end(),
+      { type: "compaction_start", reason: "overflow" },
+      { type: "compaction_end", reason: "overflow", aborted: false, willRetry: false, errorMessage: "summary failed" },
+      settled,
+    ]);
+    expect(out).toEqual([`error:${overflow}`, "agent_end"]);
+  });
+
+  it("reports the owner's failed request before a follow-up run that succeeds", async () => {
+    const out = await stream([
+      start, failed("AccessDenied"), end(),
+      start, delta("review"), ok, end(), settled,   // queued by an extension's agent_end handler
+    ]);
+    expect(out).toEqual(["error:AccessDenied", "draining", "text:review", "drain_complete", "agent_end"]);
   });
 });
 
@@ -171,14 +199,14 @@ describe("pi adapter: still-working notices", () => {
     expect(out).toEqual(["text:done", "draining", "text:review reply", "drain_complete", "agent_end"]);
   });
 
-  it("stays quiet when the second run is pi continuing after a threshold compaction", async () => {
+  it("announces a run that follows a threshold compaction: pi only continues there for queued messages", async () => {
     const out = await stream([
       start, delta("part one"), ok, end(),
       { type: "compaction_start", reason: "threshold" },
       { type: "compaction_end", reason: "threshold", aborted: false, willRetry: false },
-      start, delta(" part two"), ok, end(), settled,
+      start, delta("follow-up"), ok, end(), settled,
     ]);
-    expect(out).toEqual(["text:part one", "text: part two", "agent_end"]);
+    expect(out).toEqual(["text:part one", "draining", "text:follow-up", "drain_complete", "agent_end"]);
   });
 });
 
@@ -206,6 +234,27 @@ describe("pi adapter: flush and compaction model", () => {
     await adapter.prompt("t", { text: "first" });
     sdk.contextTokens = null; // pi has no count until the next response
     expect(await adapter.compact("t")).toEqual({ tokensBefore: 500_000, tokensAfter: 42_000 });
+  });
+});
+
+describe("pi adapter: compaction and shutdown", () => {
+  it("switches thinking off for the summary with and without a compaction model, and restores it", async () => {
+    adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir });
+    await adapter.prompt("t", { text: "first" });
+    for (const run of [() => adapter.compact("t"), () => adapter.compactWithModel("t", "small/flush")]) {
+      sdk.compactThinking = [];
+      await run();
+      expect(sdk.compactThinking).toEqual(["off"]);
+    }
+    await adapter.prompt("t", { text: "after" });
+    expect(sdk.thinkingAtPrompt.at(-1)).toBe("high");
+  });
+
+  it("refuses to open a session after dispose(), so a queued prompt cannot start a model call during shutdown", async () => {
+    adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir });
+    await adapter.dispose();
+    await expect(adapter.prompt("t", { text: "late" })).rejects.toThrow(/shut down/);
+    expect(sdk.prompts).toEqual([]);
   });
 });
 

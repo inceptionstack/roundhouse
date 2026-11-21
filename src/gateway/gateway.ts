@@ -104,6 +104,8 @@ export class Gateway {
   private threadLocks = new Map<string, Promise<void>>();
   private abortControllers = new Map<string, AbortController>();
   private flushInProgress = new Set<string>();
+  /** Set by stop(): no new turn, flush or compaction may start. */
+  private stopping = false;
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -353,14 +355,6 @@ export class Gateway {
         `[roundhouse] ${thread.id} -> ${agentThreadId} @${authorName}: ${JSON.stringify(userText.slice(0, 120))}${rawAttachments.length ? ` +${rawAttachments.length} attachment(s)` : ""}`
       );
 
-      // An edit to an earlier message is not a new request. The Telegram
-      // adapter delivers it like one; running it would repeat whatever the
-      // original message already made the agent do.
-      if (message?.metadata?.edited === true || message?.raw?.edit_date !== undefined) {
-        console.log(`[roundhouse] ignoring an edited message in ${thread.id}`);
-        return;
-      }
-
       // Transport-specific message filtering (e.g. Telegram /start <nonce> handshake).
       if (this.transport.shouldIgnoreMessage?.(userText, message, thread)) return;
       if (!userText.trim() && !rawAttachments.length) return;
@@ -386,6 +380,18 @@ export class Gateway {
 
     // ── Wire Chat SDK events ───────────────────────
     const handleOrAbort = async (thread: any, message: any) => {
+      // The gateway is shutting down: start nothing new.
+      if (this.stopping) return;
+      // An edit to an earlier Telegram message is not a new request. The
+      // adapter delivers it like one; running it would repeat whatever the
+      // original already made the agent do, and an edit that turns a message
+      // into "/cancel" should not cancel anything. (`edit_date` is Telegram's
+      // field. Slack edits are left alone: editing a message to add the bot's
+      // mention is how some people address it.)
+      if (message?.raw?.edit_date !== undefined) {
+        console.log(`[roundhouse] ignoring an edited message in ${thread?.id}`);
+        return;
+      }
       const baseThreadId = _resolveThread(thread, message);
       // `chat.dmOnly`: the agent answers in one-to-one chats only, and
       // ignores groups, channels and topics.
@@ -598,6 +604,7 @@ export class Gateway {
     let agentMessage = result;
 
     const agent = this.router.resolve(agentThreadId);
+    if (this.stopping) return;
 
     // Serialize prompts per-thread (concurrent mode allows /cancel to bypass)
     const prevLock = threadLocks.get(agentThreadId);
@@ -605,6 +612,13 @@ export class Gateway {
     const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
     threadLocks.set(agentThreadId, lockPromise);
     if (prevLock) await prevLock;
+    // A message that waited for the turn before it must not start one now
+    // that the gateway is stopping: the agent is being shut down under it.
+    if (this.stopping) {
+      releaseLock!();
+      if (threadLocks.get(agentThreadId) === lockPromise) threadLocks.delete(agentThreadId);
+      return;
+    }
 
     let stopTyping: (() => void) | null = null;
     let deferredSoftFlush: { thread: any; agentThreadId: string; agent: AgentAdapter; memoryRoot: string } | undefined;
@@ -879,7 +893,7 @@ export class Gateway {
    * Hard/emergency: runs INSIDE the thread lock (memory state invariants).
    */
   private async handleContextPressure(thread: any, agentThreadId: string, agent: AgentAdapter, memoryRoot: string, pressure: PressureLevel) {
-    if (pressure === "none") return;
+    if (pressure === "none" || this.stopping) return;
 
     if (pressure === "soft") {
       // Soft: prompt agent to save facts, no compact
@@ -1335,6 +1349,7 @@ export class Gateway {
       }
     };
 
+    this.stopping = true;
     if (this.subagentWatcher) {
       this.subagentWatcher.stop();
     }

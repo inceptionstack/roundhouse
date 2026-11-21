@@ -94,7 +94,6 @@ async function cmdRun() {
   // manager saw its job end, and the real gateway could live on as an orphan
   // next to the freshly started one. TypeScript loading is already set up by
   // whatever started this file (bin/roundhouse.mjs registers tsx).
-  process.env.NODE_NO_WARNINGS ??= "1";
   await import((await fileExists(jsPath)) ? jsPath : indexPath);
 }
 

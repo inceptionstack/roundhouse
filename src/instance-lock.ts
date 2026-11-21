@@ -11,7 +11,8 @@
  * recycled pid is not mistaken for it) and whether it is running or stopping.
  */
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { ROUNDHOUSE_DIR } from "./config";
 import { readSpawnClockTicks, isProcessAlive } from "./subagents/pid";
@@ -49,7 +50,7 @@ export interface AcquireOptions {
 
 export class GatewayAlreadyRunningError extends Error {
   constructor(readonly pid: number) {
-    super(`Another roundhouse gateway is running (pid ${pid}). Stop it first: roundhouse stop`);
+    super(`Another roundhouse gateway is running (pid ${pid}). Stop it first: "roundhouse stop" for the service, Ctrl+C for one started in a terminal.`);
     this.name = "GatewayAlreadyRunningError";
   }
 }
@@ -64,11 +65,83 @@ function read(path: string): LockRecord | null {
   return null;
 }
 
-function write(path: string, rec: LockRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+/** Replace the lock's content. Only the holder calls this (state changes). */
+function rewrite(path: string, rec: LockRecord): void {
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(rec) + "\n", { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+/**
+ * Create the lock file if, and only if, none exists. The record is written to
+ * a private file first and then hard-linked into place: the link either fails
+ * because a lock exists or makes a complete lock appear at once. (Creating
+ * the file and then writing to it would let another starter see it empty,
+ * take it for garbage and remove it.)
+ */
+function createExclusive(path: string, rec: LockRecord): boolean {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.${process.pid}.new`;
+  writeFileSync(tmp, JSON.stringify(rec) + "\n", { mode: 0o600 });
+  try {
+    linkSync(tmp, path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  } finally {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
+/** A takeover claim older than this was left by a process that died holding it. */
+const TAKEOVER_ABANDONED_MS = 10_000;
+
+/**
+ * Remove a dead holder's lock, if it is still that lock.
+ *
+ * Several starters can judge the same lock stale at once, and one of them may
+ * already have removed it and created its own by the time another acts. So
+ * removal happens under a second, short-lived claim file: whoever holds it
+ * looks again and removes the lock only if it is still the record that was
+ * judged stale (`expected`; null for an unreadable file). While a lock file
+ * exists nobody can create another, so what the holder of the claim sees
+ * cannot change under it. Returns false if the claim was busy; the caller
+ * simply looks again.
+ */
+function clearStale(path: string, expected: LockRecord | null): boolean {
+  const claim = `${path}.takeover`;
+  try {
+    if (Date.now() - statSync(claim).mtimeMs > TAKEOVER_ABANDONED_MS) unlinkSync(claim);
+  } catch { /* no claim file */ }
+
+  const tmp = `${claim}.${process.pid}`;
+  writeFileSync(tmp, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    linkSync(tmp, claim);
+  } catch {
+    return false; // another starter is clearing it right now
+  } finally {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+  }
+
+  try {
+    const now = read(path);
+    const stillTheStaleOne = expected === null
+      ? now === null
+      : now !== null && now.pid === expected.pid && now.started === expected.started && now.since === expected.since;
+    if (stillTheStaleOne) {
+      try { unlinkSync(path); } catch { /* already gone */ }
+    }
+    return true;
+  } finally {
+    try { unlinkSync(claim); } catch { /* best effort */ }
+  }
+}
+
+/** Whether `pid` exists at all, whatever its start marker says. */
+function pidExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -86,19 +159,52 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export async function acquireInstanceLock(opts: AcquireOptions = {}): Promise<InstanceLock> {
   const path = opts.path ?? INSTANCE_LOCK_PATH;
   const log = opts.log ?? ((m: string) => console.log(`[roundhouse] ${m}`));
-  const alive = opts.isAlive ?? isProcessAlive;
   const kill = opts.kill ?? ((pid: number) => process.kill(pid, "SIGKILL"));
   const poll = opts.pollMs ?? 250;
-  const self = opts.self ?? { pid: process.pid, started: await readSpawnClockTicks(process.pid) };
+  // Our own start marker. If it cannot be read (no `ps`, no /proc) the lock
+  // still works on pid alone.
+  const self = opts.self ?? { pid: process.pid, started: await readSpawnClockTicks(process.pid).catch(() => "") };
+
+  /**
+   * Is the recorded holder still that process? Errs towards "alive": taking
+   * over a gateway that is in fact running is the failure this file exists to
+   * prevent, while waiting on a dead one only delays a start.
+   */
+  const alive = opts.isAlive ?? (async (pid: number, started: string): Promise<boolean> => {
+    if (!pidExists(pid)) return false;
+    if (!started) return true;                       // holder had no marker: pid is all we have
+    if (await isProcessAlive(pid, started)) return true;
+    // The pid exists but the marker did not match, or could not be read.
+    const now = await readSpawnClockTicks(pid).catch(() => undefined);
+    return now === undefined ? true : now === started;
+  });
+  /** A lock written before this machine booted cannot belong to a live process. */
+  const predatesBoot = (rec: LockRecord): boolean => {
+    const since = Date.parse(rec.since);
+    return Number.isFinite(since) && since < Date.now() - uptime() * 1000 - 60_000;
+  };
 
   const start = Date.now();
   const runningGrace = opts.runningGraceMs ?? 3_000;
   const stoppingWait = opts.stoppingWaitMs ?? 15_000;
   let announced = false;
+  const mine: LockRecord = { pid: self.pid, started: self.started, state: "running", since: new Date().toISOString() };
 
   for (;;) {
     const holder = read(path);
-    if (!holder || holder.pid === self.pid || !(await alive(holder.pid, holder.started))) break;
+    const present = holder !== null || existsSync(path);
+    const held = holder !== null && holder.pid !== self.pid && !predatesBoot(holder) && (await alive(holder.pid, holder.started));
+
+    if (!held) {
+      // Free, stale, unreadable, or our own leftover: clear what is there,
+      // then create. Both steps are safe against another starter.
+      if (present && !clearStale(path, holder)) {
+        await sleep(Math.min(poll, 25));
+        continue;
+      }
+      if (createExclusive(path, mine)) break;
+      continue; // someone else created it in between: look again
+    }
 
     const waited = Date.now() - start;
     if (holder.state === "running") {
@@ -108,7 +214,7 @@ export async function acquireInstanceLock(opts: AcquireOptions = {}): Promise<In
       try { kill(holder.pid); } catch { /* already gone */ }
       await sleep(Math.min(poll, 500));
       if (await alive(holder.pid, holder.started)) throw new GatewayAlreadyRunningError(holder.pid);
-      break;
+      continue; // it is gone now: the next pass clears its lock and creates ours
     }
     if (!announced) {
       announced = true;
@@ -117,16 +223,13 @@ export async function acquireInstanceLock(opts: AcquireOptions = {}): Promise<In
     await sleep(poll);
   }
 
-  const mine: LockRecord = { pid: self.pid, started: self.started, state: "running", since: new Date().toISOString() };
-  write(path, mine);
-
   const holdsLock = () => {
     const rec = read(path);
     return !!rec && rec.pid === self.pid && rec.started === self.started;
   };
   return {
     markStopping() {
-      try { if (holdsLock()) write(path, { ...mine, state: "stopping", since: new Date().toISOString() }); } catch { /* best effort */ }
+      try { if (holdsLock()) rewrite(path, { ...mine, state: "stopping", since: mine.since }); } catch { /* best effort */ }
     },
     release() {
       try { if (holdsLock()) unlinkSync(path); } catch { /* best effort */ }

@@ -132,6 +132,23 @@ describe("classifyContextPressure", () => {
       .toBe("hard");
   });
 
+  it("ignores settings that make no sense instead of obeying them", () => {
+    const sane = contextThresholds(1_000_000);
+    // 60 meant as a percentage, zero, negative, NaN and strings fall back to the defaults.
+    for (const bad of [60, 0, -0.5, Number.NaN, "0.6" as unknown as number]) {
+      expect(contextThresholds(1_000_000, { hardPercent: bad, softPercent: bad })).toEqual(sane);
+      expect(contextThresholds(1_000_000, { hardTokens: bad === 60 ? 0 : bad, softTokens: 0 })).toEqual(sane);
+    }
+    // A zero threshold would compact on every turn.
+    expect(classifyContextPressure({ contextTokens: 5_000, contextWindow: 1_000_000, contextPercent: 0 }, { hardTokens: 0, hardPercent: 0 }))
+      .toBe("none");
+  });
+
+  it("keeps soft in proportion when only hard is capped", () => {
+    // Not one token below hard: the reminder to save memory needs room to act.
+    expect(contextThresholds(1_000_000, { hardTokens: 300_000 })).toMatchObject({ soft: 225_000, hard: 300_000 });
+  });
+
   it("applies per-model overrides to that model only", () => {
     const config = { models: { "bedrock/big": { hardTokens: 300_000 } } };
     const at = (model: string) =>
