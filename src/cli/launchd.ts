@@ -38,7 +38,14 @@ export function generatePlist(): string {
   let envSection = "";
   const envVars: Record<string, string> = {
     HOME: homedir(),
-    PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+    // The service keeps this PATH for its whole life and the agent's shell
+    // inherits it. Drop the cwd-relative `node_modules/.bin` entries that
+    // npm/npx prepend to the installing shell: they point at whatever
+    // directory the install happened to run from.
+    PATH: (process.env.PATH || "/usr/local/bin:/usr/bin:/bin")
+      .split(":")
+      .filter((dir) => dir && !dir.includes("/node_modules/"))
+      .join(":") || "/usr/local/bin:/usr/bin:/bin",
     ROUNDHOUSE_CONFIG: resolve(ROUNDHOUSE_DIR, "gateway.config.json"),
     NODE_NO_WARNINGS: "1",
   };

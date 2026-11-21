@@ -26,6 +26,18 @@ describe("launchd", () => {
     expect(plist).not.toMatch(/<string>[^<]*<[^/][^<]*<\/string>/);
   });
 
+  it("keeps npm-injected node_modules/.bin directories out of the service PATH", () => {
+    const saved = process.env.PATH;
+    process.env.PATH = "/work/project/node_modules/.bin:/work/node_modules/.bin:/opt/homebrew/bin:/usr/bin";
+    try {
+      const plist = generatePlist();
+      const path = plist.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+      expect(path).toBe("/opt/homebrew/bin:/usr/bin");
+    } finally {
+      process.env.PATH = saved;
+    }
+  });
+
   it("sets ThrottleInterval to prevent rapid restarts", () => {
     const plist = generatePlist();
     expect(plist).toContain("<key>ThrottleInterval</key>");
