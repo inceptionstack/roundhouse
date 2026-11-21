@@ -364,7 +364,9 @@ describe("TelegramAdapter.handlePairing", () => {
     };
     const message = {
       text: `/start ${nonce}`,
-      author: { name: "alice", userId: 789 },
+      // What @chat-adapter/telegram delivers: the SDK author plus Telegram's raw payload.
+      author: { userName: "alice", userId: 789 },
+      raw: { from: { id: 789, username: "alice" } },
       chatId: 123456,
     };
     const result = await adapter.handlePairing(thread, message);
@@ -394,10 +396,32 @@ describe("TelegramAdapter.handlePairing", () => {
     };
     const message = {
       text: `/start ${nonce}`,
-      author: { name: "Alice", userId: 456 },
+      author: { userName: "Alice", userId: 456 },
+      raw: { from: { id: 456, username: "Alice" } },
       chatId: 123,
     };
     const result = await adapter.handlePairing(thread, message);
     expect(result!.username).toBe("Alice");
+  });
+
+  it("SECURITY: handlePairing rejects the right nonce from an account whose first name is the allowed username", async () => {
+    const { writePendingPairing, readPendingPairing } = await import("../src/transports/telegram/pairing");
+    const { TelegramAdapter } = await import("../src/transports/telegram/telegram-adapter");
+    const nonce = "rh-spoofed-name";
+    await writePendingPairing({
+      version: 1, nonce, botUsername: "bot", allowedUsers: ["alice"],
+      createdAt: new Date().toISOString(), status: "pending",
+    });
+    const adapter = new TelegramAdapter();
+    const thread = { id: "telegram:666", post: async () => {}, adapter: { telegramFetch: async () => {} } };
+    // No @username: the SDK reports first_name as userName.
+    const message = {
+      text: `/start ${nonce}`,
+      author: { userName: "alice", userId: 666 },
+      raw: { from: { id: 666, first_name: "alice" } },
+      chatId: 666,
+    };
+    expect(await adapter.handlePairing(thread as any, message as any)).toBe(null);
+    expect((await readPendingPairing())?.status).toBe("pending");
   });
 });

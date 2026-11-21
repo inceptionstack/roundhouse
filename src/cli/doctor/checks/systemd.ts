@@ -3,6 +3,9 @@
  */
 
 import type { DoctorCheck } from "../types";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { run, runLoose } from "../shell";
 
 /** Redact known secret patterns from log lines */
@@ -70,6 +73,70 @@ export const systemdChecks: DoctorCheck[] = [
         id: "systemd-errors", category: "systemd", name: "Recent errors",
         status: "warn", summary: `${lines.length} error(s) in last hour`,
         details: lines.slice(0, 5).map(redactSecrets),
+      };
+    },
+  },
+];
+
+// ── macOS: the same three questions, asked of launchd ─────────────────────
+
+const LAUNCHD_LABEL = "com.inceptionstack.roundhouse";
+
+export const launchdChecks: DoctorCheck[] = [
+  {
+    id: "systemd-unit", category: "systemd", name: "Service (LaunchAgent)",
+    async run() {
+      const plist = join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+      const installed = existsSync(plist);
+      return {
+        id: "systemd-unit", category: "systemd", name: "Service (LaunchAgent)",
+        status: installed ? "pass" : "warn",
+        summary: installed ? "installed" : "not installed",
+        details: installed ? undefined : ["Run: roundhouse install"],
+      };
+    },
+  },
+
+  {
+    id: "systemd-active", category: "systemd", name: "Service status",
+    async run() {
+      const out = await run("launchctl", ["list", LAUNCHD_LABEL]);
+      if (out === null) {
+        return { id: "systemd-active", category: "systemd", name: "Service status", status: "info", summary: "not loaded" };
+      }
+      const pid = out.match(/"PID"\s*=\s*(\d+)/)?.[1];
+      const lastExit = out.match(/"LastExitStatus"\s*=\s*(-?\d+)/)?.[1];
+      if (pid) {
+        return { id: "systemd-active", category: "systemd", name: "Service status", status: "pass", summary: `running (pid ${pid})` };
+      }
+      return {
+        id: "systemd-active", category: "systemd", name: "Service status",
+        status: "warn", summary: "loaded but not running",
+        details: [`Last exit status: ${lastExit ?? "unknown"}. Check: roundhouse logs`],
+      };
+    },
+  },
+
+  {
+    id: "systemd-errors", category: "systemd", name: "Recent errors",
+    async run() {
+      const errLog = join(homedir(), ".roundhouse", "logs", "roundhouse.err");
+      let stat;
+      try { stat = statSync(errLog); } catch {
+        return { id: "systemd-errors", category: "systemd", name: "Recent errors", status: "info", summary: "no error log yet" };
+      }
+      if (Date.now() - stat.mtimeMs > 60 * 60 * 1000) {
+        return { id: "systemd-errors", category: "systemd", name: "Recent errors", status: "pass", summary: "none in last hour" };
+      }
+      // The file is the service's stderr, which also carries ordinary
+      // warnings; report only lines that look like failures.
+      const tail = await run("tail", ["-n", "200", errLog]);
+      const lines = (tail ?? "").split("\n").filter((l) => /error|fatal|uncaught|unhandled|EADDR|ECONN/i.test(l));
+      return {
+        id: "systemd-errors", category: "systemd", name: "Recent errors",
+        status: lines.length ? "warn" : "pass",
+        summary: lines.length ? `${lines.length} error line(s) in the recent log` : "none in last hour",
+        details: lines.length ? lines.slice(-5).map(redactSecrets) : undefined,
       };
     },
   },

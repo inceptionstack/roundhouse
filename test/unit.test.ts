@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitMessage, isAllowed, threadIdToDir } from "../src/util";
+import { splitMessage, isAllowed, verifiedHandle, threadIdToDir } from "../src/util";
 
 // ─────────────────────────────────────────────────────
 // splitMessage
@@ -73,26 +73,56 @@ describe("splitMessage", () => {
 // ─────────────────────────────────────────────────────
 
 describe("isAllowed", () => {
-  it("allows all when allowlist is empty", () => {
-    expect(isAllowed({ author: { userName: "anyone" } }, [])).toBe(true);
+  // Telegram-shaped raw payloads: what @chat-adapter/telegram hands us.
+  const tg = (from: { id: number; username?: string; first_name?: string }) => ({
+    author: {
+      userId: String(from.id),
+      // Mirrors the adapter: username ?? first_name ?? id
+      userName: from.username ?? from.first_name ?? String(from.id),
+      fullName: from.first_name ?? "",
+    },
+    raw: { from, chat: { id: from.id, type: "private" } },
   });
 
-  it("allows matching userName", () => {
-    expect(
-      isAllowed({ author: { userName: "alice" } }, ["alice"])
-    ).toBe(true);
+  it("denies everyone when the allowlist is empty (fail closed)", () => {
+    expect(isAllowed({ author: { userName: "anyone" } }, [])).toBe(false);
+    expect(isAllowed({ author: { userName: "anyone", userId: "1" } }, [], [])).toBe(false);
   });
 
-  it("allows matching userId", () => {
+  it("allows everyone on an empty allowlist only with an explicit allowAll", () => {
+    expect(isAllowed({ author: { userName: "anyone" } }, [], [], { allowAll: true })).toBe(true);
+  });
+
+  it("allowAll does not widen a configured allowlist", () => {
+    expect(isAllowed({ author: { userName: "hacker" } }, ["alice"], [], { allowAll: true })).toBe(false);
+    expect(isAllowed({ author: { userId: "999" } }, [], [12345], { allowAll: true })).toBe(false);
+  });
+
+  it("allows a Telegram user by real @username", () => {
+    expect(isAllowed(tg({ id: 1, username: "alice" }), ["alice"])).toBe(true);
+  });
+
+  it("allows a platform id listed in allowedUsers (legacy configs)", () => {
     expect(
       isAllowed({ author: { userId: "12345" } }, ["12345"])
     ).toBe(true);
   });
 
-  it("is case-insensitive on userName", () => {
-    expect(
-      isAllowed({ author: { userName: "Alice" } }, ["alice"])
-    ).toBe(true);
+  it("is case-insensitive on the username, on both sides, and ignores a leading @", () => {
+    expect(isAllowed(tg({ id: 1, username: "Alice" }), ["alice"])).toBe(true);
+    expect(isAllowed(tg({ id: 1, username: "alice" }), ["@Alice"])).toBe(true);
+  });
+
+  it("SECURITY: a name with no verifiable source never matches (unknown payload, or Slack display name)", () => {
+    // No raw payload at all: nothing proves where "alice" came from.
+    expect(isAllowed({ author: { userName: "alice" } }, ["alice"])).toBe(false);
+    // Slack: userName is the display name, which any member can set.
+    const slack = { threadId: "slack:D0ABC:1711.0001", author: { userId: "U0ATTACKER", userName: "alice" }, raw: { type: "message", user: "U0ATTACKER" } };
+    expect(verifiedHandle(slack)).toBeUndefined();
+    expect(isAllowed(slack, ["alice"])).toBe(false);
+    expect(isAllowed(slack, ["alice"], ["U0ATTACKER"])).toBe(true); // by id it does
+    // A Telegram-looking payload on a non-Telegram thread is not trusted either.
+    expect(isAllowed({ threadId: "slack:D0ABC:1", author: { userName: "alice" }, raw: { from: { id: 1, username: "alice" } } }, ["alice"])).toBe(false);
   });
 
   it("blocks when userName does not match", () => {
@@ -117,6 +147,34 @@ describe("isAllowed", () => {
 
   it("blocks messages with empty author", () => {
     expect(isAllowed({ author: {} }, ["alice"])).toBe(false);
+  });
+
+  // ── Telegram: the SDK's userName falls back to first_name ──
+
+  it("allows a Telegram user whose real @username is allowlisted", () => {
+    expect(isAllowed(tg({ id: 111, username: "Alice", first_name: "Al" }), ["alice"])).toBe(true);
+  });
+
+  it("SECURITY: a Telegram account with no @username cannot pass by setting its first name to the owner's username", () => {
+    const spoof = tg({ id: 666, first_name: "alice" });
+    expect(spoof.author.userName).toBe("alice"); // what the SDK reports
+    expect(verifiedHandle(spoof)).toBeUndefined();
+    expect(isAllowed(spoof, ["alice"])).toBe(false);
+  });
+
+  it("SECURITY: a Telegram channel or anonymous-admin post titled like the owner's username is denied", () => {
+    const channelPost = {
+      author: { userId: "chat:-100123", userName: "alice", fullName: "alice" },
+      raw: { sender_chat: { id: -100123, title: "alice" }, chat: { id: -100123, type: "channel" } },
+    };
+    expect(isAllowed(channelPost, ["alice"])).toBe(false);
+  });
+
+  it("SECURITY: once ids are paired, a matching username no longer grants access", () => {
+    // The owner renamed; someone else registered the old handle.
+    const squatter = tg({ id: 222, username: "alice" });
+    expect(isAllowed(squatter, ["alice"], [111])).toBe(false);
+    expect(isAllowed(tg({ id: 111, username: "renamed" }), ["alice"], [111])).toBe(true);
   });
 
   // ── Multi-transport allowlist (Phase 1: widened to (string | number)[]) ──

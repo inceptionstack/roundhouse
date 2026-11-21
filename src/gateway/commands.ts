@@ -69,6 +69,13 @@ export async function handleUpdate(ctx: CommandContext): Promise<void> {
     await thread.post("⚠️ /update requires an allowlist to be configured.");
     return;
   }
+  // /update replaces the running code with whatever npm publishes as latest
+  // and re-runs the provisioning bundle on the host. Hosts that run a pinned
+  // or reviewed copy turn it off with chat.allowUpdateCommand=false.
+  if (ctx.config.chat.allowUpdateCommand === false) {
+    await thread.post("⚠️ /update is disabled on this host (chat.allowUpdateCommand=false). Update it from the machine itself.");
+    return;
+  }
   // Seed .last-version with current version BEFORE update, so new code detects the change on restart
   try {
     const { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } = await import("../config");
@@ -235,8 +242,14 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
     `📢 Verbose: ${verboseThreads.has(agentThreadId) ? "on" : "off"}`,
   );
 
-  const allowedCount = allowedUsers.length;
-  lines.push(`🔐 Allowed users: ${allowedCount === 0 ? "all (no allowlist)" : allowedCount}`);
+  // Paired ids are what authorize; usernames only count before pairing.
+  const idCount = ctx.allowedUserIds.length;
+  const access = idCount > 0
+    ? `${idCount} paired id${idCount === 1 ? "" : "s"}`
+    : allowedUsers.length > 0
+      ? `${allowedUsers.length} username${allowedUsers.length === 1 ? "" : "s"} (not paired yet)`
+      : config.chat.allowAll === true ? "everyone (chat.allowAll)" : "nobody (no allowlist)";
+  lines.push(`🔐 Allowed users: ${access}`);
 
   const sys = getSystemResources();
   lines.push(``);

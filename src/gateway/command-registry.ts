@@ -16,10 +16,10 @@
  * gateway is still the composition root, it just stops special-casing.
  *
  * Stages:
- *   - "pre-turn"  fires before the allowlist/pairing gate inside
- *                 handleOrAbort(). Used for abort-style commands like
- *                 /stop that must interrupt an in-flight agent run.
- *                 Handlers own their own allowlist check if needed.
+ *   - "pre-turn"  fires first inside handleOrAbort(), ahead of the
+ *                 per-thread lock. Used for abort-style commands like
+ *                 /cancel that must interrupt an in-flight agent run.
+ *                 The gateway checks the allowlist before invoking one.
  *   - "in-turn"   fires inside the main message handler, after pairing,
  *                 allowlist, and the "is this even text" guards. The
  *                 default — most commands belong here.

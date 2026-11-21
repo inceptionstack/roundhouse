@@ -4,7 +4,7 @@ export type SubAgentRole = "review" | "research" | "scout" | "implementation";
 export type TerminalStatus = Exclude<RunStatus["status"], "running">;
 
 export interface RoutingInfo {
-  transport: "telegram";
+  transport: "telegram" | "slack";
   chatId: string;
   topicId?: string;
   parentThreadId: string;

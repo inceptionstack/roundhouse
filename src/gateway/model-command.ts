@@ -43,6 +43,73 @@ const KEYBOARD_MODELS = [
   "deepseek", "llama", "nova-pro", "mistral",
 ] as const;
 
+type ModelChoice = { provider: string; model: string; label: string };
+
+/** pi's thinking-level suffix on an enabledModels entry, e.g. "…sonnet-4-5:high". */
+const THINKING_SUFFIX = /:(off|minimal|low|medium|high|xhigh|max)$/i;
+/** Telegram allows 64 bytes of callback data, which also carries the action id. */
+const MAX_CALLBACK_VALUE_BYTES = 32;
+
+/**
+ * The models to offer: what pi itself is set up with on this host.
+ *
+ * pi's `enabledModels` setting lists the models the owner enabled as
+ * `provider/model-id`, optionally with a `:thinking-level` suffix. When it has
+ * usable entries they replace the built-in aliases above, which name specific
+ * Bedrock model ids and go stale; picking a retired one would break pi for the
+ * gateway and for the pi CLI, since both read the same settings.json.
+ * Glob patterns and entries without a provider are skipped.
+ *
+ * Alias: the model id without a vendor path ("us.anthropic.claude-opus-5-5"
+ * -> "opus-5-5") but with dotted versions kept ("gpt-5.1" stays "gpt-5.1").
+ * Two entries that would share an alias get "provider/alias".
+ */
+export function modelChoices(settings: Record<string, any>): { aliases: Record<string, ModelChoice>; order: string[] } {
+  const enabled = Array.isArray(settings.enabledModels) ? settings.enabledModels : [];
+  const aliases: Record<string, ModelChoice> = Object.create(null);
+  const order: string[] = [];
+  for (const entry of enabled) {
+    if (typeof entry !== "string" || /[*?[\]{}!]/.test(entry)) continue;
+    const slash = entry.indexOf("/");
+    if (slash <= 0 || slash === entry.length - 1) continue;
+    const provider = entry.slice(0, slash);
+    const model = entry.slice(slash + 1).replace(THINKING_SUFFIX, "");
+    if (!model) continue;
+    // A dot separates a vendor path only when what follows is a name, not the
+    // minor part of a version number.
+    const lastDot = model.lastIndexOf(".");
+    const tail = lastDot >= 0 && /^[A-Za-z]/.test(model.slice(lastDot + 1)) ? model.slice(lastDot + 1) : model;
+    let alias = tail.replace(/^claude-/, "").toLowerCase();
+    if (!alias) continue;
+    if (alias in aliases) {
+      if (aliases[alias].provider === provider && aliases[alias].model === model) continue;
+      alias = `${provider.toLowerCase()}/${alias}`;
+      if (alias in aliases) continue;
+    }
+    aliases[alias] = { provider, model, label: tail };
+    order.push(alias);
+  }
+  if (order.length > 0) return { aliases, order: order.slice(0, 8) };
+  for (const key of Object.keys(MODEL_ALIASES)) aliases[key] = MODEL_ALIASES[key];
+  return { aliases, order: [...KEYBOARD_MODELS] };
+}
+
+/**
+ * The value a menu button carries: the alias, or "#<position>" when the alias
+ * would not fit in Telegram's callback data (one oversized button makes
+ * Telegram reject the whole keyboard).
+ */
+export function callbackValue(alias: string, index: number): string {
+  return Buffer.byteLength(alias, "utf8") <= MAX_CALLBACK_VALUE_BYTES ? alias : `#${index}`;
+}
+
+/** Reverse of `callbackValue`. Returns undefined for anything not on the menu. */
+export function aliasFromCallback(value: string, choices: { aliases: Record<string, ModelChoice>; order: string[] }): string | undefined {
+  const byIndex = /^#(\d+)$/.exec(value);
+  if (byIndex) return choices.order[Number(byIndex[1])];
+  return Object.hasOwn(choices.aliases, value) ? value : undefined;
+}
+
 /** Action ID for model selection callbacks */
 export const MODEL_ACTION_ID = "model_select";
 
@@ -68,7 +135,7 @@ function writeSettings(settings: Record<string, any>): void {
 function getCurrentModelLabel(settings: Record<string, any>): string {
   const provider = settings.defaultProvider ?? "unknown";
   const model = settings.defaultModel ?? "unknown";
-  for (const [, info] of Object.entries(MODEL_ALIASES)) {
+  for (const info of Object.values(modelChoices(settings).aliases)) {
     if (info.provider === provider && info.model === model) return info.label;
   }
   return String(model);
@@ -78,38 +145,43 @@ function getCurrentModelLabel(settings: Record<string, any>): string {
  * Build the /model menu as a transport-neutral RichResponse.
  * Delegates to the shared `buildSelectableMenu` picker helper.
  */
-function buildModelMenu(currentLabel: string): RichResponse {
+function buildModelMenu(currentLabel: string, settings: Record<string, any>): RichResponse {
+  const { aliases, order } = modelChoices(settings);
   // Map our label-based "current" semantics into the helper's key-based
   // semantics by finding the alias whose label matches.
   // TODO: introduce getCurrentModelAlias() upstream so the round-trip
   // (alias → label → alias) goes away. With 8 models the O(n) lookup is
   // negligible; the smell is purely about clarity.
-  const currentAlias = KEYBOARD_MODELS.find(
-    (alias) => MODEL_ALIASES[alias].label === currentLabel,
+  const currentAlias = order.find(
+    (alias) => aliases[alias].label === currentLabel,
   );
 
   return buildSelectableMenu({
-    current: currentAlias,
-    options: KEYBOARD_MODELS.map((alias) => ({
-      key: alias,
-      label: MODEL_ALIASES[alias].label,
+    current: currentAlias === undefined ? undefined : callbackValue(currentAlias, order.indexOf(currentAlias)),
+    options: order.map((alias, index) => ({
+      key: callbackValue(alias, index),
+      label: aliases[alias].label,
     })),
     actionId: MODEL_ACTION_ID,
     textHeader: `\ud83e\udd16 *Current model:* ${currentLabel}`,
-    textHint: "_Usage:_ `/model sonnet`",
+    textHint: `_Usage:_ \`/model ${order[0] ?? "sonnet"}\``,
     columns: 2,
   });
 }
 
 export async function handleModel(ctx: ModelCommandContext): Promise<RichResponse> {
   const parts = ctx.text.split(/\s+/).slice(1);
-  const target = parts[0]?.toLowerCase();
+  // Aliases are lower case; a raw "provider/Model-ID" keeps its own case.
+  const typed = parts[0];
+  const target = typed && (typed.includes("/") || typed.includes(".")) && !Object.hasOwn(modelChoices(readSettings()).aliases, typed.toLowerCase())
+    ? typed
+    : typed?.toLowerCase();
 
   const settings = readSettings();
 
   // No argument: show menu (current model + clickable list).
   if (!target) {
-    return buildModelMenu(getCurrentModelLabel(settings));
+    return buildModelMenu(getCurrentModelLabel(settings), settings);
   }
 
   return applyModelSelection(target, settings);
@@ -125,17 +197,24 @@ export function applyModelSelection(
 ): RichResponse {
   if (!settings) settings = readSettings();
 
-  const resolved = MODEL_ALIASES[target];
+  // Own keys only: "constructor" or "__proto__" must not resolve to something
+  // inherited and write an undefined model into pi's settings.
+  const { aliases: known } = modelChoices(settings);
+  const resolved = Object.hasOwn(known, target) ? known[target] : undefined;
   if (!resolved) {
     if (target.includes(".") || target.includes("/")) {
-      // Treat as a raw provider/model id passthrough.
-      const provider = settings.defaultProvider ?? "amazon-bedrock";
-      settings.defaultModel = target;
+      // Raw id passthrough: "provider/model-id", or a bare model id on the
+      // current provider.
+      const slash = target.indexOf("/");
+      const provider = slash > 0 ? target.slice(0, slash) : (settings.defaultProvider ?? "amazon-bedrock");
+      const model = slash > 0 ? target.slice(slash + 1) : target;
+      if (!model) return { text: `\u274c Unknown model: \`${target}\`` };
+      settings.defaultModel = model;
       settings.defaultProvider = provider;
       writeSettings(settings);
-      return { text: `\u2705 Model set to: \`${provider}/${target}\`` };
+      return { text: `\u2705 Model set to: \`${provider}/${model}\`` };
     }
-    const aliases = Object.keys(MODEL_ALIASES).join(", ");
+    const aliases = Object.keys(known).join(", ");
     return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
   }
 
@@ -152,7 +231,9 @@ export function applyModelSelection(
  * Wired from the descriptor's `actions[MODEL_ACTION_ID]`.
  */
 export function handleModelAction(event: { value?: string }): RichResponse | void {
-  const alias = event.value;
-  if (!alias || !MODEL_ALIASES[alias]) return;
-  return applyModelSelection(alias, null);
+  if (!event.value) return;
+  const settings = readSettings();
+  const alias = aliasFromCallback(event.value, modelChoices(settings));
+  if (!alias) return;
+  return applyModelSelection(alias, settings);
 }

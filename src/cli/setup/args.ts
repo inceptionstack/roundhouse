@@ -74,6 +74,13 @@ export function parseSetupArgs(argv: string[]): SetupOptions {
   if (!opts.slackAppToken) opts.slackAppToken = process.env.SLACK_APP_TOKEN ?? "";
   if (!opts.slackSigningSecret) opts.slackSigningSecret = process.env.SLACK_SIGNING_SECRET ?? "";
 
+  // A token passed as a flag is readable by every local user in the process
+  // list for as long as setup runs, and stays in shell history.
+  if (!opts.nonInteractive && argv.some((a) => a === "--bot-token" || a.startsWith("--slack-") && a.endsWith("-token"))) {
+    console.warn("⚠️  A token passed as a flag is visible in the process list and saved in shell history.");
+    console.warn("   Prefer the prompt (omit the flag) or the environment variable, and consider revoking this token.\n");
+  }
+
   // Non-interactive: warn about secrets in argv (visible in process listings)
   if (opts.nonInteractive && argv.some((a) => a === "--bot-token")) {
     throw new Error(

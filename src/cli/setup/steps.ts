@@ -148,7 +148,7 @@ export async function stepStopGateway(logger: StepLog): Promise<void> {
 
   if (platform() === "darwin") {
     try {
-      const { isLaunchAgentRunning, PLIST_PATH } = await import("../launchd.ts");
+      const { isLaunchAgentRunning, PLIST_PATH } = await import("../launchd");
       if (isLaunchAgentRunning()) {
         logger.log("   Stopping existing LaunchAgent...");
         execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
@@ -396,7 +396,7 @@ export async function stepConfigure(
   const existingUsers: string[] = gatewayConfig.chat?.allowedUsers ?? [];
   const existingUserIds: number[] = gatewayConfig.chat?.allowedUserIds ?? [];
   // Preserve both numeric IDs (Telegram) and string IDs (Slack: D.../C...)
-  const existingNotifyIds: (number | string)[] = (gatewayConfig.chat?.notifyChatIds ?? []).map((id) => {
+  const existingNotifyIds: (number | string)[] = (gatewayConfig.chat?.notifyChatIds ?? []).map((id: string | number) => {
     const num = Number(id);
     return !isNaN(num) ? num : id;
   });
@@ -472,10 +472,18 @@ export async function stepConfigure(
     }
   }
 
-  // Preserve existing Slack and other adapter credentials
+  // Keep every key this step does not write itself (Slack tokens,
+  // TAVILY_API_KEY, ROUNDHOUSE_DEBUG_STREAM, anything added by hand).
+  // parseEnvFile returns the value as written, quotes included, so it goes
+  // back unchanged: quoting it again would corrupt it.
+  // With --psst these three live in the vault: an earlier plain-text run must
+  // not leave them behind in the file (ALLOWED_USERS would also keep
+  // overriding the config).
+  const vaulted = opts.psst ? new Set(["TELEGRAM_BOT_TOKEN", "BOT_USERNAME", "ALLOWED_USERS"]) : new Set<string>();
   for (const [key, value] of existingEnv) {
-    if (key.startsWith("SLACK_") && !envLines.some((l) => l.startsWith(key + "="))) {
-      envLines.push(`${key}=${envQuote(value)}`);
+    if (vaulted.has(key)) continue;
+    if (!envLines.some((l) => l.startsWith(key + "="))) {
+      envLines.push(`${key}=${value}`);
     }
   }
 
@@ -545,7 +553,7 @@ export async function stepInstallSystemd(logger: StepLog, opts: SetupOptions): P
 
   if (platform() === "darwin") {
     try {
-      const { installLaunchAgent } = await import("../launchd.ts");
+      const { installLaunchAgent } = await import("../launchd");
       await installLaunchAgent();
       logger.ok("LaunchAgent installed and loaded");
       logger.log("   Logs: ~/.roundhouse/logs/roundhouse.log");

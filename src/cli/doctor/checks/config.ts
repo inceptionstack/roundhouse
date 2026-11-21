@@ -70,7 +70,17 @@ export const configChecks: DoctorCheck[] = [
         if (!cfg.agent?.type) issues.push("Missing agent.type");
         if (!cfg.chat?.botUsername) issues.push("Missing chat.botUsername");
         if (!cfg.chat?.adapters || Object.keys(cfg.chat.adapters).length === 0) issues.push("No chat adapters configured");
-        if (!cfg.chat?.allowedUsers?.length) issues.push("allowedUsers is empty (anyone can message the bot)");
+        const hasIds = Array.isArray(cfg.chat?.allowedUserIds) && cfg.chat.allowedUserIds.length > 0;
+        const hasUsers = Array.isArray(cfg.chat?.allowedUsers) && cfg.chat.allowedUsers.length > 0;
+        if (!hasIds && !hasUsers) {
+          issues.push(cfg.chat?.allowAll === true
+            ? "chat.allowAll is set with no allowlist (anyone can drive the agent)"
+            : "No allowedUserIds or allowedUsers (every message is refused)");
+        } else if (!hasIds) {
+          issues.push("Not paired: access is by username until an id is recorded (run: roundhouse pair)");
+        } else if (hasUsers && cfg.chat.allowedUsers.length > cfg.chat.allowedUserIds.length) {
+          issues.push(`${cfg.chat.allowedUsers.length} names in allowedUsers but ${cfg.chat.allowedUserIds.length} paired id(s): names grant nothing once an id is paired, so pair anyone listed by name only`);
+        }
 
         if (issues.length === 0) {
           return { id: "config-schema", category: "config", name: "Config schema", status: "pass", summary: "valid" };

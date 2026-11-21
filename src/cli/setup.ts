@@ -207,7 +207,7 @@ export async function cmdPair(argv: string[]): Promise<void> {
     if (!config.chat) config.chat = {};
     const existingUserIds: number[] = config.chat.allowedUserIds ?? [];
     // Preserve both numeric (Telegram) and string (Slack: D.../C...) IDs
-    const existingNotifyIds: (number | string)[] = (config.chat.notifyChatIds ?? []).map((id) => {
+    const existingNotifyIds: (number | string)[] = (config.chat.notifyChatIds ?? []).map((id: string | number) => {
       const num = Number(id);
       return !isNaN(num) ? num : id;  // Keep non-numeric IDs as-is
     });
@@ -217,6 +217,15 @@ export async function cmdPair(argv: string[]): Promise<void> {
 
     config.chat.allowedUserIds = existingUserIds;
     config.chat.notifyChatIds = existingNotifyIds;
+    // A config written by hand may have neither of these yet.
+    if (!config.chat.botUsername) config.chat.botUsername = botInfo.username;
+    const knownUsers: string[] = (config.chat.allowedUsers ?? []).map((u: string) => u.toLowerCase());
+    for (const u of users) {
+      if (!knownUsers.includes(u.toLowerCase())) {
+        config.chat.allowedUsers = [...(config.chat.allowedUsers ?? []), u];
+        knownUsers.push(u.toLowerCase());
+      }
+    }
 
     await atomicWriteJson(CONFIG_PATH, config);
     textStepLog.ok("Config updated with chat ID");

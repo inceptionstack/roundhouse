@@ -10,7 +10,7 @@
  */
 
 import { Card, Section, Actions, Button } from "chat";
-import type { CardElement } from "chat";
+import type { CardChild, CardElement } from "chat";
 import type { RichButton, RichMenu, RichResponse } from "./types";
 
 // `Text` from "chat" resolves to mdast's TYPE re-export, not the JSX
@@ -139,7 +139,7 @@ export function buildSelectableMenu(opts: SelectableMenuOpts): RichResponse {
  * Block Kit sections).
  */
 export function richMenuToCard(menu: RichMenu, headerProse?: string): CardElement {
-  const children: ReturnType<typeof Section>[] = [];
+  const children: CardChild[] = [];
   if (headerProse) {
     children.push(Section([text(headerProse) as any]));
   }

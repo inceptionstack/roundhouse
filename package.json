@@ -26,6 +26,7 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit -p .",
     "test:watch": "vitest"
   },
   "files": [
@@ -39,17 +40,23 @@
     "pi/"
   ],
   "dependencies": {
-    "@chat-adapter/slack": "=4.29.0",
-    "@chat-adapter/state-memory": "^4.29.0",
-    "@chat-adapter/telegram": "^4.29.0",
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "chat": "^4.29.0",
-    "croner": "^10.0.1",
-    "p-queue": "^9.2.0",
+    "@chat-adapter/slack": "4.45.0",
+    "@chat-adapter/state-memory": "4.45.0",
+    "@chat-adapter/telegram": "4.45.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "chat": "4.45.0",
+    "croner": "^11.0.0",
+    "p-queue": "^10.0.0",
     "qrcode-terminal": "^0.12.0",
-    "tsx": "^4.0.0"
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
-    "vitest": "^4.1.5"
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

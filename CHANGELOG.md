@@ -2,6 +2,88 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [Unreleased]
+
+> **Upgrade notes.** Needs Node >= 22.19 and pi 1.x.
+> - An empty allowlist now refuses everyone: set `chat.allowAll: true` if an
+>   open bot is intended.
+> - Once `chat.allowedUserIds` has an entry, names in `chat.allowedUsers` no
+>   longer grant access. A config that lists several names but has paired
+>   only one of them (`setup --user a --user b`) now admits only the paired
+>   one: run `roundhouse pair --user NAME` for each of the others. The
+>   gateway and `doctor` warn when there are more names than paired ids.
+> - Telegram deployments that list only usernames keep working, matched on
+>   the real @username. On Slack a name no longer grants access at all;
+>   Slack users are admitted by paired id.
+
+### Security
+- **Allowlist bypass by display name (Telegram).** The allowlist matched the
+  Chat SDK's `author.userName`, which the Telegram adapter builds as
+  `username ?? first_name ?? id`. An account without an @username could set
+  its first name to an allowed username and be accepted, which gives it the
+  agent's shell. Usernames are now read from Telegram's own `from.username`,
+  and are ignored entirely once an id is paired.
+- **Fail closed.** With no `allowedUsers` and no `allowedUserIds` every
+  message is refused; `chat.allowAll: true` is the explicit opt-in.
+- **Slack display names no longer authorize.** The Chat SDK's Slack
+  `userName` is the display name, which any workspace member can set.
+  Slack users are admitted by id only. (Slack pairing itself still matches
+  the display name and has no one-time code.)
+- Inline-button presses are authorized like messages. Threads are subscribed
+  only for allowed authors (a group member's mention used to subscribe the
+  thread, after which the owner's messages there ran as prompts).
+- Strangers' message text is no longer logged; one line per blocked id.
+- New `chat.dmOnly`, `chat.bootTurn` and `chat.allowUpdateCommand` switches.
+- A voice note no longer makes the agent install whisper/ffmpeg.
+- `~/.roundhouse` is forced to mode 700 at start; the config stays 600 when
+  pairing rewrites it. The skills clone uses `mkdtemp`.
+- Bundled `tools.md` and the `pr-merge-discipline` skill no longer tell the
+  agent to merge with `gh pr merge --admin`, and no longer claim AWS access.
+- Memory files can no longer close their `<roundhouse_memory>` block early;
+  sub-agent output and attachment contents are marked as data.
+- `setup` warns when a token is passed as a command-line flag.
+- The LaunchAgent no longer inherits `node_modules/.bin` directories on PATH.
+- Dependencies: 25 known advisories (17 high) in the lockfile, now 0.
+
+### Changed
+- **Telegram slash commands** are handled through the Chat SDK's
+  `onSlashCommand`. From 4.3x the Telegram adapter stopped delivering a
+  message that starts with a bot command to the message handlers, so without
+  this every `/status`, `/cancel`, `/new` and gateway-side `/start <code>`
+  would be dropped silently after the SDK bump.
+- **pi 1.6.** The pi adapter uses `ModelRuntime` and the public
+  `session.isIdle` / `waitForIdle()` instead of `AuthStorage`,
+  `ModelRegistry` and the private `_agentEventQueue`, all removed upstream.
+- Chat SDK 4.45, croner 11, p-queue 10, vitest 5. Added `npm run typecheck`.
+- `/model` offers the models enabled in pi's settings (`enabledModels`) and
+  falls back to the built-in aliases only when there are none.
+- `roundhouse install` on macOS installs just the LaunchAgent.
+  `roundhouse pair` also records the bot username.
+
+### Fixed
+- Sub-agents on macOS: process tracking read `/proc`, so every spawn failed.
+- Sub-agent results were injected into session `main` whatever chat they
+  belonged to, and looked for run output under `/home/ec2-user`.
+- whisper/ffmpeg were never found under `/opt/homebrew/bin`.
+- `/model constructor` (or `__proto__`) wrote an undefined model into pi's
+  settings; `/model provider/model-id` stored the provider inside the id.
+- `/status`, `roundhouse status` and `doctor` reported "no allowlist" for an
+  id-only setup.
+- Re-running `setup` dropped every `.env` key it did not write itself
+  (`TAVILY_API_KEY`, debug flags) and re-quoted the Slack tokens it kept,
+  which corrupted them.
+- One cron job file with an invalid id stopped the scheduler for all jobs.
+- `NOTIFY_CHAT_IDS` dropped Slack channel ids.
+- `/cmd@otherbot` in a group was sent to the agent as a prompt.
+- `doctor` on macOS checked systemd and GNU `df`; it now checks the
+  LaunchAgent and reads free disk space portably.
+- `chat.dmOnly` treats a Slack direct message as private.
+- `setup --psst` after a plain-text setup left the bot token in `.env`.
+- `/model`: thinking-level suffixes, dotted versions (`gpt-5.1`), globs and
+  same-named models on two providers are handled; menu buttons stay within
+  Telegram's callback-data limit.
+- Sub-agent liveness on macOS no longer depends on locale or time zone.
+
 ## [0.6.0] — 2026-05-26
 
 > **Migration note for out-of-tree TransportAdapter implementations.** The

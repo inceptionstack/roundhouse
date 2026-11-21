@@ -10,7 +10,7 @@
  */
 
 import { mkdir } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -18,9 +18,8 @@ import { fileURLToPath } from "node:url";
 const __piAdapterDir = dirname(fileURLToPath(import.meta.url));
 
 import {
-  AuthStorage,
   createAgentSession,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
@@ -52,38 +51,44 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   const maxIdleMs =
     (config.maxIdleMs as number) ?? DEFAULT_MAX_IDLE_MS;
 
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
+  // pi >= 0.80.8 replaced AuthStorage + ModelRegistry with one async
+  // ModelRuntime (auth.json + models.json under ~/.pi/agent). The adapter
+  // factory is synchronous, so the runtime is created on first use and shared
+  // by every session. A failed create is not cached, so the next prompt retries.
+  let modelRuntimePromise: Promise<ModelRuntime> | undefined;
+  function getModelRuntime(): Promise<ModelRuntime> {
+    if (!modelRuntimePromise) {
+      modelRuntimePromise = ModelRuntime.create().catch((err) => {
+        modelRuntimePromise = undefined;
+        throw err;
+      });
+    }
+    return modelRuntimePromise;
+  }
   const sessions = new Map<string, SessionEntry>();
   const creating = new Map<string, Promise<SessionEntry>>();
   let memoryCapabilities: { hasMemoryExtension: boolean; memoryTools: string[]; extensions: string[] } | undefined;
   let reapInterval: ReturnType<typeof setInterval> | undefined;
 
-  async function drainSessionEvents(session: AgentSession): Promise<void> {
-    // AgentSession._handleAgentEvent queues event processing on a private
-    // promise chain (_agentEventQueue). session.prompt() / agent.continue()
-    // resolve when the agent loop finishes, but NOT when the queue drains.
-    // We must await the queue so that:
-    //   1. agent_end extension handlers (e.g. pi-lgtm review) complete
-    //   2. followUp messages they queue are visible via hasQueuedMessages()
-    //   3. message_end events for custom messages reach our subscribe() handler
-    //      BEFORE we unsubscribe in the finally block.
-    //
-    // WARNING: _agentEventQueue is a private field of AgentSession (not part
-    // of the public pi-coding-agent API). Tested against
-    // @earendil-works/pi-coding-agent version bundled via `latest` in
-    // package.json at the time of this commit. If upstream renames or changes
-    // this field, extension custom messages (e.g. pi-lgtm review bubbles)
-    // will stop reaching Telegram. The `if (queue)` check fails silently
-    // on purpose because a missing field is not fatal — it just reverts to
-    // the pre-fix race condition. A public `session.flushEvents()` or
-    // `session.waitForIdle()` upstream would obsolete this.
-    const queue = (session as unknown as { _agentEventQueue?: Promise<void> })._agentEventQueue;
-    if (queue) {
-      await queue;
+  /**
+   * Wait until the session has nothing left to do.
+   *
+   * Since pi 1.0, `session.prompt()` resolves only after the whole run has
+   * settled: automatic retries, compaction, follow-ups queued by `agent_end`
+   * handlers and the `agent_settled` handlers are all inside it. What it does
+   * not cover is a run an extension starts after that point (for example
+   * `pi.sendMessage(..., { triggerTurn: true })` while idle). `isIdle` is false
+   * for those too, so loop on the public `waitForIdle()` until it holds.
+   *
+   * This replaces the pre-1.0 workaround that awaited the private
+   * `_agentEventQueue` field and drove `agent.continue()` by hand; that field
+   * no longer exists and the session now drains its own queues.
+   */
+  async function waitUntilIdle(session: AgentSession): Promise<void> {
+    while (!session.isIdle) {
+      await session.waitForIdle();
     }
   }
-
 
   /**
    * Callback shape for re-subscribing after a mid-turn session swap (auto-repair).
@@ -117,6 +122,10 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     let repairedThisCall = false;
     try {
       try {
+        // A run an extension started on its own may still be going. prompt()
+        // would throw "already processing" or, during agent_settled handlers,
+        // defer the prompt and return before it ran.
+        await waitUntilIdle(entry.session);
         await entry.session.prompt(text);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult
@@ -173,49 +182,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         resubscribe?.subscribe(entry.session);
         await entry.session.prompt(text);
       }
-      await drainSessionEvents(entry.session);
-
-      // Check for pending follow-up work AFTER drainSessionEvents — that's
-      // where agent_end extension handlers run and queue follow-up messages
-      // (e.g. pi-lgtm calls sendMessage with deliverAs: "followUp").
-      // The actual long wait is in the while loop's waitForIdle() below.
+      // The subscriber must stay attached until the session is fully idle,
+      // or a run started by an extension after prompt() resolved would post
+      // its output to nobody (Telegram shows a review bubble, then silence).
       let notifiedDraining = false;
-      if (onDraining && (entry.session.isStreaming || entry.session.agent.hasQueuedMessages())) {
-        onDraining();
-        notifiedDraining = true;
-      }
-
-      // Loop until the session is fully idle. Two separate conditions can keep
-      // work in flight after the initial prompt resolves:
-      //
-      //  (a) `hasQueuedMessages()` — an extension called `pi.sendMessage(...,
-      //      { triggerTurn: true, deliverAs: "followUp" })` *while isStreaming
-      //      was true* — pi queued onto `agent.followUp()`, so we manually
-      //      drain it with `continue()`.
-      //
-      //  (b) `isStreaming === true` — an extension called the same sendMessage
-      //      *after isStreaming became false*. In that path pi's
-      //      `sendCustomMessage` skips the queue entirely and calls
-      //      `agent.prompt(appMessage)` directly as fire-and-forget, kicking
-      //      off a brand-new agent run. `hasQueuedMessages()` returns false
-      //      for this run, but `isStreaming` is true — we have to
-      //      `waitForIdle()` so subscribers see the new run's events (e.g. the
-      //      agent's reply to a pi-lgtm code review) before we unsubscribe.
-      //
-      // Without (b), pi CLI works (its subscriber stays attached across runs)
-      // but roundhouse delivers the review bubble then goes silent.
-      while (true) {
-        if (entry.session.isStreaming) {
-          await entry.session.agent.waitForIdle();
-          await drainSessionEvents(entry.session);
-          continue;
+      if (!entry.session.isIdle) {
+        if (onDraining) {
+          onDraining();
+          notifiedDraining = true;
         }
-        if (entry.session.agent.hasQueuedMessages()) {
-          await entry.session.agent.continue();
-          await drainSessionEvents(entry.session);
-          continue;
-        }
-        break;
+        await waitUntilIdle(entry.session);
       }
 
       if (notifiedDraining && onDrainComplete) {
@@ -253,8 +229,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     const result = await createAgentSession({
       cwd,
       sessionManager,
-      authStorage,
-      modelRegistry,
+      modelRuntime: await getModelRuntime(),
     });
     return { session: result.session };
   }
@@ -264,12 +239,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     const threadDir = join(sessionsDir, dirName);
     await mkdir(threadDir, { recursive: true });
 
-    let sessionManager: InstanceType<typeof SessionManager>;
+    let sessionManager: SessionManager;
 
     try {
+      // continueRecent creates a session when the directory has none, so
+      // look first to report which of the two happened.
+      const hadSession = readdirSync(threadDir).some((f) => f.endsWith(".jsonl"));
       sessionManager = SessionManager.continueRecent(cwd, threadDir);
       console.log(
-        `[pi-agent] resuming session for ${threadId}: ${sessionManager.getSessionFile()}`
+        `[pi-agent] ${hadSession ? "resuming" : "new"} session for ${threadId}: ${sessionManager.getSessionFile()}`
       );
     } catch {
       sessionManager = SessionManager.create(cwd, threadDir);
@@ -281,8 +259,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     const result = await createAgentSession({
       cwd,
       sessionManager,
-      authStorage,
-      modelRegistry,
+      modelRuntime: await getModelRuntime(),
     });
 
     if (result.extensionsResult.extensions.length > 0) {
@@ -408,11 +385,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         const currentModel = entry.session.model;
 
         // Resolve the target model (format: "provider/model-id")
+        const modelRuntime = await getModelRuntime();
         let targetModel;
         const [provider, ...rest] = modelId.split("/");
         const id = rest.join("/");
         if (provider && id) {
-          targetModel = modelRegistry.find(provider, id);
+          targetModel = modelRuntime.getModel(provider, id);
         }
 
         if (!targetModel) {
@@ -421,7 +399,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         }
 
         // Verify auth is available for the target model
-        if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+        if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
           console.warn(`[pi-agent] no auth for flush model "${modelId}", using default`);
           return doPrompt(threadId, formatMessage(message));
         }
@@ -467,6 +445,25 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             const entry = await getOrCreate(threadId);
             entry.lastUsed = Date.now();
 
+            // "draining" / "drain_complete" tell the gateway that the agent is
+            // still working after its first answer. Both sources below (events
+            // inside prompt(), and a run found after prompt() resolved) go
+            // through these so the user gets one notice, not two.
+            let runEnded = false;
+            let draining = false;
+            const notifyDraining = () => {
+              if (draining) return;
+              draining = true;
+              eventQueue.push({ type: "draining" });
+              resolve?.();
+            };
+            const notifyDrainComplete = () => {
+              if (!draining) return;
+              draining = false;
+              eventQueue.push({ type: "drain_complete" });
+              resolve?.();
+            };
+
             // Extracted subscriber handler so it can be re-attached after an
             // auto-repair session swap (captures only the enqueue closure,
             // not `entry.session`, so it's safe to re-use).
@@ -481,6 +478,20 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 console.log(`[pi-agent/sub] event=${event.type}${extra}`);
               }
               let streamEvent: AgentStreamEvent | null = null;
+
+              // Follow-up work inside one prompt() (pi >= 1.0 drains its own
+              // queues, so prompt() no longer returns between runs): a new
+              // low-level run starting after one already ended means an
+              // extension queued more work, e.g. a code-review follow-up.
+              // Retries are the same run from the user's point of view.
+              if (event.type === "agent_end") {
+                if (!event.willRetry) runEnded = true;
+              } else if (event.type === "agent_start") {
+                if (runEnded) notifyDraining();
+              } else if (event.type === "agent_settled") {
+                runEnded = false;
+                notifyDrainComplete();
+              }
 
               if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
                 streamEvent = { type: "text_delta", text: event.assistantMessageEvent.delta };
@@ -518,22 +529,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
               await runPromptAndFollowUps(
                 entry,
                 text,
-                () => {
-                  eventQueue.push({ type: "draining" });
-                  resolve?.();
-                },
-                () => {
-                  eventQueue.push({ type: "drain_complete" });
-                  resolve?.();
-                },
+                notifyDraining,
+                notifyDrainComplete,
                 {
                   unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
                   subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
                 },
               );
-              // Final drain — guarantees all subscriber events have been delivered
-              // before we unsubscribe below.
-              await drainSessionEvents(entry.session);
             } finally {
               try { unsub(); } catch { /* ignore */ }
               eventQueue.push({ type: "agent_end" });
@@ -618,12 +620,13 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         if (!agentState) {
           console.warn(`[pi-agent] cannot access agent state for compact model swap, using default`);
         } else {
+          const modelRuntime = await getModelRuntime();
           const [provider, ...rest] = modelId.split("/");
           const id = rest.join("/");
-          const targetModel = (provider && id) ? modelRegistry.find(provider, id) : null;
+          const targetModel = (provider && id) ? modelRuntime.getModel(provider, id) : null;
           if (!targetModel) {
             console.warn(`[pi-agent] compact model "${modelId}" not found, using default`);
-          } else if (!modelRegistry.hasConfiguredAuth(targetModel)) {
+          } else if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
             console.warn(`[pi-agent] no auth for compact model "${modelId}", using default`);
           } else {
             currentModel = agentState.model;
@@ -818,7 +821,6 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
         subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
       });
-      await drainSessionEvents(entry.session);
     } finally {
       try { unsub(); } catch { /* ignore */ }
     }

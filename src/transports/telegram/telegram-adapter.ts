@@ -21,6 +21,7 @@ import { BOT_COMMANDS } from "./bot-commands";
 import { readPendingPairing, completePendingPairing, clearPendingPairing, isStartForNonce } from "./pairing";
 import { toTelegramInlineKeyboard } from "./rich-ui";
 import { createProgressMessage } from "./progress";
+import { verifiedHandle } from "../../util";
 
 /** Bot-command suffix sentinels we recognize as Telegram-specific to ignore. */
 const TELEGRAM_START_PATTERN = /^\/start(\s|@|$)/i;
@@ -286,8 +287,10 @@ export class TelegramAdapter implements TransportAdapter {
     }
 
     // Verify author is allowed
-    const authorName = (message.author?.userName ?? message.author?.name ?? "").toLowerCase();
-    const originalName = message.author?.userName ?? message.author?.name ?? "";
+    // The real @username from Telegram's payload. The SDK's author.userName
+    // falls back to the first name, which anyone can set (see verifiedHandle).
+    const originalName = verifiedHandle(message as any) ?? "";
+    const authorName = originalName.toLowerCase();
     const allowed = pending.allowedUsers.map(u => u.toLowerCase());
     if (!authorName || !allowed.includes(authorName)) {
       console.log(`[roundhouse] Pairing nonce from unauthorized user @${originalName}`);
