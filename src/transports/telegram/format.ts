@@ -439,9 +439,9 @@ function splitTableRow(line: string): string[] {
  * `lines` are the header row, the separator row and the data rows. All columns
  * are padded to a uniform width.
  *
- * Cells get inline formatting: the markers are gone and the text is tagged.
- * Telegram does not show bold, italics or links inside <pre>, so a cell reads
- * as clean text, and each link is repeated under the table where it works.
+ * Cells are read as inline markdown and emitted as plain text: the markers are
+ * gone and nothing is tagged, because <pre> may not contain other entities.
+ * Each link is repeated under the table, where it works.
  */
 function formatTable(lines: string[]): string {
   const headerCells = splitTableRow(lines[0]);
@@ -511,11 +511,16 @@ function formatTable(lines: string[]): string {
   /** Links found in cells, as <a> tags, in order of appearance */
   const links: string[] = [];
 
-  // A cell as it is emitted, with the display width of what the reader sees
-  // (Telegram renders entities back to their visual form in <pre>).
+  // A cell as it is emitted: its text with the markdown markers removed, and
+  // no tags. Telegram's rule is that <pre> cannot contain other entities, and
+  // a message it refuses falls back to raw markdown for the whole chunk, so
+  // nothing but text goes inside the box. Rendering the cell is still done,
+  // for its side effect of collecting the links.
   const toCell = (raw: string): { html: string; width: number } => {
     const nodes = parseInline(raw);
-    return { html: renderInlineNodes(nodes, NO_OPEN_TAGS, links), width: displayWidth(inlineText(nodes)) };
+    renderInlineNodes(nodes, NO_OPEN_TAGS, links);
+    const text = inlineText(nodes);
+    return { html: escapeHtml(text), width: displayWidth(text) };
   };
 
   // Normalize rows to exactly colCount columns

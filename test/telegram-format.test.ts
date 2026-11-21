@@ -367,7 +367,7 @@ describe("markdownToTelegramHtml — emphasis and tables in model output", () =>
     expect(markdownToTelegramHtml("`**x** _y_ [z](https://e.com)`")).toBe("<code>**x** _y_ [z](https://e.com)</code>");
   });
 
-  it("formats table cells and keeps the box layout", () => {
+  it("reads table cells as inline markdown, emits them as plain text, and keeps the box layout", () => {
     const md = [
       "| Name | Notes |",
       "|------|-------|",
@@ -377,11 +377,14 @@ describe("markdownToTelegramHtml — emphasis and tables in model output", () =>
     const html = markdownToTelegramHtml(md);
 
     expect(telegramHtmlProblem(html)).toBeNull();
-    expect(html).toContain("<b>x</b>");
-    expect(html).toContain("<code>a|b</code>");
+    // The link works under the table; inside the box there is text only,
+    // because Telegram's <pre> may not contain other entities.
     expect(html).toContain('<a href="https://example.com/p?a=1&amp;b=2">link</a>');
-    expect(html).toContain("<i>it</i>");
-    expect(html).toContain("<s>old</s>");
+    const inside = html.match(/<pre>([\s\S]*?)<\/pre>/)![1];
+    expect(inside).not.toMatch(/<\/?(b|i|s|u|code|a)\b/);
+    expect(inside).toContain("x");
+    expect(inside).toContain("a|b");
+    expect(inside).toContain("it and old");
     // No markdown markers are left in the cells.
     expect(html).not.toContain("**");
     expect(html).not.toContain("`");
