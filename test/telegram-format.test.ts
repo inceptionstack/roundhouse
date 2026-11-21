@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { markdownToTelegramHtml, truncateHtmlSafe } from "../src/transports/telegram/format";
+import { markdownToTelegramHtml } from "../src/transports/telegram/format";
+import { telegramHtmlProblem, htmlToVisible } from "./telegram-test-helpers";
 
 describe("markdownToTelegramHtml", () => {
   it("escapes HTML entities", () => {
@@ -16,8 +17,14 @@ describe("markdownToTelegramHtml", () => {
     expect(markdownToTelegramHtml("hello **world**")).toBe("hello <b>world</b>");
   });
 
-  it("converts __bold__", () => {
-    expect(markdownToTelegramHtml("hello __world__")).toBe("hello <b>world</b>");
+  it("converts a __bold phrase__", () => {
+    expect(markdownToTelegramHtml("hello __big world__")).toBe("hello <b>big world</b>");
+  });
+
+  it("leaves a single __word__ literal", () => {
+    // This used to be bold. It cannot be told apart from `__init__` or
+    // `__main__`, which models write far more often and which must stay literal.
+    expect(markdownToTelegramHtml("hello __world__")).toBe("hello __world__");
   });
 
   it("converts *italic*", () => {
@@ -294,25 +301,192 @@ describe("markdownToTelegramHtml", () => {
   });
 });
 
-describe("truncateHtmlSafe", () => {
-  it("returns short html unchanged", () => {
-    expect(truncateHtmlSafe("<b>hello</b>", 100)).toBe("<b>hello</b>");
+// Model output the converter used to mangle. Each case was seen in a real answer.
+describe("markdownToTelegramHtml — emphasis and tables in model output", () => {
+  it("leaves arithmetic with spaced asterisks alone", () => {
+    expect(markdownToTelegramHtml("2 * 3 * 4")).toBe("2 * 3 * 4");
+    expect(markdownToTelegramHtml("so a * b = c * d here")).toBe("so a * b = c * d here");
   });
 
-  it("truncates at last > before limit", () => {
-    const html = "<b>hello</b> <i>world</i> more text here that is very long";
-    const result = truncateHtmlSafe(html, 30);
-    expect(result.endsWith("...")).toBe(true);
-    expect(result.length).toBeLessThanOrEqual(30);
-    // Should not cut inside a tag
-    expect(result).not.toMatch(/<[^>]*$/);
+  it("leaves unspaced arithmetic between numbers alone", () => {
+    expect(markdownToTelegramHtml("2*3*4 and 2**10")).toBe("2*3*4 and 2**10");
   });
 
-  it("does not produce broken tags", () => {
-    const html = '<a href="https://example.com">click here</a> and some more text padding';
-    const result = truncateHtmlSafe(html, 40);
-    expect(result.endsWith("...")).toBe(true);
-    // The > in the opening tag should be a valid cut point
-    expect(result).not.toContain('href="https://example.com">click here</a> and some more text pa...');
+  it("renders a `* ` bullet with emphasis inside as a bullet with italics", () => {
+    expect(markdownToTelegramHtml("* a *b* c")).toBe("* a <i>b</i> c");
+  });
+
+  it("renders a whole `* ` list", () => {
+    const md = "* one\n* two *em* x\n* **three**\n  * nested `code`";
+    expect(markdownToTelegramHtml(md)).toBe("* one\n* two <i>em</i> x\n* <b>three</b>\n  * nested <code>code</code>");
+  });
+
+  it("keeps __init__ and other double-underscore names literal", () => {
+    expect(markdownToTelegramHtml("__init__")).toBe("__init__");
+    expect(markdownToTelegramHtml("call __init__ first")).toBe("call __init__ first");
+    expect(markdownToTelegramHtml("see __init__.py and obj.__class__.__name__")).toBe("see __init__.py and obj.__class__.__name__");
+    expect(markdownToTelegramHtml('if __name__ == "__main__":')).toBe('if __name__ == "__main__":');
+  });
+
+  it("keeps snake_case_name literal in prose", () => {
+    expect(markdownToTelegramHtml("set snake_case_name and _private_field_name here")).toBe(
+      "set snake_case_name and _private_field_name here",
+    );
+  });
+
+  it("still renders a multi-word __bold phrase__ and _italic_", () => {
+    expect(markdownToTelegramHtml("a __bold phrase__ and _italic_ word")).toBe("a <b>bold phrase</b> and <i>italic</i> word");
+  });
+
+  it("degrades mis-nested emphasis to valid HTML", () => {
+    const html = markdownToTelegramHtml("**bold _both** tail_");
+    expect(telegramHtmlProblem(html)).toBeNull();
+    expect(html).toBe("<b>bold _both</b> tail_");
+  });
+
+  it("renders backslash-escaped asterisks literally", () => {
+    expect(markdownToTelegramHtml("\\*not emphasis\\*")).toBe("*not emphasis*");
+    expect(markdownToTelegramHtml("snake\\_case and \\_x\\_")).toBe("snake_case and _x_");
+    expect(markdownToTelegramHtml("a \\`not code\\` b")).toBe("a `not code` b");
+  });
+
+  it("does not open emphasis on a delimiter followed by a space", () => {
+    expect(markdownToTelegramHtml("a ** b ** c")).toBe("a ** b ** c");
+    expect(markdownToTelegramHtml("use *args and **kwargs")).toBe("use *args and **kwargs");
+    expect(markdownToTelegramHtml("match *.ts and *.js")).toBe("match *.ts and *.js");
+  });
+
+  it("keeps bold working next to punctuation and code", () => {
+    expect(markdownToTelegramHtml("**Note**: done.")).toBe("<b>Note</b>: done.");
+    expect(markdownToTelegramHtml("(**x**)")).toBe("(<b>x</b>)");
+    expect(markdownToTelegramHtml("**`code`** and *`it`*")).toBe("<b><code>code</code></b> and <i><code>it</code></i>");
+    expect(markdownToTelegramHtml("**a *b* c**")).toBe("<b>a <i>b</i> c</b>");
+  });
+
+  it("does not treat markdown inside inline code as formatting", () => {
+    expect(markdownToTelegramHtml("`**x** _y_ [z](https://e.com)`")).toBe("<code>**x** _y_ [z](https://e.com)</code>");
+  });
+
+  it("reads table cells as inline markdown, emits them as plain text, and keeps the box layout", () => {
+    const md = [
+      "| Name | Notes |",
+      "|------|-------|",
+      "| **x** | `a|b` |",
+      "| [link](https://example.com/p?a=1&b=2) | *it* and ~~old~~ |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+
+    expect(telegramHtmlProblem(html)).toBeNull();
+    // The link works under the table; inside the box there is text only,
+    // because Telegram's <pre> may not contain other entities.
+    expect(html).toContain('<a href="https://example.com/p?a=1&amp;b=2">link</a>');
+    const inside = html.match(/<pre>([\s\S]*?)<\/pre>/)![1];
+    expect(inside).not.toMatch(/<\/?(b|i|s|u|code|a)\b/);
+    expect(inside).toContain("x");
+    expect(inside).toContain("a|b");
+    expect(inside).toContain("it and old");
+    // No markdown markers are left in the cells.
+    expect(html).not.toContain("**");
+    expect(html).not.toContain("`");
+    expect(html).not.toContain("](");
+
+    // Still one box: 6 lines, every row with two cells, all rows the same visible width.
+    const box = html.match(/<pre>([\s\S]*?)<\/pre>/)![1];
+    const rows = htmlToVisible(box).split("\n");
+    expect(rows.length).toBe(6);
+    for (const row of [rows[1], rows[3], rows[4]]) {
+      expect(row.split("│").length - 1).toBe(3);
+      expect(row.length).toBe(rows[0].length);
+    }
+    expect(rows[3]).toBe("│ x    │ a|b        │");
+    expect(rows[4]).toBe("│ link │ it and old │");
+  });
+
+  it("repeats a table cell's link under the table, where Telegram makes it clickable", () => {
+    const md = "| Doc | Where |\n|---|---|\n| guide | [here](https://example.com/guide) |\n| api | [here](https://example.com/api) |\nafter";
+    const html = markdownToTelegramHtml(md);
+    expect(html.endsWith(
+      '</pre>\n<a href="https://example.com/guide">here</a>\n<a href="https://example.com/api">here</a>\nafter',
+    )).toBe(true);
+    // Inside the box the cell shows the link text only.
+    expect(html.match(/<pre>([\s\S]*?)<\/pre>/)![1]).not.toContain("<a ");
+  });
+
+  it("does not split a table cell on an escaped pipe", () => {
+    const html = markdownToTelegramHtml("| A | B |\n|---|---|\n| x \\| y | z |");
+    const rows = htmlToVisible(html.match(/<pre>([\s\S]*?)<\/pre>/)![1]).split("\n");
+    expect(rows[3]).toContain("x | y");
+    expect(rows[3].split("│").length - 1).toBe(3);
+  });
+
+  it("emits well-formed HTML for awkward emphasis", () => {
+    const cases = [
+      "**bold _both** tail_",
+      "*a **b* c**",
+      "~~s **b~~ c**",
+      "_a *b_ c*",
+      "**unclosed",
+      "*a* **b** ***c*** ****d****",
+      "# **Title** with `code` and [l](https://e.com)",
+      "> quote with **bold _mix** tail_",
+      "[**bold** link](https://e.com) and [bad](ftp://x) <tag> & more",
+      "a < b **c > d** & e",
+      "***",
+      "* * *",
+      "_ _ _",
+      "** **",
+    ];
+    for (const md of cases) {
+      expect(telegramHtmlProblem(markdownToTelegramHtml(md)), md).toBeNull();
+    }
+  });
+});
+
+describe("markdownToTelegramHtml — fenced code", () => {
+  it("renders a fence that is still open as a code block", () => {
+    expect(markdownToTelegramHtml("```ts\nconst a = __x__;")).toBe("<pre>const a = __x__;</pre>");
+  });
+
+  it("does not end a block on backticks inside a code line", () => {
+    const md = "```js\nconst fence = \"```\";\nconst b = 2;\n```\nafter";
+    expect(markdownToTelegramHtml(md)).toBe('<pre>const fence = "```";\nconst b = 2;</pre>\nafter');
+  });
+
+  it("lets a longer fence hold a shorter one", () => {
+    const md = "````md\n```js\nx\n```\n````";
+    expect(markdownToTelegramHtml(md)).toBe("<pre>```js\nx\n```</pre>");
+  });
+
+  it("renders a fence indented under a list item, keeping the code as written", () => {
+    const md = "1. Run:\n   ```bash\n   npm test\n   ```\n2. Done";
+    expect(markdownToTelegramHtml(md)).toBe("1. Run:\n<pre>   npm test</pre>\n2. Done");
+  });
+});
+
+
+describe("markdownToTelegramHtml — found in review", () => {
+  it("reads lines that end in CR LF like any other", () => {
+    expect(markdownToTelegramHtml("# Title\r\n\r\ntext **b**\r\n---\r\n> q\r\n")).toBe(
+      "<b>Title</b>\n\ntext <b>b</b>\n───────────────\n<blockquote>q</blockquote>\n",
+    );
+    expect(markdownToTelegramHtml("```sh\r\nnpm test\r\n```\r\nafter")).toBe("<pre>npm test</pre>\nafter");
+  });
+
+  it("makes text bold when the closing marker follows punctuation and a letter comes next", () => {
+    expect(markdownToTelegramHtml("**注意：**这是重点")).toBe("<b>注意：</b>这是重点");
+    expect(markdownToTelegramHtml("**Step 1:**Do it")).toBe("<b>Step 1:</b>Do it");
+    expect(markdownToTelegramHtml('He said**"no"**twice')).toBe('He said<b>"no"</b>twice');
+  });
+
+  it("still leaves arithmetic, globs and spaced markers alone", () => {
+    expect(markdownToTelegramHtml("2**10 and x**2 and a ** b")).toBe("2**10 and x**2 and a ** b");
+    expect(markdownToTelegramHtml("**bold **")).toBe("**bold **");
+    expect(markdownToTelegramHtml("match `src/**/*.ts` only")).toBe("match <code>src/**/*.ts</code> only");
+  });
+
+  it("keeps the cells of a row that has more of them than the header", () => {
+    const html = markdownToTelegramHtml("| Command | What |\n|---|---|\n| cat x | grep y | finds y |");
+    expect(html).toContain("│ cat x   │ grep y │ finds y │");
+    expect(html).toContain("│ Command │ What   │         │");
   });
 });

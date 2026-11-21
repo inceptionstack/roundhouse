@@ -59,6 +59,16 @@ describe("splitMessage", () => {
     expect(chunks).toEqual(["a", "b", "c"]);
   });
 
+  it("does not cut a surrogate pair in half", () => {
+    const text = "ab" + "😀".repeat(10);
+    for (const maxLen of [3, 4, 5, 7]) {
+      const chunks = splitMessage(text, maxLen);
+      expect(chunks.join("")).toBe(text);
+      expect(chunks.every((c) => c.length <= maxLen)).toBe(true);
+      expect(chunks.every((c) => c.isWellFormed())).toBe(true);
+    }
+  });
+
   it("does not infinite loop on leading newline with small maxLen", () => {
     const text = "\nhello world";
     const chunks = splitMessage(text, 5);

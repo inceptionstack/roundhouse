@@ -217,7 +217,22 @@ export class TelegramAdapter implements TransportAdapter {
         body: JSON.stringify({ chat_id: chatId, ...payload }),
         signal: AbortSignal.timeout(30_000),
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // Throw, as the Chat SDK's adapter does: a refused call that returned
+        // quietly was taken for a delivered message, with no retry after a
+        // rate limit and no plain-text fallback after an HTML error.
+        const body = await res.json().catch(() => null) as
+          | { description?: string; parameters?: { retry_after?: number } }
+          | null;
+        const err = new Error(
+          `Telegram ${method} failed: ${res.status} ${body?.description ?? res.statusText}`,
+        ) as Error & { retryAfter?: number };
+        if (res.status === 429) {
+          err.name = "AdapterRateLimitError";
+          err.retryAfter = body?.parameters?.retry_after;
+        }
+        throw err;
+      }
       const json = await res.json() as { result?: unknown };
       return json.result ?? null;
     };
