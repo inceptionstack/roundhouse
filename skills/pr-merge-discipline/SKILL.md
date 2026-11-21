@@ -24,8 +24,8 @@ Activate this skill when:
 gh pr view <number> --comments
 gh pr checks <number>
 
-# Only then:
-gh pr merge <number> --squash --admin
+# Only then, and only if the user asked for the merge:
+gh pr merge <number> --squash
 ```
 
 ## Anti-Patterns

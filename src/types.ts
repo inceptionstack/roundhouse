@@ -186,7 +186,25 @@ export interface GatewayConfig {
   };
   chat: {
     botUsername: string;
+    /**
+     * Handles allowed before pairing has recorded an id. Ignored as soon as
+     * `allowedUserIds` has an entry: a handle can change owner, an id cannot.
+     */
     allowedUsers?: string[];
+    /**
+     * Let anyone use the bot when both allowlists are empty. Off by default:
+     * an empty allowlist refuses every message.
+     */
+    allowAll?: boolean;
+    /** Answer in private chats only; ignore groups, channels and topics. */
+    dmOnly?: boolean;
+    /** Run a greeting agent turn on every start (default true). */
+    bootTurn?: boolean;
+    /**
+     * Allow `/update` from chat (default true). It installs the latest
+     * published roundhouse and its bundle on the host, then restarts.
+     */
+    allowUpdateCommand?: boolean;
     /**
      * Immutable per-platform user IDs (paired during setup).
      * Telegram IDs are numeric (e.g. 123456789); Slack IDs are strings

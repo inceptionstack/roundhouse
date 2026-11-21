@@ -48,41 +48,87 @@ export function sameId(a: string | number, b: string | number): boolean {
   return String(a) === String(b);
 }
 
-/**
- * Check if a Chat SDK message author is in the allowlist.
- * Only matches on userName (unique handle) and userId (immutable platform ID).
- * Does NOT match on fullName (user-controlled display name).
- *
- * Dual lookup against `allowedUserIds`: Telegram IDs are numeric (123456789);
- * Slack IDs are strings ("U02XXXXX"). Both forms match against entries of
- * either type, so a heterogeneous allowlist authenticates users from either
- * platform.
- */
-export function isAllowed(
-  message: { author?: { userName?: string; userId?: string | number; fullName?: string } },
-  allowedUsers: string[],
-  allowedUserIds?: (string | number)[],
-): boolean {
-  if (allowedUsers.length === 0 && (!allowedUserIds || allowedUserIds.length === 0)) return true;
-  const author = message.author ?? {};
+/** Message shape the allowlist reads. `raw` is the platform's own payload. */
+export interface AuthorizableMessage {
+  author?: { userName?: string; userId?: string | number; fullName?: string };
+  raw?: unknown;
+}
 
-  // Check immutable platform user ID first.
-  // Normalize both sides to string before comparing — IncomingMessage.author.userId
-  // can arrive as string or number depending on the platform; allowedUserIds can
-  // hold either too. `sameId`-style equality avoids treating "12345" and 12345 as
-  // different.
-  if (allowedUserIds?.length && author.userId != null) {
-    const rawId = String(author.userId);
-    for (const entry of allowedUserIds) {
-      if (String(entry) === rawId) return true;
+export interface AllowlistOptions {
+  /**
+   * Explicit opt-in to an open bot (`chat.allowAll: true`). Without it, an
+   * empty allowlist denies everyone.
+   */
+  allowAll?: boolean;
+}
+
+/**
+ * The author's platform handle, taken from a field the user cannot spoof.
+ *
+ * The Chat SDK's `author.userName` is NOT that field on Telegram: the adapter
+ * builds it as `from.username ?? from.first_name ?? from.id`, and for channel
+ * or anonymous-admin posts from the chat title. An account with no @username
+ * can set its first name to anything, including the owner's username. So for
+ * Telegram-shaped payloads only `raw.from.username` counts, and a sender
+ * without one has no handle. Other platforms (Slack) keep `author.userName`.
+ */
+export function verifiedHandle(message: AuthorizableMessage): string | undefined {
+  const raw = message.raw as { from?: unknown; sender_chat?: unknown; chat?: unknown } | null | undefined;
+  if (raw && typeof raw === "object") {
+    const from = raw.from as { id?: unknown; username?: unknown } | null | undefined;
+    if (from && typeof from === "object" && typeof from.id === "number") {
+      return typeof from.username === "string" && from.username ? from.username : undefined;
+    }
+    // Telegram message with no `from` (channel post, sender_chat): no user handle.
+    if ("sender_chat" in raw || (raw.chat && typeof raw.chat === "object" && "type" in (raw.chat as object))) {
+      return undefined;
     }
   }
+  const name = message.author?.userName;
+  return typeof name === "string" && name ? name : undefined;
+}
 
-  // Fall back to username check
-  const candidates = [author.userName, author.userId]
-    .filter((v) => v != null && v !== "")
-    .map((s) => String(s).toLowerCase());
-  return candidates.some((c) => allowedUsers.includes(c));
+/**
+ * Check if a Chat SDK message author may use the gateway.
+ *
+ *  1. `allowedUserIds` non-empty: only those immutable platform ids pass.
+ *     Usernames are ignored from then on; a handle can be renamed, released
+ *     and re-registered by someone else. Pairing fills this list.
+ *  2. Otherwise `allowedUsers` non-empty (not paired yet, or a legacy config):
+ *     the verified handle must match, case-insensitively, or the platform id
+ *     must be listed there. Never the display name, and never the SDK's
+ *     `userName` fallback (see `verifiedHandle`).
+ *  3. Both empty: denied, unless `allowAll` was set explicitly.
+ *
+ * Telegram ids are numeric and Slack ids are strings ("U02XXXXX"); both sides
+ * are compared as strings so a mixed list works.
+ */
+export function isAllowed(
+  message: AuthorizableMessage,
+  allowedUsers: string[],
+  allowedUserIds?: (string | number)[],
+  options: AllowlistOptions = {},
+): boolean {
+  const author = message.author ?? {};
+
+  if (allowedUserIds && allowedUserIds.length > 0) {
+    if (author.userId == null || author.userId === "") return false;
+    const rawId = String(author.userId);
+    return allowedUserIds.some((entry) => String(entry) === rawId);
+  }
+
+  if (allowedUsers.length > 0) {
+    const wanted = allowedUsers.map((u) => u.replace(/^@/, "").toLowerCase());
+    // Older configs list platform ids in allowedUsers. An id is immutable, and
+    // a Telegram @username cannot be all digits, so this stays safe.
+    if (author.userId != null && author.userId !== "" && wanted.includes(String(author.userId).toLowerCase())) {
+      return true;
+    }
+    const handle = verifiedHandle(message)?.replace(/^@/, "").toLowerCase();
+    return !!handle && wanted.includes(handle);
+  }
+
+  return options.allowAll === true;
 }
 
 /**

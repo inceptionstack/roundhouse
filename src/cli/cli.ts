@@ -124,15 +124,23 @@ async function loadEnvFile(): Promise<void> {
 }
 
 async function cmdInstall() {
-  console.log("[roundhouse] 'install' is deprecated — use 'roundhouse setup --telegram' instead.\n");
-
+  // macOS: install and load the LaunchAgent only. Unlike `setup`, this
+  // installs no packages, skills or tools; it expects the config and env
+  // file to exist already (write them by hand, then `roundhouse pair`).
   if (process.platform === "darwin") {
-    console.log("  On macOS:");
-    console.log("    1. roundhouse setup --telegram");
-    console.log("    2. roundhouse start\n");
-    process.exitCode = 1;
+    if (!(await fileExists(CONFIG_PATH))) {
+      console.error(`[roundhouse] No config at ${CONFIG_PATH}. Create it first, or run: roundhouse setup --telegram`);
+      process.exitCode = 1;
+      return;
+    }
+    const { installLaunchAgent, PLIST_PATH } = await import("./launchd");
+    await installLaunchAgent();
+    console.log(`  ✅ LaunchAgent installed and loaded: ${PLIST_PATH}`);
+    console.log("     Logs: roundhouse logs    Stop: roundhouse stop    Remove: roundhouse uninstall");
     return;
   }
+
+  console.log("[roundhouse] 'install' is deprecated — use 'roundhouse setup --telegram' instead.\n");
 
   console.log("  Recommended:");
   console.log("    roundhouse setup --telegram\n");
@@ -258,12 +266,18 @@ async function cmdStatus() {
 
   if (config) {
     const platforms = Object.keys(config.chat.adapters).join(", ");
-    const allowedCount = config.chat.allowedUsers?.length ?? 0;
+    const ids = config.chat.allowedUserIds ?? [];
+    const users = config.chat.allowedUsers ?? [];
+    const allowedSummary = ids.length > 0
+      ? `ids ${ids.join(", ")}`
+      : users.length > 0
+        ? `${users.join(", ")} (username only, not paired yet)`
+        : config.chat.allowAll === true ? "everyone (chat.allowAll)" : "nobody (no allowlist)";
     console.log(`  Agent:          ${config.agent.type} (v${agentVersion})`);
     console.log(`  Agent CWD:      ${config.agent.cwd ?? process.cwd()}`);
     console.log(`  Platforms:      ${platforms}`);
     console.log(`  Bot:            @${config.chat.botUsername}`);
-    console.log(`  Allowed users:  ${allowedCount === 0 ? "all (no allowlist)" : config.chat.allowedUsers!.join(", ")}`);
+    console.log(`  Allowed users:  ${allowedSummary}`);
     console.log(`  Notify chats:   ${config.chat.notifyChatIds?.join(", ") ?? "none"}`);
   }
 
@@ -356,7 +370,7 @@ Commands:
   start               Start the gateway daemon
   run                 Run the gateway in foreground
   tui [thread]        Open agent TUI on a gateway session
-  install             Install as a systemd daemon (requires sudo)
+  install             Install the service only (LaunchAgent on macOS; no packages)
   uninstall           Remove the systemd daemon
   update              Update from npm + restart daemon
   status              Show daemon status

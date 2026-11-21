@@ -17,12 +17,14 @@ import type { SttProvider, SttInput, TranscriptionResult, SttProviderConfig } fr
 
 const WHISPER_PATHS = [
   join(homedir(), ".local", "bin", "whisper"),
+  "/opt/homebrew/bin/whisper", // Homebrew on Apple silicon
   "/usr/local/bin/whisper",
   "/usr/bin/whisper",
 ];
 
 const FFMPEG_PATHS = [
   join(homedir(), ".local", "bin", "ffmpeg"),
+  "/opt/homebrew/bin/ffmpeg", // Homebrew on Apple silicon
   "/usr/local/bin/ffmpeg",
   "/usr/bin/ffmpeg",
 ];

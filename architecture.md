@@ -237,7 +237,7 @@ These are **separate sessions** by design. Cross-platform session unification (m
 Sessions persist as `.jsonl` files. The gateway resumes them on restart. Pi CLI can join any session with:
 
 ```bash
-pi --resume ~/.pi/agent/gateway-sessions/<thread_dir>/<session>.jsonl
+pi --resume ~/.roundhouse/sessions/<thread_dir>/<session>.jsonl
 ```
 
 ## Router extensibility

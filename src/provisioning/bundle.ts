@@ -5,11 +5,10 @@
  * All operations are non-fatal — failures are logged but don't throw.
  */
 
-import { homedir } from "node:os";
-import { resolve, dirname } from "node:path";
-import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, copyFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, readdirSync, copyFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 export const SKILLS_REPO = "https://github.com/inceptionstack/loki-skills.git";
@@ -55,8 +54,11 @@ export function syncSkillsFromRepo(opts: ProvisionOpts = {}): number {
   }
 
   log.info("Syncing skills from inceptionstack/loki-skills...");
-  const tmpDir = `/tmp/loki-skills-${randomBytes(4).toString("hex")}`;
+  let tmpDir = "";
   try {
+    // mkdtemp creates the directory itself (0700), so nothing can be planted
+    // at a guessable path before the clone.
+    tmpDir = mkdtempSync(join(tmpdir(), "loki-skills-"));
     mkdirSync(SKILLS_DIR, { recursive: true });
     execFileSync("git", ["clone", "--depth", "1", "--quiet", SKILLS_REPO, tmpDir], {
       stdio: "pipe", timeout: 60_000,
@@ -85,7 +87,7 @@ export function syncSkillsFromRepo(opts: ProvisionOpts = {}): number {
     log.warn(`Skill sync failed: ${err.message}`);
     return 0;
   } finally {
-    try { execFileSync("rm", ["-rf", tmpDir], { stdio: "pipe" }); } catch {}
+    if (tmpDir) { try { execFileSync("rm", ["-rf", tmpDir], { stdio: "pipe" }); } catch {} }
   }
 }
 

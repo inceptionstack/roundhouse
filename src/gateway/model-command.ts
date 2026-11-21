@@ -43,6 +43,39 @@ const KEYBOARD_MODELS = [
   "deepseek", "llama", "nova-pro", "mistral",
 ] as const;
 
+type ModelChoice = { provider: string; model: string; label: string };
+
+/**
+ * The models to offer: what pi itself is set up with on this host.
+ *
+ * pi's `enabledModels` setting lists the models the owner enabled as
+ * `provider/model-id`. When it is present it replaces the built-in aliases
+ * above, which name specific Bedrock model ids and go stale; picking a
+ * retired one would break pi for the gateway and for the pi CLI, since both
+ * read the same settings.json. Patterns (`*`) are skipped.
+ */
+export function modelChoices(settings: Record<string, any>): { aliases: Record<string, ModelChoice>; order: string[] } {
+  const enabled = Array.isArray(settings.enabledModels) ? settings.enabledModels : [];
+  const aliases: Record<string, ModelChoice> = Object.create(null);
+  const order: string[] = [];
+  for (const entry of enabled) {
+    if (typeof entry !== "string" || entry.includes("*")) continue;
+    const slash = entry.indexOf("/");
+    if (slash <= 0 || slash === entry.length - 1) continue;
+    const provider = entry.slice(0, slash);
+    const model = entry.slice(slash + 1);
+    // "us.anthropic.claude-opus-5-5" -> "opus-5-5"; otherwise the last dotted part.
+    const tail = model.slice(model.lastIndexOf(".") + 1) || model;
+    const alias = tail.replace(/^claude-/, "").toLowerCase();
+    if (!alias || alias in aliases) continue;
+    aliases[alias] = { provider, model, label: tail };
+    order.push(alias);
+  }
+  if (order.length > 0) return { aliases, order: order.slice(0, 8) };
+  for (const key of Object.keys(MODEL_ALIASES)) aliases[key] = MODEL_ALIASES[key];
+  return { aliases, order: [...KEYBOARD_MODELS] };
+}
+
 /** Action ID for model selection callbacks */
 export const MODEL_ACTION_ID = "model_select";
 
@@ -68,7 +101,7 @@ function writeSettings(settings: Record<string, any>): void {
 function getCurrentModelLabel(settings: Record<string, any>): string {
   const provider = settings.defaultProvider ?? "unknown";
   const model = settings.defaultModel ?? "unknown";
-  for (const [, info] of Object.entries(MODEL_ALIASES)) {
+  for (const info of Object.values(modelChoices(settings).aliases)) {
     if (info.provider === provider && info.model === model) return info.label;
   }
   return String(model);
@@ -78,25 +111,26 @@ function getCurrentModelLabel(settings: Record<string, any>): string {
  * Build the /model menu as a transport-neutral RichResponse.
  * Delegates to the shared `buildSelectableMenu` picker helper.
  */
-function buildModelMenu(currentLabel: string): RichResponse {
+function buildModelMenu(currentLabel: string, settings: Record<string, any>): RichResponse {
+  const { aliases, order } = modelChoices(settings);
   // Map our label-based "current" semantics into the helper's key-based
   // semantics by finding the alias whose label matches.
   // TODO: introduce getCurrentModelAlias() upstream so the round-trip
   // (alias → label → alias) goes away. With 8 models the O(n) lookup is
   // negligible; the smell is purely about clarity.
-  const currentAlias = KEYBOARD_MODELS.find(
-    (alias) => MODEL_ALIASES[alias].label === currentLabel,
+  const currentAlias = order.find(
+    (alias) => aliases[alias].label === currentLabel,
   );
 
   return buildSelectableMenu({
     current: currentAlias,
-    options: KEYBOARD_MODELS.map((alias) => ({
+    options: order.map((alias) => ({
       key: alias,
-      label: MODEL_ALIASES[alias].label,
+      label: aliases[alias].label,
     })),
     actionId: MODEL_ACTION_ID,
     textHeader: `\ud83e\udd16 *Current model:* ${currentLabel}`,
-    textHint: "_Usage:_ `/model sonnet`",
+    textHint: `_Usage:_ \`/model ${order[0] ?? "sonnet"}\``,
     columns: 2,
   });
 }
@@ -109,7 +143,7 @@ export async function handleModel(ctx: ModelCommandContext): Promise<RichRespons
 
   // No argument: show menu (current model + clickable list).
   if (!target) {
-    return buildModelMenu(getCurrentModelLabel(settings));
+    return buildModelMenu(getCurrentModelLabel(settings), settings);
   }
 
   return applyModelSelection(target, settings);
@@ -125,17 +159,24 @@ export function applyModelSelection(
 ): RichResponse {
   if (!settings) settings = readSettings();
 
-  const resolved = MODEL_ALIASES[target];
+  // Own keys only: "constructor" or "__proto__" must not resolve to something
+  // inherited and write an undefined model into pi's settings.
+  const { aliases: known } = modelChoices(settings);
+  const resolved = Object.hasOwn(known, target) ? known[target] : undefined;
   if (!resolved) {
     if (target.includes(".") || target.includes("/")) {
-      // Treat as a raw provider/model id passthrough.
-      const provider = settings.defaultProvider ?? "amazon-bedrock";
-      settings.defaultModel = target;
+      // Raw id passthrough: "provider/model-id", or a bare model id on the
+      // current provider.
+      const slash = target.indexOf("/");
+      const provider = slash > 0 ? target.slice(0, slash) : (settings.defaultProvider ?? "amazon-bedrock");
+      const model = slash > 0 ? target.slice(slash + 1) : target;
+      if (!model) return { text: `\u274c Unknown model: \`${target}\`` };
+      settings.defaultModel = model;
       settings.defaultProvider = provider;
       writeSettings(settings);
-      return { text: `\u2705 Model set to: \`${provider}/${target}\`` };
+      return { text: `\u2705 Model set to: \`${provider}/${model}\`` };
     }
-    const aliases = Object.keys(MODEL_ALIASES).join(", ");
+    const aliases = Object.keys(known).join(", ");
     return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
   }
 
@@ -153,6 +194,8 @@ export function applyModelSelection(
  */
 export function handleModelAction(event: { value?: string }): RichResponse | void {
   const alias = event.value;
-  if (!alias || !MODEL_ALIASES[alias]) return;
-  return applyModelSelection(alias, null);
+  if (!alias) return;
+  const settings = readSettings();
+  if (!Object.hasOwn(modelChoices(settings).aliases, alias)) return;
+  return applyModelSelection(alias, settings);
 }

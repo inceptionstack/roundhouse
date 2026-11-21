@@ -31,7 +31,7 @@ roundhouse cron add <job-id> --prompt "..." --at "30m"
 - `--tz "..."` — Timezone (default: UTC)
 - `--telegram "..."` — Telegram chat IDs to notify (comma-separated)
 - `--description "..."` — Human-readable description
-- `--timeout "..."` — Max runtime (e.g. "5m", default: 10m)
+- `--timeout "..."` — Max runtime (e.g. "5m", default: 30m)
 
 **Examples:**
 ```bash
@@ -85,8 +85,8 @@ git push origin <branch>
 # Create PRs
 gh pr create --base main --head <branch> --title "..." --body "..."
 
-# Merge PRs
-gh pr merge <number> --squash --admin
+# Merge PRs (ask the user first; a merge can publish a release)
+gh pr merge <number> --squash
 
 # Check CI status
 gh pr checks <number>
@@ -95,6 +95,9 @@ gh run list --limit 5
 # Create releases / tags
 git tag v1.2.3 && git push origin v1.2.3
 ```
+
+Never pass `--admin` or otherwise bypass branch protection, required reviews or
+failing checks. If a merge is blocked, say why and stop.
 
 **Prefer `gh` over raw git for:**
 - PR creation and merging
@@ -168,7 +171,8 @@ Durable state files the agent can read and update:
 
 ## AWS CLI
 
-Full AWS access via instance role (us-east-1). No credentials needed.
+Uses whatever AWS credentials are configured on this host, if any. Check with
+`aws sts get-caller-identity` before assuming access, account or region.
 
 ```bash
 aws sts get-caller-identity

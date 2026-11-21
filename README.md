@@ -116,6 +116,30 @@ export ALLOWED_USERS="your_username"
 roundhouse install    # installs as systemd service, starts automatically
 ```
 
+### 4. Or run the gateway only, without the bundle (macOS)
+
+`roundhouse setup` also installs skills, CLI tools and extensions. To run just the gateway against a pi you already have:
+
+```bash
+git clone https://github.com/inceptionstack/roundhouse.git && cd roundhouse
+npm ci --ignore-scripts
+ln -s "$PWD/bin/roundhouse.mjs" ~/.local/bin/roundhouse
+mkdir -m 700 ~/.roundhouse
+# ~/.roundhouse/gateway.config.json  (mode 600): agent + chat.allowedUsers + adapters.telegram
+# ~/.roundhouse/.env                 (mode 600): TELEGRAM_BOT_TOKEN="..."
+roundhouse pair --user your_username   # tap the link; records your numeric id
+roundhouse install                     # LaunchAgent only
+```
+
+## Security model
+
+Whoever gets a message accepted by the gateway drives an agent with shell access as the user running it. There is no sandbox.
+
+- **Access is by paired numeric ID.** Usernames only count until pairing records an ID, and are matched against the real @username. An empty allowlist refuses everyone.
+- **The agent can read everything its user can**, including `~/.roundhouse/.env`. Run it as a dedicated user, or in a container or VM, if that matters.
+- **Content is not instructions, but nothing enforces that.** Files, web pages, attachments and voice transcripts reach the model as text. Keep `soul.md` / `tools.md` explicit about what needs your confirmation.
+- **`roundhouse setup` and `/update` install unpinned software** (latest npm packages, a skills repo at its default branch, the uv installer). Set `chat.allowUpdateCommand: false` and use the gateway-only install above on machines where that is not acceptable.
+
 ## Slack quick start
 
 Slack is supported in **socket mode** (single workspace, v1). No public URL required — the gateway connects to Slack via WebSocket.
@@ -174,7 +198,7 @@ Commands:
   start               Start the gateway daemon
   run                 Run the gateway in foreground
   tui [thread]        Open agent TUI on a gateway session
-  install             Install as a systemd daemon (requires sudo)
+  install             Install the service only (LaunchAgent on macOS; no packages)
   uninstall           Remove the systemd daemon
   update              Update from npm + restart daemon
   status              Show daemon status (rich detail view)
@@ -231,8 +255,12 @@ Without a config file, defaults are used with env vars (`TELEGRAM_BOT_TOKEN`, `B
 | `agent.cwd` | Working directory for the agent |
 | `agent.sessionDir` | Override session storage path |
 | `chat.botUsername` | Bot display name for Chat SDK |
-| `chat.allowedUsers` | Telegram / Slack usernames allowed (empty = allow all) |
-| `chat.allowedUserIds` | Immutable user IDs (Telegram numeric, Slack `Uxxx`); paired during setup |
+| `chat.allowedUserIds` | Immutable user IDs (Telegram numeric, Slack `Uxxx`); filled in by pairing. Once this has an entry, only these IDs are accepted and usernames are ignored |
+| `chat.allowedUsers` | Telegram / Slack usernames accepted until an ID is paired. Matched against the real @username, never the display name |
+| `chat.allowAll` | `true` lets anyone use the bot when both lists are empty. Default: an empty allowlist refuses everyone |
+| `chat.dmOnly` | `true` answers in private chats only and ignores groups, channels and topics |
+| `chat.bootTurn` | `false` skips the greeting agent turn on every start (default `true`) |
+| `chat.allowUpdateCommand` | `false` disables `/update` from chat (default `true`) |
 | `chat.notifyChatIds` | Chat IDs to notify on startup (Telegram numeric, Slack `Cxxx`/`Dxxx`) |
 | `chat.adapters.telegram` | `{ "mode": "polling" \| "webhook" \| "auto" }` |
 | `chat.adapters.slack` | `{ "mode": "socket" }` (v1: socket mode only; tokens via `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` env) |
@@ -244,14 +272,14 @@ Secrets stay in env vars: `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TO
 
 ## Joining a session from pi CLI
 
-Sessions are stored at `~/.pi/agent/gateway-sessions/<thread>/`. Resume from CLI:
+Sessions are stored at `~/.roundhouse/sessions/<thread>/`. Resume from CLI:
 
 ```bash
 # Via roundhouse (recommended — auto-discovers sessions)
 roundhouse tui
 
 # Or directly via pi
-pi --resume ~/.pi/agent/gateway-sessions/<thread_dir>/<session>.jsonl
+pi --resume ~/.roundhouse/sessions/<thread_dir>/<session>.jsonl
 ```
 
 Messages from Telegram/Slack and from the CLI share the same context.
@@ -554,7 +582,7 @@ The `CompositeTransportAdapter` automatically routes per-thread methods by `owns
 | `src/agents/base-adapter.ts` | Abstract base class — adapter interface contract |
 | `src/agents/registry.ts` | Agent type → factory registry |
 | `src/config.ts` | Shared config loading, defaults, env overrides |
-| `test/` | Unit + integration tests (vitest, 678 passing) |
+| `test/` | Unit + integration tests (vitest) |
 
 ## CI/CD
 

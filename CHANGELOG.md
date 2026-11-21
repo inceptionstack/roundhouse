@@ -2,6 +2,54 @@
 
 All notable changes to `@inceptionstack/roundhouse` are documented here.
 
+## [Unreleased]
+
+> **Upgrade notes.** Needs Node >= 22.19 and pi 1.x. An empty allowlist now
+> refuses everyone: set `chat.allowAll: true` if an open bot is intended.
+> Once `chat.allowedUserIds` has an entry, `chat.allowedUsers` no longer
+> grants access; run `roundhouse pair` on deployments that only list usernames.
+
+### Security
+- **Allowlist bypass by display name (Telegram).** The allowlist matched the
+  Chat SDK's `author.userName`, which the Telegram adapter builds as
+  `username ?? first_name ?? id`. An account without an @username could set
+  its first name to an allowed username and be accepted, which gives it the
+  agent's shell. Usernames are now read from Telegram's own `from.username`,
+  and are ignored entirely once an id is paired.
+- **Fail closed.** With no `allowedUsers` and no `allowedUserIds` every
+  message is refused; `chat.allowAll: true` is the explicit opt-in.
+- Inline-button presses are authorized like messages. Threads are subscribed
+  only for allowed authors (a group member's mention used to subscribe the
+  thread, after which the owner's messages there ran as prompts).
+- Strangers' message text is no longer logged; one line per blocked id.
+- New `chat.dmOnly`, `chat.bootTurn` and `chat.allowUpdateCommand` switches.
+- A voice note no longer makes the agent install whisper/ffmpeg.
+- `~/.roundhouse` is forced to mode 700 at start; the config stays 600 when
+  pairing rewrites it. The skills clone uses `mkdtemp`.
+- Bundled `tools.md` and the `pr-merge-discipline` skill no longer tell the
+  agent to merge with `gh pr merge --admin`, and no longer claim AWS access.
+- Dependencies: 25 known advisories (17 high) in the lockfile, now 0.
+
+### Changed
+- **pi 1.6.** The pi adapter uses `ModelRuntime` and the public
+  `session.isIdle` / `waitForIdle()` instead of `AuthStorage`,
+  `ModelRegistry` and the private `_agentEventQueue`, all removed upstream.
+- Chat SDK 4.45, croner 11, p-queue 10, vitest 5. Added `npm run typecheck`.
+- `/model` offers the models enabled in pi's settings (`enabledModels`) and
+  falls back to the built-in aliases only when there are none.
+- `roundhouse install` on macOS installs just the LaunchAgent.
+  `roundhouse pair` also records the bot username.
+
+### Fixed
+- Sub-agents on macOS: process tracking read `/proc`, so every spawn failed.
+- Sub-agent results were injected into session `main` whatever chat they
+  belonged to, and looked for run output under `/home/ec2-user`.
+- whisper/ffmpeg were never found under `/opt/homebrew/bin`.
+- `/model constructor` (or `__proto__`) wrote an undefined model into pi's
+  settings; `/model provider/model-id` stored the provider inside the id.
+- `/status`, `roundhouse status` and `doctor` reported "no allowlist" for an
+  id-only setup.
+
 ## [0.6.0] — 2026-05-26
 
 > **Migration note for out-of-tree TransportAdapter implementations.** The

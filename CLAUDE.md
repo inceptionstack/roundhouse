@@ -11,9 +11,12 @@ npm test                         # vitest run (single pass)
 npm run test:watch               # vitest watch
 npx vitest run test/unit.test.ts # run a single test file
 npx vitest run -t "splitMessage" # run tests matching a name
+npm run typecheck                # tsc --noEmit (must stay clean)
 ```
 
-There is no lint or typecheck script. TypeScript is executed directly via `tsx`; `tsc` is never invoked at build/runtime. The only "build" happens implicitly when the CLI's `start` command prefers a compiled `src/dist/index.js` if present, otherwise re-runs `tsx` on `src/index.ts`.
+Tests write under `$HOME` (`~/.roundhouse`, `~/.pi/agent`, `~/.mcporter`). On a machine that runs roundhouse, run them with a throwaway home: `HOME=$(mktemp -d) npm test`.
+
+There is no lint script. TypeScript is executed directly via `tsx`; `tsc` only typechecks and is never invoked at build/runtime. The only "build" happens implicitly when the CLI's `start` command prefers a compiled `src/dist/index.js` if present, otherwise re-runs `tsx` on `src/index.ts`.
 
 The repo uses a custom git hooks path: `git config core.hooksPath .githooks` (already set locally). `.githooks/pre-commit` scans staged diffs for secret patterns (Telegram/Anthropic/OpenAI/AWS/NPM) and blocks commits. Don't bypass with `--no-verify` unless the user asks.
 
@@ -30,15 +33,23 @@ Roundhouse is a chat-gateway between chat platforms (via Vercel Chat SDK) and a 
 - `turn_end` / `agent_end` → flush so the next turn starts a fresh message
 If `promptStream` is missing, `agent.prompt()` is called and the full text is split/posted via `postWithFallback` (markdown-first, plaintext fallback).
 
-**Pi adapter nuance — private event queue drain.** `src/agents/pi/pi-adapter.ts` awaits `session._agentEventQueue` (a private field of `@earendil-works/pi-coding-agent`'s `AgentSession`) after every `prompt()` / `agent.continue()`. Without this drain, extension `agent_end` handlers (e.g. pi-lgtm's review) haven't finished and their `followUp` messages or `custom_message` events race against the `unsubscribe()` in the `finally` block, causing lost review bubbles. The field access is wrapped in `if (queue)` — if upstream renames it, behavior silently reverts to the pre-fix race. See the big comment in `drainSessionEvents()` for context before touching it.
+**Pi adapter nuance — wait for idle, not for `prompt()`.** `src/agents/pi/pi-adapter.ts` targets pi 1.x (`@earendil-works/pi-coding-agent`, pinned to the exact version in `package.json`). Since pi 1.0, `session.prompt()` resolves only after the run has settled: retries, compaction, follow-ups queued by `agent_end` handlers and the `agent_settled` handlers are all inside it. A run an extension starts *after* that (`pi.sendMessage(..., { triggerTurn: true })` while idle) is not, so `runPromptAndFollowUps` then loops on the public `session.isIdle` / `session.waitForIdle()` before the caller unsubscribes. Unsubscribe earlier and Telegram shows a review bubble followed by silence. Do not reintroduce the pre-1.0 workarounds (awaiting the private `_agentEventQueue`, calling `agent.continue()` by hand): that field is gone and the session drains its own queues.
 
-**Pi adapter nuance — subscribers must outlive extension-triggered runs.** `runPromptAndFollowUps` loops on *both* `session.isStreaming` (awaits `agent.waitForIdle()`) and `agent.hasQueuedMessages()` (awaits `agent.continue()`). When an extension calls `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` inside its `agent_end` handler, pi's `sendCustomMessage` picks one of two branches depending on `isStreaming` at that moment: if still streaming it queues via `agent.followUp()` (caught by `hasQueuedMessages`); if already idle it bypasses the queue and calls `agent.prompt(appMessage)` directly as fire-and-forget, kicking off a new run that is *only* visible via `isStreaming`. The pi CLI is immune because its subscriber stays attached across runs; our per-prompt subscriber must loop on both conditions or we unsubscribe mid-run and Telegram sees the review bubble followed by silence. Don't collapse the loop to a single condition.
+**Pi adapter nuance — "still working" notices come from events.** `promptStream` emits `draining` when a new low-level run (`agent_start`) begins after one already ended (`agent_end` with `willRetry: false`) inside the same prompt, and `drain_complete` on `agent_settled`. A retry is not a new run for this purpose.
+
+**Pi adapter nuance — models and auth.** One lazily created `ModelRuntime` (pi's replacement for `AuthStorage` + `ModelRegistry`) is shared by all sessions. Per-call model overrides (`promptWithModel`, `compactWithModel`) swap `session.agent.state.model` in memory and restore it; they deliberately avoid `session.setModel()`, which writes a model change into the transcript.
 
 **Thread serialization.** The pi adapter keeps one queue per `threadId` (`threadQueues` in pi.ts). `prompt()` and `promptStream()` both `enqueue()` onto this chain so overlapping user messages in the same thread never race inside the pi session. Don't remove this — pi sessions are not safe for concurrent prompts.
 
-**Per-thread sessions persist as `.jsonl`** at `<sessionDir>/<threadIdToDir(threadId)>/<session>.jsonl` (default `~/.pi/agent/gateway-sessions/`). Thread IDs are encoded reversibly by `threadIdToDir` in `src/util.ts` (`_` → `_u`, `:` → `_c`, other → `_x`) so that `telegram:123` and `telegram_123` do not collide. `SessionManager.continueRecent` resumes the most recent jsonl in that dir; `SessionManager.create` starts a new one if none exist.
+**Per-thread sessions persist as `.jsonl`** at `<sessionDir>/<threadIdToDir(threadId)>/<session>.jsonl` (default `~/.roundhouse/sessions/`). Thread IDs are encoded reversibly by `threadIdToDir` in `src/util.ts` (`_` → `__`, `:` → `_c`, other → `_xNNNN`) so that `telegram:123` and `telegram_123` do not collide. `SessionManager.continueRecent` resumes the most recent jsonl in that dir; `SessionManager.create` starts a new one if none exist.
 
 **Config resolution order** (src/config.ts → `loadConfig`): `ROUNDHOUSE_CONFIG` env → `--config <path>` CLI flag → `~/.roundhouse/gateway.config.json` (with legacy fallback to `~/.config/roundhouse/`) → `./gateway.config.json` → `DEFAULT_CONFIG`. Then `applyEnvOverrides` layers `BOT_USERNAME`, `ALLOWED_USERS`, `NOTIFY_CHAT_IDS` on top. Secrets (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`) are always env-only, never read from config.
+
+**Who may drive the agent** (`isAllowed` in `src/util.ts`; wired in `Gateway.start()`). Anyone whose message is accepted gets the agent's shell, so this is the security boundary:
+- `chat.allowedUserIds` non-empty: only those immutable platform ids pass, and usernames are ignored. Pairing fills this list.
+- Otherwise `chat.allowedUsers`: matched against `verifiedHandle()`, never against the Chat SDK's `author.userName`. On Telegram the SDK builds `userName` as `from.username ?? from.first_name ?? id`, so an account without an @username can set its first name to the owner's handle; only `raw.from.username` counts.
+- Both empty: everyone is refused unless `chat.allowAll: true`.
+- The check runs before `thread.subscribe()`, before the message is logged, and on inline-button presses (`chat.onAction`). `chat.dmOnly: true` ignores groups, channels and topics. Keep new handlers behind the same `allowed()` helper; `test/security-hardening.test.ts` covers the wiring.
 
 **Install/daemon.** `roundhouse install` writes `~/.roundhouse/gateway.config.json`, an env file at `~/.roundhouse/.env` (merged with existing so manually-added keys survive), and a systemd unit that uses `roundhouse run` (foreground mode) as ExecStart. `roundhouse start` starts the daemon via systemctl; `roundhouse run` runs in the foreground (used by systemd and for dev). `roundhouse update` does `npm update -g` then `systemctl restart`. All chat input in the daemon goes through the unit's `EnvironmentFile`.
 

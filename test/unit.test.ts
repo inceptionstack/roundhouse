@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitMessage, isAllowed, threadIdToDir } from "../src/util";
+import { splitMessage, isAllowed, verifiedHandle, threadIdToDir } from "../src/util";
 
 // ─────────────────────────────────────────────────────
 // splitMessage
@@ -73,8 +73,29 @@ describe("splitMessage", () => {
 // ─────────────────────────────────────────────────────
 
 describe("isAllowed", () => {
-  it("allows all when allowlist is empty", () => {
-    expect(isAllowed({ author: { userName: "anyone" } }, [])).toBe(true);
+  // Telegram-shaped raw payloads: what @chat-adapter/telegram hands us.
+  const tg = (from: { id: number; username?: string; first_name?: string }) => ({
+    author: {
+      userId: String(from.id),
+      // Mirrors the adapter: username ?? first_name ?? id
+      userName: from.username ?? from.first_name ?? String(from.id),
+      fullName: from.first_name ?? "",
+    },
+    raw: { from, chat: { id: from.id, type: "private" } },
+  });
+
+  it("denies everyone when the allowlist is empty (fail closed)", () => {
+    expect(isAllowed({ author: { userName: "anyone" } }, [])).toBe(false);
+    expect(isAllowed({ author: { userName: "anyone", userId: "1" } }, [], [])).toBe(false);
+  });
+
+  it("allows everyone on an empty allowlist only with an explicit allowAll", () => {
+    expect(isAllowed({ author: { userName: "anyone" } }, [], [], { allowAll: true })).toBe(true);
+  });
+
+  it("allowAll does not widen a configured allowlist", () => {
+    expect(isAllowed({ author: { userName: "hacker" } }, ["alice"], [], { allowAll: true })).toBe(false);
+    expect(isAllowed({ author: { userId: "999" } }, [], [12345], { allowAll: true })).toBe(false);
   });
 
   it("allows matching userName", () => {
@@ -83,16 +104,15 @@ describe("isAllowed", () => {
     ).toBe(true);
   });
 
-  it("allows matching userId", () => {
+  it("allows a platform id listed in allowedUsers (legacy configs)", () => {
     expect(
       isAllowed({ author: { userId: "12345" } }, ["12345"])
     ).toBe(true);
   });
 
-  it("is case-insensitive on userName", () => {
-    expect(
-      isAllowed({ author: { userName: "Alice" } }, ["alice"])
-    ).toBe(true);
+  it("is case-insensitive on userName, on both sides, and ignores a leading @", () => {
+    expect(isAllowed({ author: { userName: "Alice" } }, ["alice"])).toBe(true);
+    expect(isAllowed({ author: { userName: "alice" } }, ["@Alice"])).toBe(true);
   });
 
   it("blocks when userName does not match", () => {
@@ -117,6 +137,34 @@ describe("isAllowed", () => {
 
   it("blocks messages with empty author", () => {
     expect(isAllowed({ author: {} }, ["alice"])).toBe(false);
+  });
+
+  // ── Telegram: the SDK's userName falls back to first_name ──
+
+  it("allows a Telegram user whose real @username is allowlisted", () => {
+    expect(isAllowed(tg({ id: 111, username: "Alice", first_name: "Al" }), ["alice"])).toBe(true);
+  });
+
+  it("SECURITY: a Telegram account with no @username cannot pass by setting its first name to the owner's username", () => {
+    const spoof = tg({ id: 666, first_name: "alice" });
+    expect(spoof.author.userName).toBe("alice"); // what the SDK reports
+    expect(verifiedHandle(spoof)).toBeUndefined();
+    expect(isAllowed(spoof, ["alice"])).toBe(false);
+  });
+
+  it("SECURITY: a Telegram channel or anonymous-admin post titled like the owner's username is denied", () => {
+    const channelPost = {
+      author: { userId: "chat:-100123", userName: "alice", fullName: "alice" },
+      raw: { sender_chat: { id: -100123, title: "alice" }, chat: { id: -100123, type: "channel" } },
+    };
+    expect(isAllowed(channelPost, ["alice"])).toBe(false);
+  });
+
+  it("SECURITY: once ids are paired, a matching username no longer grants access", () => {
+    // The owner renamed; someone else registered the old handle.
+    const squatter = tg({ id: 222, username: "alice" });
+    expect(isAllowed(squatter, ["alice"], [111])).toBe(false);
+    expect(isAllowed(tg({ id: 111, username: "renamed" }), ["alice"], [111])).toBe(true);
   });
 
   // ── Multi-transport allowlist (Phase 1: widened to (string | number)[]) ──
