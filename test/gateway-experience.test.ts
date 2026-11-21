@@ -30,15 +30,20 @@ vi.mock("../src/config", async (importOriginal) => {
 });
 
 type Handler = (...args: any[]) => Promise<void> | void;
-const wired: { dm?: Handler; shutdown: () => Promise<void> } = { shutdown: async () => {} };
+const wired: { dm?: Handler; rawDm?: Handler; slash?: Handler; rawSlash?: Handler; shutdown: () => Promise<void> } = { shutdown: async () => {} };
+
+let currentGateway: { whenIdle(): Promise<void> } | undefined;
+const threads = new Map<string, any>();
 
 vi.mock("chat", async (importOriginal) => {
   const actual = await importOriginal<typeof import("chat")>();
   class FakeChat {
-    onDirectMessage(h: Handler) { wired.dm = h; }
+    // `dm` waits for the outcome; `rawDm` is the handler exactly as the SDK calls it.
+    onDirectMessage(h: Handler) { wired.rawDm = h; wired.dm = async (...a: any[]) => { await h(...a); await currentGateway?.whenIdle(); }; }
     onNewMention() {}
     onSubscribedMessage() {}
-    onSlashCommand() {}
+    onSlashCommand(h: Handler) { wired.rawSlash = h; wired.slash = async (...a: any[]) => { await h(...a); await currentGateway?.whenIdle(); }; }
+    thread(id: string) { return threads.get(id); }
     onAction() {}
     async initialize() {}
     shutdown() { return wired.shutdown(); }
@@ -62,7 +67,17 @@ vi.mock("../src/subagents", () => ({
 import { Gateway } from "../src/gateway/gateway";
 
 const OWNER = 111;
-const thread = () => ({ id: `telegram:${OWNER}`, subscribe: async () => {}, post: vi.fn(async () => {}), startTyping: async () => {} });
+const thread = () => {
+  // `adapter.telegramFetch` is what marks a thread as Telegram's for the transport layer.
+  const t = { id: `telegram:${OWNER}`, subscribe: async () => {}, post: vi.fn(async () => {}), startTyping: vi.fn(async () => {}), adapter: { telegramFetch: async () => ({}) } };
+  threads.set(t.id, t);
+  return t;
+};
+const slash = (command: string, text = "") => ({
+  command, text, channel: { id: `telegram:${OWNER}` },
+  user: { userId: String(OWNER), userName: "alice" },
+  raw: { from: { id: OWNER, username: "alice" }, chat: { id: OWNER, type: "private" } },
+});
 const message = (text: string, extra: Record<string, unknown> = {}) => ({
   text, threadId: `telegram:${OWNER}`, attachments: [],
   author: { userId: String(OWNER), userName: "alice" },
@@ -93,6 +108,7 @@ async function startGateway(info: Record<string, unknown> = {}, agentExtra: Reco
   transport.notify = async () => {};
   transport.postMessage = async () => {};
   await gw.start();
+  currentGateway = gw;
   return { gw, prompts, disposed };
 }
 
@@ -117,7 +133,13 @@ describe("standing context", () => {
     const { prompts } = await startGateway({ standingContext: "system-prompt" });
     await wired.dm!(thread(), message("hello"));
     await wired.dm!(thread(), message("and again"));
-    expect(prompts).toEqual(["hello", "and again"]);
+    // (The Telegram transport appends its one-line formatting hint; the point
+    // is that neither block is there.)
+    expect(prompts.map((p) => p.split("\n")[0])).toEqual(["hello", "and again"]);
+    for (const p of prompts) {
+      expect(p).not.toContain("<persona>");
+      expect(p).not.toContain("<tools>");
+    }
   });
 
   it("buildStandingContext joins persona and tools and follows an edited tools.md", async () => {
@@ -255,5 +277,126 @@ describe("flush before compaction", () => {
 
   it("uses the configured flush model for both steps", async () => {
     expect(await flush({ compact: { flushModel: "p/cheap" } })).toEqual(["promptWithModel:p/cheap", "compactWithModel:p/cheap"]);
+  });
+});
+
+describe("staying responsive during a turn", () => {
+  it("the handler returns at once, messages keep their order, and a command does not wait in line", async () => {
+    const gate: Array<() => void> = [];
+    const order: string[] = [];
+    const abort = vi.fn(async () => {});
+    const { prompts } = await startGateway({ standingContext: "system-prompt" }, {
+      prompt: async (_t: string, m: { text: string }) => {
+        order.push(`start:${m.text.split("\n")[0]}`);
+        await new Promise<void>((r) => gate.push(r));
+        order.push(`end:${m.text.split("\n")[0]}`);
+        return { text: "" };
+      },
+      abort,
+    });
+    void prompts;
+    const t = thread();
+
+    // The SDK's polling loop waits for this handler; it must not wait for the turn.
+    let returned = false;
+    await Promise.resolve(wired.rawDm!(t, message("first"))).then(() => { returned = true; });
+    expect(returned).toBe(true);
+    await vi.waitFor(() => expect(order).toEqual(["start:first"]));
+
+    await wired.rawDm!(t, message("second"));      // arrives while "first" runs
+    await wired.rawSlash!(slash("/cancel"));        // a command: handled now, not after the queue
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["start:first"]);           // "second" is still waiting its turn
+
+    gate.shift()!();
+    await vi.waitFor(() => expect(order).toEqual(["start:first", "end:first", "start:second"]));
+    gate.shift()!();
+    await currentGateway!.whenIdle();
+    expect(order).toEqual(["start:first", "end:first", "start:second", "end:second"]);
+  });
+
+  it("does not show a typing indicator again after the answer (Telegram cannot clear one)", async () => {
+    await startGateway();
+    const t = thread();
+    await wired.dm!(t, message("hello"));
+    await new Promise((r) => setTimeout(r, 20)); // the typing loop's cleanup is deferred
+    // Every call is a real "typing" action on Telegram; none may carry the "clear" argument.
+    expect(t.startTyping.mock.calls.every((c: unknown[]) => c[0] === undefined)).toBe(true);
+    const callsAfterAnswer = t.startTyping.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(t.startTyping.mock.calls.length).toBe(callsAfterAnswer);
+  });
+});
+
+describe("commands that act on the conversation", () => {
+  it("/model switches the conversation the command was sent in", async () => {
+    const setModel = vi.fn(async () => ({ applied: true }));
+    await startGateway({}, { setModel });
+    const t = thread();
+    await wired.slash!(slash("/model", "provider-x/model-y"));
+    expect(setModel).toHaveBeenCalledWith("main", "provider-x/model-y");
+  });
+
+  it("/think shows the level, sets one, and says so when the model lacks it", async () => {
+    let level = "high";
+    const thinkingLevel = vi.fn(async (_t: string, wanted?: string) => {
+      if (wanted && ["off", "low", "high"].includes(wanted)) level = wanted;
+      return { level, available: ["off", "low", "high"] };
+    });
+    await startGateway({}, { thinkingLevel });
+    const t = thread();
+    await wired.slash!(slash("/think"));
+    await wired.slash!(slash("/think", "low"));
+    await wired.slash!(slash("/think", "ultra"));
+    const posts = t.post.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(posts[0]).toMatch(/Thinking: \*high\*/);
+    expect(posts[1]).toMatch(/set to \*low\*/);
+    expect(posts[2]).toMatch(/not a level this model has/);
+    expect(thinkingLevel).toHaveBeenNthCalledWith(2, "main", "low");
+  });
+
+  it("/new tells the agent to start over and marks memory for re-injection", async () => {
+    const restart = vi.fn(async () => {});
+    await startGateway({}, { restart });
+    const t = thread();
+    await wired.slash!(slash("/new"));
+    expect(restart).toHaveBeenCalledWith("main");
+    const { loadThreadMemoryState } = await import("../src/memory/state");
+    expect((await loadThreadMemoryState("main")).forceInjectReason).toBe("new-session");
+    expect(String(t.post.mock.calls.at(-1)![0])).toMatch(/New conversation started/);
+  });
+});
+
+describe("a restart in the middle of a turn", () => {
+  it("is reported once by the next gateway, with the request, and nothing is run again", async () => {
+    let release!: () => void;
+    const first = await startGateway({ standingContext: "system-prompt" }, {
+      prompt: async () => { await new Promise<void>((r) => { release = r; }); return { text: "" }; },
+    });
+    const t = thread();
+    await wired.rawDm!(t, message("migrate the database and restart the service"));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await first.gw.stop();   // the service is restarted while the turn runs
+    release();
+    await first.gw.whenIdle();
+
+    const second = await startGateway({ standingContext: "system-prompt" });
+    const notices = t.post.mock.calls.map((c: unknown[]) => String(c[0])).filter((m) => m.includes("restarted while working"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("migrate the database and restart the service");
+    expect(second.prompts).toEqual([]);          // not run again
+
+    t.post.mockClear();
+    await startGateway({ standingContext: "system-prompt" }); // a third start has nothing to report
+    expect(t.post).not.toHaveBeenCalled();
+  });
+
+  it("a turn that finished leaves nothing to report", async () => {
+    await startGateway({ standingContext: "system-prompt" });
+    const t = thread();
+    await wired.dm!(t, message("quick question"));
+    t.post.mockClear();
+    await startGateway({ standingContext: "system-prompt" });
+    expect(t.post).not.toHaveBeenCalled();
   });
 });

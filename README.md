@@ -322,7 +322,9 @@ Roundhouse automatically registers these commands with Telegram on startup:
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a fresh conversation (resets the agent session for this chat) |
+| `/new` | Start a fresh conversation. The previous one stays on disk |
+| `/model [name]` | Show the models, or switch this conversation and the default to one |
+| `/think [level]` | Show or set the thinking level of this conversation |
 | `/compact` | Compact session context to free up tokens |
 | `/verbose` | Toggle tool status messages on/off for this chat |
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
@@ -363,11 +365,21 @@ When extensions (e.g. code review) queue follow-up work after the agent responds
 
 Fast operations that complete within 2 seconds show no extra messages.
 
+## While the agent is working
+
+Messages are received while a turn runs. A command (`/cancel`, `/status`, `/model`, …) is handled at once; an ordinary message waits its turn and runs after the current one, in the order sent.
+
+If the gateway is restarted or dies in the middle of a turn, the request is not run again. The next gateway tells you which request was cut off; say "continue" or send it again.
+
+## Prompt cache and long pauses
+
+A conversation is re-read by the model on every turn, and providers discount the part they still have cached. With the default five-minute cache, the first message after a longer pause pays for the whole conversation again, which is what a large context mostly costs in a chat. Setting `PI_CACHE_RETENTION=long` in `~/.roundhouse/.env` asks the provider for its longer cache lifetime (an hour on Anthropic models, direct or on Bedrock) at a higher price for cache writes. For a chat with pauses of minutes rather than seconds it is usually the cheaper setting.
+
 ## File attachments
 
 Roundhouse handles voice messages, images, documents, and other file attachments from Telegram:
 
-1. Files are downloaded and saved to `~/.roundhouse/incoming/<thread>/<message>/`
+1. Files are downloaded and saved to `~/.roundhouse/incoming/<thread>/<message>/`. With pi, up to five images per message are also passed to the model directly, so a screenshot is seen without a tool call
 2. A structured `AgentMessage` with typed `MessageAttachment[]` metadata is passed to the agent
 3. The agent receives file paths, MIME types, sizes, and can inspect files with its tools
 4. Files are marked as untrusted user-provided input

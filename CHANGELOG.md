@@ -16,6 +16,33 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 >   the real @username. On Slack a name no longer grants access at all;
 >   Slack users are admitted by paired id.
 
+### Fixed — the bot while a turn is running
+- **Nothing was received from Telegram during a turn.** The Chat SDK's
+  polling waits for the message handler, and the handler waited for the
+  whole agent turn, so `/cancel` could not interrupt anything and messages
+  sent meanwhile were not delivered until the turn ended. Handlers now return
+  at once; messages keep their order per chat and commands are handled
+  immediately.
+- **A turn cut off by a restart** is reported by the next gateway ("I was
+  restarted while working on …") instead of being silently dropped or run
+  a second time.
+- **`/new` reopened the conversation it had just closed.** It now starts an
+  empty session, also if the gateway restarts before the next message, and
+  the new session gets the memory files.
+- **`/model` never reached a conversation that already existed**: it only
+  changed the default. It now switches the conversation it is sent in (after
+  the current turn, if one is running) and says so when it cannot, for
+  example when the conversation no longer fits the other model's window.
+- No "Agent returned no response" after `/cancel`, and no phantom typing
+  indicator after each Telegram answer.
+
+### Added
+- `/think [level]` shows or sets the thinking level of the conversation.
+- `/status` shows what the conversation has cost so far, its token and cache
+  use and its thinking level, and no longer waits for `npm view`.
+- With pi, image attachments (up to five per message) are passed to the
+  model directly instead of only as file paths.
+
 ### Changed — long conversations on large-window models
 - **Compaction follows the model's context window.** The thresholds were
   capped at 130k/150k tokens, which suited 200k-token models and compacted a

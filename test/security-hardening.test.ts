@@ -22,14 +22,19 @@ const wired: {
   threads: Map<string, any>;
 } = { actions: new Map(), threads: new Map() };
 
+let currentGateway: { whenIdle(): Promise<void> } | undefined;
+const settled = (h: Handler): Handler => async (...args: any[]) => { await h(...args); await currentGateway?.whenIdle(); };
+
 vi.mock("chat", async (importOriginal) => {
   const actual = await importOriginal<typeof import("chat")>();
   class FakeChat {
-    onDirectMessage(h: Handler) { wired.dm = h; }
-    onNewMention(h: Handler) { wired.mention = h; }
-    onSubscribedMessage(h: Handler) { wired.subscribed = h; }
+    // The gateway's handlers return at once and work detached; a test wants
+    // the outcome, so each wired handler also waits for the gateway to be idle.
+    onDirectMessage(h: Handler) { wired.dm = settled(h); }
+    onNewMention(h: Handler) { wired.mention = settled(h); }
+    onSubscribedMessage(h: Handler) { wired.subscribed = settled(h); }
     onAction(id: string, h: Handler) { wired.actions.set(id, h); }
-    onSlashCommand(h: Handler) { wired.slash = h; }
+    onSlashCommand(h: Handler) { wired.slash = settled(h); }
     thread(id: string) {
       const t = wired.threads.get(id);
       if (!t) throw new Error(`no thread ${id}`);
@@ -129,6 +134,7 @@ async function startGateway(chat: Partial<GatewayConfig["chat"]>) {
   transport.postMessage = vi.fn(async () => {});
   transport.postRich = vi.fn(async () => {});
   await gw.start();
+  currentGateway = gw;
   return { gw, prompts, transport };
 }
 
@@ -369,7 +375,7 @@ describe("/model choices", () => {
     const { applyModelSelection } = await import("../src/gateway/model-command");
     for (const key of ["constructor", "__proto__", "tostring"]) {
       const settings: Record<string, any> = { defaultProvider: "p", defaultModel: "m" };
-      const res = applyModelSelection(key, settings);
+      const res = await applyModelSelection(key, settings);
       expect(res.text).toMatch(/Unknown model/);
       expect(settings).toEqual({ defaultProvider: "p", defaultModel: "m" });
     }

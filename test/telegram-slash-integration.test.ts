@@ -62,9 +62,12 @@ function update(id: number, from: typeof OWNER | typeof STRANGER, text: string) 
   };
 }
 
+let gateway: Gateway | undefined;
+
 async function deliver(u: unknown) {
   await Promise.all([adapter.processUpdate(u, {})].flat());
-  await new Promise((r) => setTimeout(r, 30));
+  // Handlers return at once; wait for the work they started.
+  await gateway?.whenIdle();
 }
 
 async function startGateway(chat: Partial<GatewayConfig["chat"]>) {
@@ -87,6 +90,7 @@ async function startGateway(chat: Partial<GatewayConfig["chat"]>) {
   transport.registerCommands = async () => {};
   transport.notify = async () => {};
   await gw.start();
+  gateway = gw;
   return { prompts };
 }
 
@@ -135,6 +139,81 @@ describe("Telegram slash commands through the real adapter", () => {
       }
       expect(sentTo(STRANGER.id)).toEqual([]);
       expect(prompts).toEqual([]);
+    }
+  });
+});
+
+describe("Telegram polling while a turn is running", () => {
+  /** Updates handed out by the fake getUpdates, one batch per call; then it idles. */
+  let batches: unknown[][];
+  let getUpdatesCalls: number;
+
+  beforeEach(() => {
+    batches = [];
+    getUpdatesCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: { body?: string; signal?: AbortSignal }) => {
+      const method = String(url).split("/").pop() ?? "";
+      let body: any = {};
+      try { body = init?.body ? JSON.parse(init.body) : {}; } catch { /* form data */ }
+      apiCalls.push([method, body]);
+      let result: unknown = true;
+      if (method === "getMe") result = { id: 999, is_bot: true, first_name: "rh", username: "rh_bot" };
+      if (method === "getUpdates") {
+        getUpdatesCalls++;
+        result = batches.shift() ?? [];
+        if ((result as unknown[]).length === 0) await new Promise((r) => setTimeout(r, 20));
+      }
+      if (method === "sendMessage") result = { message_id: 1, date: 1, chat: { id: body.chat_id, type: "private" } };
+      return new Response(JSON.stringify({ ok: true, result }), { headers: { "content-type": "application/json" } });
+    }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // This suite needs the adapter's real initialize: it starts the polling loop.
+    apiCalls = [];
+    adapter = createTelegramAdapter({ botToken: "123456:TEST-TOKEN-NOT-REAL", mode: "polling", userName: "rh_bot" } as any);
+  });
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("keeps receiving updates, so /cancel reaches a turn that is still running", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((r) => { release = r; });
+    const aborted = vi.fn(async () => { release(); });
+    const prompts: string[] = [];
+    const agent = {
+      name: "fake",
+      prompt: async (_t: string, m: { text: string }) => { prompts.push(m.text.split("\n")[0]); await blocked; return { text: "" }; },
+      promptStream: undefined,
+      abort: aborted,
+      dispose: async () => {},
+    };
+    const gw = new Gateway({ resolve: () => agent as any, dispose: async () => {} }, {
+      agent: { type: "fake" },
+      memory: { enabled: false },
+      voice: { stt: { enabled: false } },
+      chat: { botUsername: "rh_bot", allowedUserIds: [OWNER.id], adapters: { telegram: { mode: "polling" } }, bootTurn: false },
+    } as unknown as GatewayConfig);
+    const transport = (gw as any).transport;
+    transport.isPairingPending = async () => false;
+    transport.registerCommands = async () => {};
+    transport.notify = async () => {};
+
+    batches.push([update(1, OWNER, "do something long")]);
+    await gw.start();
+    try {
+      await vi.waitFor(() => expect(prompts).toEqual(["do something long"]), { timeout: 5000 });
+      // The turn is blocked. Polling must go on regardless.
+      const callsWhileBlocked = getUpdatesCalls;
+      await vi.waitFor(() => expect(getUpdatesCalls).toBeGreaterThan(callsWhileBlocked + 1), { timeout: 5000 });
+      expect(aborted).not.toHaveBeenCalled();
+
+      batches.push([update(2, OWNER, "/cancel")]);
+      await vi.waitFor(() => expect(aborted).toHaveBeenCalledTimes(1), { timeout: 5000 });
+      await gw.whenIdle();
+      const replies = apiCalls.filter(([m, b]) => m === "sendMessage" && String(b.chat_id) === String(OWNER.id));
+      expect(replies.some(([, b]) => /cancel/i.test(JSON.stringify(b)))).toBe(true);
+    } finally {
+      release();
+      await gw.stop();
     }
   });
 });

@@ -117,6 +117,8 @@ const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 export interface ModelCommandContext {
   text: string;
+  /** Switches the conversation the command was sent in, when the agent supports it. */
+  applyToConversation?: (model: string) => Promise<{ applied: boolean; deferred?: boolean; detail?: string }>;
 }
 
 function readSettings(): Record<string, any> {
@@ -184,56 +186,85 @@ export async function handleModel(ctx: ModelCommandContext): Promise<RichRespons
     return buildModelMenu(getCurrentModelLabel(settings), settings);
   }
 
-  return applyModelSelection(target, settings);
+  return applyModelSelection(target, settings, ctx.applyToConversation);
 }
+
+/** Switches the running conversation; supplied by the gateway when the agent can. */
+export type ApplyToConversation = (model: string) => Promise<{ applied: boolean; deferred?: boolean; detail?: string }>;
 
 /**
  * Apply a model selection (used by both `/model <arg>` and the menu callback).
- * Returns a RichResponse with confirmation text.
+ *
+ * Two things change: pi's default model, which new conversations start with,
+ * and, through `applyToConversation`, the conversation the command was sent
+ * in. The default alone never reaches an existing conversation: pi restores a
+ * session's model from its transcript.
  */
-export function applyModelSelection(
+export async function applyModelSelection(
   target: string,
   settings: Record<string, any> | null,
-): RichResponse {
+  applyToConversation?: ApplyToConversation,
+): Promise<RichResponse> {
   if (!settings) settings = readSettings();
 
   // Own keys only: "constructor" or "__proto__" must not resolve to something
   // inherited and write an undefined model into pi's settings.
   const { aliases: known } = modelChoices(settings);
-  const resolved = Object.hasOwn(known, target) ? known[target] : undefined;
+  let resolved = Object.hasOwn(known, target) ? known[target] : undefined;
   if (!resolved) {
-    if (target.includes(".") || target.includes("/")) {
-      // Raw id passthrough: "provider/model-id", or a bare model id on the
-      // current provider.
-      const slash = target.indexOf("/");
-      const provider = slash > 0 ? target.slice(0, slash) : (settings.defaultProvider ?? "amazon-bedrock");
-      const model = slash > 0 ? target.slice(slash + 1) : target;
-      if (!model) return { text: `\u274c Unknown model: \`${target}\`` };
-      settings.defaultModel = model;
-      settings.defaultProvider = provider;
-      writeSettings(settings);
-      return { text: `\u2705 Model set to: \`${provider}/${model}\`` };
+    if (!(target.includes(".") || target.includes("/"))) {
+      const aliases = Object.keys(known).join(", ");
+      return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
     }
-    const aliases = Object.keys(known).join(", ");
-    return { text: `\u274c Unknown model: \`${target}\`\n\nAvailable: ${aliases}` };
+    // Raw id passthrough: "provider/model-id", or a bare model id on the
+    // current provider.
+    const slash = target.indexOf("/");
+    const provider = slash > 0 ? target.slice(0, slash) : (settings.defaultProvider ?? "amazon-bedrock");
+    const model = slash > 0 ? target.slice(slash + 1) : target;
+    if (!model) return { text: `\u274c Unknown model: \`${target}\`` };
+    resolved = { provider, model, label: `${provider}/${model}` };
+  }
+
+  const ref = `${resolved.provider}/${resolved.model}`;
+  let outcome: Awaited<ReturnType<ApplyToConversation>> | undefined;
+  if (applyToConversation) {
+    try {
+      outcome = await applyToConversation(ref);
+    } catch (err) {
+      outcome = { applied: false, detail: (err as Error).message };
+    }
+    // Refused for this conversation and unknown to pi: do not make it the default either.
+    if (!outcome.applied && /does not know the model/.test(outcome.detail ?? "")) {
+      return { text: `\u274c ${outcome.detail}` };
+    }
   }
 
   settings.defaultProvider = resolved.provider;
   settings.defaultModel = resolved.model;
   writeSettings(settings);
+  console.log(`[roundhouse] /model: default is now ${ref}${outcome ? ` (conversation: ${outcome.applied ? (outcome.deferred ? "after this turn" : "switched") : "unchanged"})` : ""}`);
 
-  console.log(`[roundhouse] /model: switched to ${resolved.provider}/${resolved.model}`);
-  return { text: `\u2705 Switched to *${resolved.label}*` };
+  if (!outcome) {
+    return { text: `\u2705 *${resolved.label}* is now the default. A conversation that is already going keeps its model until /new.` };
+  }
+  if (outcome.applied) {
+    return {
+      text: outcome.deferred
+        ? `\u2705 Switching to *${resolved.label}* when the current turn finishes. New conversations use it too.`
+        : `\u2705 Switched to *${resolved.label}*, for this conversation and new ones.`,
+    };
+  }
+  return { text: `\u2705 *${resolved.label}* is now the default for new conversations.\n\u26a0\ufe0f This conversation stays on its current model: ${outcome.detail ?? "it could not be switched"}.` };
 }
 
 /**
  * Handle inline-keyboard callback for model selection.
  * Wired from the descriptor's `actions[MODEL_ACTION_ID]`.
  */
-export function handleModelAction(event: { value?: string }): RichResponse | void {
+export async function handleModelAction(event: { value?: string; applyToConversation?: ApplyToConversation }): Promise<RichResponse | void> {
   if (!event.value) return;
   const settings = readSettings();
   const alias = aliasFromCallback(event.value, modelChoices(settings));
   if (!alias) return;
-  return applyModelSelection(alias, settings);
+  return applyModelSelection(alias, settings, event.applyToConversation);
 }
