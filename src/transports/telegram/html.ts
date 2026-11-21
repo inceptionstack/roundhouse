@@ -128,25 +128,38 @@ class RateLimiter {
   }
 
   /**
-   * Make a call that must get through. Waits until Telegram accepts calls
-   * again, and after a rate limit waits and tries again, for at most
-   * `MAX_RATE_LIMIT_WAIT_MS` in total. Throws the last error after that, and
-   * any error that is not a rate limit at once.
+   * Make a call that must get through, waiting for at most
+   * `MAX_RATE_LIMIT_WAIT_MS` in total.
+   *
+   * Blocked by an earlier call: wait for it, up to the budget, then try. This
+   * call can be accepted where that one was not (Telegram refuses edits of one
+   * message for minutes and still takes a new message).
+   *
+   * Refused itself: wait as long as Telegram said and try again. If that is
+   * longer than the budget left, throw without another try: the same call
+   * inside its own wait is refused again and can lengthen the wait.
+   *
+   * Any error that is not a rate limit is thrown at once.
    */
   async deliver<T>(call: () => Promise<T>): Promise<T> {
     let budget = MAX_RATE_LIMIT_WAIT_MS;
+    const pause = async (ms: number) => {
+      if (ms <= 0) return;
+      await this.sleep(ms);
+      budget -= ms;
+    };
+    await pause(Math.min(this.blockedUntil - this.now(), budget));
     for (let attempt = 1; ; attempt++) {
-      const wait = Math.min(this.blockedUntil - this.now(), budget);
-      if (wait > 0) {
-        await this.sleep(wait);
-        budget -= wait;
-      }
       try {
         const result = await call();
         this.blockedUntil = 0;
         return result;
       } catch (err) {
-        if (!this.note(err) || budget <= 0 || attempt >= MAX_DELIVERY_ATTEMPTS) throw err;
+        const delay = rateLimitDelayMs(err);
+        if (delay === null) throw err;
+        this.note(err);
+        if (delay > budget || attempt >= MAX_DELIVERY_ATTEMPTS) throw err;
+        await pause(delay);
       }
     }
   }

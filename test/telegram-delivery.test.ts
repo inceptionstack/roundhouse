@@ -289,6 +289,29 @@ describe("a Telegram rate limit (HTTP 429) during streaming", () => {
     expect(t.messages().map((m) => m.text)).toEqual(["<b>hello</b> world"]);
   });
 
+  it("does not call Telegram again before a wait longer than its patience has run out", async () => {
+    const clock = fakeClock();
+    const t = fakeTelegram({
+      now: clock.now,
+      fail: (_call, index) => (index === 0 ? rateLimitError(60) : null),
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await postTelegramHtml(t, "**hello** world", clock);
+
+    // One call, refused for 60 s. A second call inside that minute would be
+    // refused as well and can lengthen the wait, so none is made.
+    expect(t.calls).toHaveLength(1);
+    expect(clock.sleeps).toEqual([]);
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/not delivered/);
+    errors.mockRestore();
+
+    // Once the minute is over the next message goes out, without a wait.
+    clock.advance(60_000);
+    await postTelegramHtml(t, "later", clock);
+    expect(t.messages().map((m) => m.text)).toEqual(["later"]);
+  });
+
   it("edits no more often than every 1100 ms while streaming", async () => {
     const clock = fakeClock();
     const t = fakeTelegram({ now: clock.now });
