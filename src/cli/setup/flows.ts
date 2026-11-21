@@ -233,7 +233,7 @@ export async function runNonInteractiveTelegramSetup(opts: SetupOptions): Promis
 
       if (platform() === "darwin") {
         try {
-          const { isLaunchAgentRunning } = await import("../launchd.ts");
+          const { isLaunchAgentRunning } = await import("../launchd");
           if (isLaunchAgentRunning()) {
             logger.ok("LaunchAgent is running");
             serviceInstalled = true;

@@ -148,7 +148,7 @@ export async function stepStopGateway(logger: StepLog): Promise<void> {
 
   if (platform() === "darwin") {
     try {
-      const { isLaunchAgentRunning, PLIST_PATH } = await import("../launchd.ts");
+      const { isLaunchAgentRunning, PLIST_PATH } = await import("../launchd");
       if (isLaunchAgentRunning()) {
         logger.log("   Stopping existing LaunchAgent...");
         execFileSync("launchctl", ["unload", PLIST_PATH], { stdio: "pipe" });
@@ -396,7 +396,7 @@ export async function stepConfigure(
   const existingUsers: string[] = gatewayConfig.chat?.allowedUsers ?? [];
   const existingUserIds: number[] = gatewayConfig.chat?.allowedUserIds ?? [];
   // Preserve both numeric IDs (Telegram) and string IDs (Slack: D.../C...)
-  const existingNotifyIds: (number | string)[] = (gatewayConfig.chat?.notifyChatIds ?? []).map((id) => {
+  const existingNotifyIds: (number | string)[] = (gatewayConfig.chat?.notifyChatIds ?? []).map((id: string | number) => {
     const num = Number(id);
     return !isNaN(num) ? num : id;
   });
@@ -545,7 +545,7 @@ export async function stepInstallSystemd(logger: StepLog, opts: SetupOptions): P
 
   if (platform() === "darwin") {
     try {
-      const { installLaunchAgent } = await import("../launchd.ts");
+      const { installLaunchAgent } = await import("../launchd");
       await installLaunchAgent();
       logger.ok("LaunchAgent installed and loaded");
       logger.log("   Logs: ~/.roundhouse/logs/roundhouse.log");

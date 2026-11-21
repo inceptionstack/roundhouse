@@ -151,7 +151,7 @@ export async function runAgentWithTimeout(opts: AgentOptions): Promise<void> {
     agent = factory(config.agent);
 
     const run = async () => {
-      if (agent!.promptStream) {
+      if (typeof agent!.promptStream === "function") {
         for await (const event of agent!.promptStream(threadId, { text: messageText })) {
           if (event.type === "text_delta") {
             process.stdout.write(event.text);

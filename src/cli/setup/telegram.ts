@@ -71,7 +71,7 @@ export async function registerBotCommands(token: string): Promise<void> {
 }
 
 /** Send a message to a chat */
-export async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+export async function sendMessage(token: string, chatId: number | string, text: string): Promise<void> {
   await telegramApi(token, "sendMessage", { chat_id: chatId, text });
 }
 
