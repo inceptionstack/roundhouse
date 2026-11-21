@@ -53,6 +53,8 @@ export function formatSummary(results: DoctorCheckResult[]): string {
 }
 
 export function formatCategoryHeader(category: string): string {
-  const name = category.charAt(0).toUpperCase() + category.slice(1);
+  // The "systemd" category holds the service checks on every platform.
+  const label = category === "systemd" ? "service" : category;
+  const name = label.charAt(0).toUpperCase() + label.slice(1);
   return `\n  ${name}`;
 }

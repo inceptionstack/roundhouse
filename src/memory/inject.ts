@@ -13,8 +13,12 @@ export function buildMemoryInjection(snapshot: MemorySnapshot, reason: string): 
   if (snapshot.entries.length === 0) return "";
 
   const date = new Date().toISOString().slice(0, 19) + "Z";
+  // Memory files are written by the agent, partly from things it read. Keep
+  // their text from closing the block early and posing as what follows it.
+  const escapeTag = (s: string) =>
+    s.replace(/<\/?roundhouse_memory\b[^>]*>/gi, (m) => m.replace(/</g, "&lt;").replace(/>/g, "&gt;"));
   const sections = snapshot.entries.map(
-    (e) => `## ${e.label}\n${e.content}`
+    (e) => `## ${e.label}\n${escapeTag(e.content)}`
   ).join("\n\n");
 
   return [

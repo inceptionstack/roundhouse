@@ -81,7 +81,11 @@ export function applyEnvOverrides(config: GatewayConfig): GatewayConfig {
         ? process.env.ALLOWED_USERS.split(",").map((u) => u.trim())
         : config.chat.allowedUsers,
       notifyChatIds: process.env.NOTIFY_CHAT_IDS
-        ? process.env.NOTIFY_CHAT_IDS.split(",").map((id) => Number(id.trim())).filter((n) => !isNaN(n))
+        ? process.env.NOTIFY_CHAT_IDS.split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+            // Telegram ids are numeric; Slack ids ("C0123", "D0123") stay strings.
+            .map((id) => (/^-?\d+$/.test(id) ? Number(id) : id))
         : config.chat.notifyChatIds,
     },
   };

@@ -55,10 +55,13 @@ export const diskChecks: DoctorCheck[] = [
   {
     id: "disk-space", category: "disk", name: "Free disk space",
     async run() {
-      const df = await run("df", ["-BM", "--output=avail", homedir()]);
+      // POSIX output (-P, 1K blocks): works with GNU df and with macOS/BSD df,
+      // which has no --output. "Available" is the fourth column.
+      const df = await run("df", ["-Pk", homedir()]);
       if (!df) return { id: "disk-space", category: "disk", name: "Free disk space", status: "info", summary: "cannot check" };
       const lines = df.split("\n").filter(Boolean);
-      const avail = parseInt(lines[lines.length - 1]);
+      const availKb = parseInt(lines[lines.length - 1].trim().split(/\s+/)[3] ?? "");
+      const avail = Math.floor(availKb / 1024);
       if (isNaN(avail)) return { id: "disk-space", category: "disk", name: "Free disk space", status: "info", summary: "cannot parse" };
       const gb = (avail / 1024).toFixed(1);
       if (avail < 100) return { id: "disk-space", category: "disk", name: "Free disk space", status: "fail", summary: `${gb} GB`, details: ["Less than 100 MB free"] };

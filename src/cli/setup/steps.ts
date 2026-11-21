@@ -472,10 +472,13 @@ export async function stepConfigure(
     }
   }
 
-  // Preserve existing Slack and other adapter credentials
+  // Keep every key this step does not write itself (Slack tokens,
+  // TAVILY_API_KEY, ROUNDHOUSE_DEBUG_STREAM, anything added by hand).
+  // parseEnvFile returns the value as written, quotes included, so it goes
+  // back unchanged: quoting it again would corrupt it.
   for (const [key, value] of existingEnv) {
-    if (key.startsWith("SLACK_") && !envLines.some((l) => l.startsWith(key + "="))) {
-      envLines.push(`${key}=${envQuote(value)}`);
+    if (!envLines.some((l) => l.startsWith(key + "="))) {
+      envLines.push(`${key}=${value}`);
     }
   }
 

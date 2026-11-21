@@ -10,7 +10,7 @@ import { systemChecks } from "./checks/system";
 import { configChecks } from "./checks/config";
 import { credentialChecks } from "./checks/credentials";
 import { agentChecks } from "./checks/agent";
-import { systemdChecks } from "./checks/systemd";
+import { systemdChecks, launchdChecks } from "./checks/systemd";
 import { diskChecks } from "./checks/disk";
 import { sttChecks } from "./checks/stt";
 import { telegramChecks } from "./checks/telegram";
@@ -38,7 +38,8 @@ const ALL_CHECKS: DoctorCheck[] = [
   ...telegramChecks,
   ...sttChecks,
   ...diskChecks,
-  ...systemdChecks,
+  // The service manager differs by platform; the three checks do not.
+  ...(process.platform === "darwin" ? launchdChecks : systemdChecks),
 ];
 
 /**

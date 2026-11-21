@@ -10,7 +10,7 @@
  */
 
 import { mkdir } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -238,9 +238,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     let sessionManager: SessionManager;
 
     try {
+      // continueRecent creates a session when the directory has none, so
+      // look first to report which of the two happened.
+      const hadSession = readdirSync(threadDir).some((f) => f.endsWith(".jsonl"));
       sessionManager = SessionManager.continueRecent(cwd, threadDir);
       console.log(
-        `[pi-agent] resuming session for ${threadId}: ${sessionManager.getSessionFile()}`
+        `[pi-agent] ${hadSession ? "resuming" : "new"} session for ${threadId}: ${sessionManager.getSessionFile()}`
       );
     } catch {
       sessionManager = SessionManager.create(cwd, threadDir);

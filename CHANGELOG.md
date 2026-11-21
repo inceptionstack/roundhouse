@@ -28,6 +28,10 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   pairing rewrites it. The skills clone uses `mkdtemp`.
 - Bundled `tools.md` and the `pr-merge-discipline` skill no longer tell the
   agent to merge with `gh pr merge --admin`, and no longer claim AWS access.
+- Memory files can no longer close their `<roundhouse_memory>` block early;
+  sub-agent output and attachment contents are marked as data.
+- `setup` warns when a token is passed as a command-line flag.
+- The LaunchAgent no longer inherits `node_modules/.bin` directories on PATH.
 - Dependencies: 25 known advisories (17 high) in the lockfile, now 0.
 
 ### Changed
@@ -49,6 +53,14 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   settings; `/model provider/model-id` stored the provider inside the id.
 - `/status`, `roundhouse status` and `doctor` reported "no allowlist" for an
   id-only setup.
+- Re-running `setup` dropped every `.env` key it did not write itself
+  (`TAVILY_API_KEY`, debug flags) and re-quoted the Slack tokens it kept,
+  which corrupted them.
+- One cron job file with an invalid id stopped the scheduler for all jobs.
+- `NOTIFY_CHAT_IDS` dropped Slack channel ids.
+- `/cmd@otherbot` in a group was sent to the agent as a prompt.
+- `doctor` on macOS checked systemd and GNU `df`; it now checks the
+  LaunchAgent and reads free disk space portably.
 
 ## [0.6.0] — 2026-05-26
 

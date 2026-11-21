@@ -93,7 +93,7 @@ roundhouse cron delete <id>
 3. **Prompts** are sent to the agent as-is — write them as clear instructions
 4. **Template variables** use `{{var}}` syntax in prompts (e.g., `--prompt "Check {{url}}" --var "url=https://example.com"`)
 5. **One-shot jobs** (`--at`) run once and stay in history — delete them after if not needed
-6. **Built-in jobs** (prefixed `_`) cannot be edited or deleted
+6. **Built-in jobs** (prefixed `builtin-`) cannot be edited or deleted
 
 ## Examples
 

@@ -47,7 +47,15 @@ export class CronStore {
         if (!f.endsWith(".json")) continue;
         try {
           const raw = await readFile(join(CRON_JOBS_DIR, f), "utf8");
-          jobs.push(JSON.parse(raw));
+          const job = JSON.parse(raw) as CronJobConfig;
+          // The id becomes a file name for state and run history. A job whose
+          // id is invalid would throw there and take every other job down
+          // with it on each reload, so leave it out and say so.
+          if (typeof job?.id !== "string" || !JOB_ID_RE.test(job.id)) {
+            console.warn(`[cron/store] skipping ${f}: invalid or missing job id`);
+            continue;
+          }
+          jobs.push(job);
         } catch (err) {
           console.warn(`[cron/store] failed to read job ${f}:`, (err as Error).message);
         }
