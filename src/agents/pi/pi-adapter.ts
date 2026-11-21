@@ -9,9 +9,9 @@
  *       (separate PR — large file, needs careful testing)
  */
 
-import { mkdir } from "node:fs/promises";
-import { readFileSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -20,6 +20,7 @@ const __piAdapterDir = dirname(fileURLToPath(import.meta.url));
 import {
   createAgentSession,
   DefaultResourceLoader,
+  detectSupportedImageMimeTypeFromFile,
   getAgentDir,
   ModelRuntime,
   SessionManager,
@@ -45,7 +46,15 @@ interface SessionEntry {
   threadId?: string;
   /** Standing context this session's system prompt was built with. */
   standingText?: string;
+  /** "/new" marker to remove once this fresh session has a turn on disk. */
+  freshMarker?: string;
 }
+
+/** Dropped in a thread's session directory by /new: the next session starts empty. */
+const NEW_SESSION_MARKER = ".new-session";
+
+/** Images passed to the model directly per message; further ones stay as files. */
+const MAX_INLINE_IMAGES = 5;
 
 const DEFAULT_SESSIONS_DIR = SESSIONS_DIR;
 const DEFAULT_MAX_IDLE_MS = 30 * 60 * 1000;
@@ -179,13 +188,38 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     subscribe: (session: AgentSession) => void;
   }
 
+  /**
+   * Image attachments as model input. An image used to reach the model only
+   * as a path in the attachment manifest, so seeing a screenshot cost an
+   * extra tool call, and only if the model chose to make it. The file is
+   * sniffed rather than trusted: a photo sent "as file" arrives typed as a
+   * file, and a text file can be named .png. pi resizes what it is given.
+   */
+  async function loadImages(message: AgentMessage): Promise<Array<{ type: "image"; data: string; mimeType: string }>> {
+    const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+    for (const a of message.attachments ?? []) {
+      if (images.length >= MAX_INLINE_IMAGES) break;
+      try {
+        const mimeType = await detectSupportedImageMimeTypeFromFile(a.localPath);
+        if (!mimeType) continue;
+        images.push({ type: "image", data: (await readFile(a.localPath)).toString("base64"), mimeType });
+        a.inline = true;
+      } catch (err) {
+        console.warn(`[pi-agent] could not attach image ${a.name}:`, (err as Error).message);
+      }
+    }
+    return images;
+  }
+
   async function runPromptAndFollowUps(
     entry: SessionEntry,
     text: string,
     onDraining?: () => void,
     onDrainComplete?: () => void,
     resubscribe?: Resubscribe,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void> {
+    const promptOptions = images && images.length > 0 ? { images } : undefined;
     entry.inFlight++;
     // Track whether *this specific prompt call* has already retried after a
     // repair. Prevents retry loops within one turn, but doesn't latch the
@@ -199,7 +233,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // defer the prompt and return before it ran.
         await waitUntilIdle(entry.session);
         await refreshStandingContext(entry);
-        await entry.session.prompt(text);
+        await entry.session.prompt(text, promptOptions);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult
         // pairs caused by crashed/aborted tools mid-session). Repair the .jsonl on
@@ -253,7 +287,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // Re-attach caller's subscriber to the new session so the retry's
         // text_delta/tool events flow through (F1).
         resubscribe?.subscribe(entry.session);
-        await entry.session.prompt(text);
+        await entry.session.prompt(text, promptOptions);
       }
       // The subscriber must stay attached until the session is fully idle,
       // or a run started by an extension after prompt() resolved would post
@@ -269,6 +303,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
       if (notifiedDraining && onDrainComplete) {
         onDrainComplete();
+      }
+      // The fresh session now has a turn on disk and is the newest transcript.
+      if (entry.freshMarker && entry.session.sessionFile && existsSync(entry.session.sessionFile)) {
+        try { rmSync(entry.freshMarker, { force: true }); } catch { /* next start retries */ }
+        entry.freshMarker = undefined;
       }
     } finally {
       entry.inFlight--;
@@ -311,8 +350,27 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     await mkdir(threadDir, { recursive: true });
 
     let sessionManager: SessionManager;
+    // /new left a marker: start an empty session instead of reopening the
+    // newest transcript. The marker stays until the new session has a turn
+    // on disk, so a restart in between does not fall back to the old one.
+    const markerPath = join(threadDir, NEW_SESSION_MARKER);
+    let startFresh = existsSync(markerPath);
+    if (startFresh) {
+      // The marker names the fresh session once one was started. If that file
+      // is on disk, the new conversation has begun (pi writes the transcript
+      // as soon as the first message is appended) and this is a resume of it,
+      // for example after a restart in the middle of its first turn. Starting
+      // another empty session there would orphan the interrupted one.
+      let started = "";
+      try { started = readFileSync(markerPath, "utf8").split("\n")[1]?.trim() ?? ""; } catch { /* treat as not started */ }
+      if (started && existsSync(join(threadDir, started))) {
+        try { rmSync(markerPath, { force: true }); } catch { /* harmless: checked again next time */ }
+        startFresh = false;
+      }
+    }
 
     try {
+      if (startFresh) throw new Error("start fresh");
       // continueRecent creates a session when the directory has none, so
       // look first to report which of the two happened.
       const hadSession = readdirSync(threadDir).some((f) => f.endsWith(".jsonl"));
@@ -348,6 +406,14 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     }
 
     const entry: SessionEntry = { session: result.session, lastUsed: Date.now(), inFlight: 0, threadId, standingText };
+    if (startFresh) {
+      entry.freshMarker = markerPath;
+      // Record which file the fresh session will be (see above).
+      const file = sessionManager.getSessionFile();
+      if (file) {
+        try { writeFileSync(markerPath, `${new Date().toISOString()}\n${basename(file)}\n`, { mode: 0o600 }); } catch { /* best effort */ }
+      }
+    }
     sessions.set(threadId, entry);
 
     // Detect memory capabilities from loaded extensions (first session only)
@@ -512,7 +578,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     name: "pi",
 
     async prompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
-      return enqueue(threadId, () => doPrompt(threadId, formatMessage(message)));
+      return enqueue(threadId, () => doPrompt(threadId, message));
     },
 
     async promptWithModel(threadId: string, message: AgentMessage, modelId: string): Promise<AgentResponse> {
@@ -531,18 +597,18 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
 
         if (!targetModel) {
           console.warn(`[pi-agent] flush model "${modelId}" not found, using default`);
-          return doPrompt(threadId, formatMessage(message));
+          return doPrompt(threadId, message);
         }
 
         // Verify auth is available for the target model
         if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
           console.warn(`[pi-agent] no auth for flush model "${modelId}", using default`);
-          return doPrompt(threadId, formatMessage(message));
+          return doPrompt(threadId, message);
         }
 
         if (!fitsModel(entry.session, targetModel)) {
           console.warn(`[pi-agent] conversation is larger than flush model "${modelId}" can take, using the conversation model`);
-          return doPrompt(threadId, formatMessage(message));
+          return doPrompt(threadId, message);
         }
 
         // Swap model in-memory only (no persistence to settings.json or session log).
@@ -550,14 +616,14 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         const agentState = (entry.session as any).agent?.state;
         if (!agentState) {
           console.warn(`[pi-agent] cannot access agent state for model swap, using default`);
-          return doPrompt(threadId, formatMessage(message));
+          return doPrompt(threadId, message);
         }
 
         agentState.model = targetModel;
         console.log(`[pi-agent] switched to flush model (in-memory): ${modelId}`);
 
         try {
-          return await doPrompt(threadId, formatMessage(message));
+          return await doPrompt(threadId, message);
         } finally {
           // Restore original model (in-memory only) — even if undefined
           agentState.model = currentModel;
@@ -566,7 +632,6 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
-      const text = formatMessage(message);
       // Return an async iterable that is single-use by design.
       // State is scoped inside the iterator factory to prevent sharing.
       let consumed = false;
@@ -585,6 +650,9 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           const promptDone = enqueue(threadId, async () => {
             const entry = await getOrCreate(threadId);
             entry.lastUsed = Date.now();
+            // Images first: the manifest says which files went in as images.
+            const images = await loadImages(message);
+            const text = formatMessage(message);
 
             // "draining" / "drain_complete" tell the gateway that the agent is
             // still working after its first answer. Both sources below (events
@@ -721,6 +789,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                   unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
                   subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
                 },
+                images,
               );
             } finally {
               try { unsub(); } catch { /* ignore */ }
@@ -776,7 +845,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           console.log(`[pi-agent] disposed session for ${threadId}`);
         }
         memoryCapabilities = undefined; // re-detect on next session creation
-        // Next prompt() or promptStream() call will create a fresh session
+        // The next prompt creates the session. Without the marker it would
+        // reopen the transcript just closed (continueRecent picks the newest
+        // file), and "/new" would continue the old conversation.
+        const threadDir = join(sessionsDir, threadIdToDir(threadId));
+        await mkdir(threadDir, { recursive: true });
+        writeFileSync(join(threadDir, NEW_SESSION_MARKER), new Date().toISOString() + "\n", { mode: 0o600 });
       });
     },
 
@@ -840,6 +914,94 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
+    /**
+     * Switch this thread's conversation to another model. pi restores a
+     * session's model from its transcript, so changing the default in pi's
+     * settings alone never reaches a conversation that already exists.
+     */
+    async setModel(
+      threadId: string,
+      modelRef: string,
+      onDeferred?: (result: { applied: boolean; detail?: string }) => void,
+    ): Promise<{ applied: boolean; deferred?: boolean; usable?: boolean; detail?: string }> {
+      const slash = modelRef.indexOf("/");
+      const modelRuntime = await getModelRuntime();
+      const model = slash > 0 ? modelRuntime.getModel(modelRef.slice(0, slash), modelRef.slice(slash + 1)) : undefined;
+      // `usable: false`: nobody can use this model here, so it must not
+      // become the default for new conversations either.
+      if (!model) return { applied: false, usable: false, detail: `pi does not know the model ${modelRef}` };
+      if (!modelRuntime.hasConfiguredAuth(model.provider)) {
+        return { applied: false, usable: false, detail: `there are no credentials for ${model.provider}` };
+      }
+
+      /** Why this conversation cannot move to the model, if it cannot. */
+      const tooLarge = (session: AgentSession): string | undefined => {
+        if (fitsModel(session, model)) return undefined;
+        const used = session.getContextUsage()?.tokens ?? 0;
+        return `this conversation (${Math.round(used / 1000)}K tokens) does not fit its ${Math.round((model.contextWindow ?? 0) / 1000)}K window; /compact or /new first`;
+      };
+
+      const apply = () => enqueue(threadId, async () => {
+        const entry = await getOrCreate(threadId);
+        const reason = tooLarge(entry.session);
+        if (reason) return { applied: false, detail: reason };
+        // pi's setModel resets the thinking level to the default for the new
+        // model; keep the level this conversation was on when the model has it.
+        const thinking = entry.session.thinkingLevel;
+        try {
+          await entry.session.setModel(model);
+          if (entry.session.thinkingLevel !== thinking && entry.session.getAvailableThinkingLevels().includes(thinking)) {
+            entry.session.setThinkingLevel(thinking);
+          }
+        } catch (err) {
+          return { applied: false, detail: (err as Error).message };
+        }
+        console.log(`[pi-agent] ${threadId} switched to ${modelRef}`);
+        return { applied: true };
+      });
+
+      // Something is running or queued for this thread (a turn, a flush, a
+      // compaction): answer now, switch when it is this request's turn. What
+      // can be checked already is checked, so "will switch" is not said for a
+      // switch that is known to fail.
+      if (threadQueues.has(threadId)) {
+        const live = sessions.get(threadId);
+        const reason = live ? tooLarge(live.session) : undefined;
+        if (reason) return { applied: false, detail: reason };
+        void apply()
+          .catch((err) => ({ applied: false, detail: (err as Error).message }))
+          .then((r) => {
+            if (!r.applied) console.warn(`[pi-agent] deferred model switch for ${threadId} failed: ${r.detail}`);
+            try { onDeferred?.(r); } catch { /* the caller's reporting must not break the queue */ }
+          });
+        return { applied: true, deferred: true };
+      }
+      return apply();
+    },
+
+    /** Read (no level) or set the thinking level of this thread's conversation. */
+    async thinkingLevel(threadId: string, level?: string): Promise<{ level: string; available: string[]; deferred?: boolean } | null> {
+      const act = async () => {
+        const entry = await getOrCreate(threadId);
+        const available = entry.session.getAvailableThinkingLevels().map(String);
+        if (level !== undefined && available.includes(level)) {
+          entry.session.setThinkingLevel(level as Parameters<AgentSession["setThinkingLevel"]>[0]);
+        }
+        return { level: String(entry.session.thinkingLevel), available };
+      };
+      // A turn is running: answer from the live session instead of waiting
+      // for the turn to end, and apply a change when it has.
+      const live = sessions.get(threadId);
+      if (live && threadQueues.has(threadId)) {
+        const available = live.session.getAvailableThinkingLevels().map(String);
+        const current = String(live.session.thinkingLevel);
+        if (level === undefined || !available.includes(level) || level === current) return { level: current, available };
+        void enqueue(threadId, act).catch((err) => console.warn(`[pi-agent] deferred thinking level for ${threadId} failed:`, (err as Error).message));
+        return { level, available, deferred: true };
+      }
+      return enqueue(threadId, act);
+    },
+
     async abort(threadId: string): Promise<void> {
       const entry = sessions.get(threadId);
       if (entry) {
@@ -856,11 +1018,18 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       let contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
       const threadEntry = threadId ? sessions.get(threadId) : undefined;
 
+      let sessionStats: { cost: number; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } } | undefined;
+      let thinking: string | undefined;
       if (threadEntry) {
         const model = threadEntry.session.model;
         if (model) modelInfo = `${model.provider}/${model.id}`;
         contextUsage = threadEntry.session.getContextUsage() ?? undefined;
         hasActiveSession = true;
+        try {
+          const stats = threadEntry.session.getSessionStats();
+          sessionStats = { cost: stats.cost, tokens: stats.tokens };
+          thinking = String(threadEntry.session.thinkingLevel);
+        } catch { /* not worth failing /status for */ }
       }
 
       if (!modelInfo) {
@@ -906,6 +1075,8 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         contextTokens: contextUsage?.tokens ?? null,
         contextWindow: contextUsage?.contextWindow ?? null,
         contextPercent: contextUsage?.percent ?? null,
+        ...(thinking ? { thinkingLevel: thinking } : {}),
+        ...(sessionStats ? { sessionCost: sessionStats.cost, sessionTokens: sessionStats.tokens } : {}),
         hasMemoryExtension: memoryCapabilities?.hasMemoryExtension ?? null,
         memoryTools: memoryCapabilities?.memoryTools ?? [],
         extensions: memoryCapabilities?.extensions ?? [],
@@ -918,9 +1089,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
   };
 
-  async function doPrompt(threadId: string, text: string): Promise<AgentResponse> {
+  async function doPrompt(threadId: string, message: AgentMessage): Promise<AgentResponse> {
     const entry = await getOrCreate(threadId);
     entry.lastUsed = Date.now();
+    // Images first: the manifest says which files went in as images.
+    const images = await loadImages(message);
+    const text = formatMessage(message);
 
     let fullText = "";
     const handleEvent = (event: AgentSessionEvent) => {
@@ -942,7 +1116,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       await runPromptAndFollowUps(entry, text, undefined, undefined, {
         unsubscribeOld: () => { try { unsub(); } catch { /* ignore */ } },
         subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
-      });
+      }, images);
     } finally {
       try { unsub(); } catch { /* ignore */ }
     }

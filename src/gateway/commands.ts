@@ -12,6 +12,7 @@ import { startTypingLoop } from "../util";
 import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact, determineMemoryMode } from "../memory/lifecycle";
 import { getSystemResources } from "./helpers";
 import { contextThresholds } from "../memory/policy";
+import { loadThreadMemoryState, saveThreadMemoryState } from "../memory/state";
 
 // ── Types ────────────────────────────────────────────
 
@@ -29,6 +30,8 @@ export interface CommandContext {
   postWithFallback: (thread: any, text: string) => Promise<void>;
   /** Open a transport-rendered progress message (post + edit-in-place). */
   progress: (thread: ChatThread, initialText: string) => Promise<ProgressMessage>;
+  /** What a typing loop should drive for this thread (see Gateway.typingTarget). */
+  typingTarget?: (thread: any) => { startTyping: (status?: string) => Promise<void>; stopTyping?: () => Promise<void> | void };
   stopGateway: () => Promise<void>;
 }
 
@@ -38,7 +41,18 @@ export async function handleNew(ctx: CommandContext): Promise<void> {
   const { thread, agent, agentThreadId } = ctx;
   if (agent.restart) {
     await agent.restart(agentThreadId);
-    await thread.post(`🔄 Session restarted (\`${agentThreadId}\`). Send a message to begin a new conversation.`);
+    // The new conversation starts without the old one's context, so it needs
+    // the memory files again, and its own count for the next soft flush.
+    try {
+      const state = await loadThreadMemoryState(agentThreadId);
+      state.forceInjectReason = "new-session";
+      state.lastSoftFlushTokens = undefined;
+      state.pendingCompact = undefined;
+      await saveThreadMemoryState(agentThreadId, state);
+    } catch (err) {
+      console.warn(`[roundhouse] /new: could not reset memory state:`, (err as Error).message);
+    }
+    await thread.post(`🔄 New conversation started (\`${agentThreadId}\`). The previous one is kept on disk; your next message begins the new one.`);
   } else {
     await thread.post("⚠️ New session not supported for this agent.");
   }
@@ -127,7 +141,7 @@ export async function handleCompact(ctx: CommandContext): Promise<void> {
   if (prevLock) await prevLock;
 
   const progress = await ctx.progress(thread, "📝 Saving memory and compacting...");
-  const stopTyping = startTypingLoop(thread);
+  const stopTyping = startTypingLoop(ctx.typingTarget ? ctx.typingTarget(thread) : thread);
   try {
     const agentCwd = (agent.getInfo?.()?.cwd as string) ?? process.cwd();
     const memoryRoot = config.memory?.rootDir ?? agentCwd;
@@ -176,7 +190,25 @@ function formatUptime(sec: number): string {
     : `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
-async function checkAvailableUpdate(): Promise<string> {
+// `npm view` takes seconds and /status should answer at once, so the answer
+// is remembered for a few hours and refreshed in the background.
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+let updateCheck: { at: number; latest: string } | undefined;
+let updateCheckRunning = false;
+
+function cachedAvailableUpdate(): string {
+  if ((!updateCheck || Date.now() - updateCheck.at > UPDATE_CHECK_TTL_MS) && !updateCheckRunning) {
+    updateCheckRunning = true;
+    void checkAvailableUpdate()
+      // A lookup that failed (null) is tried again in ten minutes rather
+      // than remembered as "no update" for hours.
+      .then((latest) => { updateCheck = { at: latest === null ? Date.now() - UPDATE_CHECK_TTL_MS + 10 * 60_000 : Date.now(), latest: latest ?? updateCheck?.latest ?? "" }; })
+      .finally(() => { updateCheckRunning = false; });
+  }
+  return updateCheck?.latest ?? "";
+}
+
+async function checkAvailableUpdate(): Promise<string | null> {
   try {
     const { exec } = await import("node:child_process");
     const { promisify } = await import("node:util");
@@ -190,7 +222,9 @@ async function checkAvailableUpdate(): Promise<string> {
         return latest;
       }
     }
-  } catch { /* network unavailable */ }
+  } catch {
+    return null; // network unavailable
+  }
   return "";
 }
 
@@ -202,7 +236,7 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
   const debugStream = process.env.ROUNDHOUSE_DEBUG_STREAM === "1";
   const nodeVer = process.version;
   const memMB = (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
-  const updateAvailable = await checkAvailableUpdate();
+  const updateAvailable = cachedAvailableUpdate();
 
   const info = agent.getInfo ? agent.getInfo(agentThreadId) : {};
   const agentVersion = info.version ? `v${info.version}` : "";
@@ -223,8 +257,8 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
   if (info.model && info.model !== "unknown") {
     const configuredModel = info.configuredModel as string | undefined;
     if (configuredModel && configuredModel !== info.model && info.hasActiveSession) {
-      lines.push(`🧠 Model: \`${configuredModel}\` (configured)`);
-      lines.push(`   ↳ session using: \`${info.model}\` (until /new)`);
+      lines.push(`🧠 Model: \`${info.model}\``);
+      lines.push(`   ↳ default for new conversations: \`${configuredModel}\` (/model switches this one)`);
     } else {
       lines.push(`🧠 Model: \`${configuredModel || info.model}\``);
     }
@@ -283,6 +317,12 @@ export async function handleStatus(ctx: CommandContext): Promise<void> {
     lines.push(``);
     lines.push(`📝 Context: no usage data yet (${windowK}K window)`);
   }
+  if (typeof info.thinkingLevel === "string") lines.push(`   Thinking: ${info.thinkingLevel} (/think)`);
+  if (typeof info.sessionCost === "number" && info.sessionTokens) {
+    const t = info.sessionTokens as { input: number; output: number; cacheRead: number; cacheWrite: number };
+    const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}K`);
+    lines.push(`   This conversation so far: $${(info.sessionCost as number).toFixed(2)} (in ${k(t.input)}, cached ${k(t.cacheRead)}, cache writes ${k(t.cacheWrite)}, out ${k(t.output)})`);
+  }
   // When this conversation will be compacted, for the model it is on.
   if (typeof info.contextWindow === "number" && info.contextWindow > 0 && memEnabled && config.memory?.compact?.enabled !== false) {
     const model = typeof info.model === "string" ? info.model : null;
@@ -312,14 +352,22 @@ export interface CancelContext {
   agentThreadId: string;
   agent: AgentAdapter;
   abortControllers: Map<string, AbortController>;
+  /** Abort signal of the turn running in this chat, if the gateway knows of one. */
+  running?: AbortController;
 }
 
 export async function handleCancel(ctx: CancelContext): Promise<void> {
   const { thread, agentThreadId, agent, abortControllers } = ctx;
   if (agent.abort) {
+    const controller = ctx.running ?? abortControllers.get(agentThreadId);
+    // The gateway's signal first: it also stops a turn that has not reached
+    // the model yet. Then the agent, for whatever it is doing right now
+    // (a tool, a model call, a compaction).
+    controller?.abort();
     await agent.abort(agentThreadId);
-    abortControllers.get(agentThreadId)?.abort();
-    try { await thread.post("⏹️ Cancelled."); } catch {}
+    try {
+      await thread.post(controller ? "⏹️ Cancelled." : "⏹️ Nothing is running in this chat right now.");
+    } catch {}
   } else {
     try { await thread.post("⚠️ Abort not supported for this agent."); } catch {}
   }
@@ -470,4 +518,39 @@ export async function handleCrons(ctx: CronsContext): Promise<RichResponse | voi
     stopTyping();
     console.log(`[roundhouse] /crons for thread=${thread.id}`);
   }
+}
+
+// ── /think ───────────────────────────────────────────
+
+/** Show or set the thinking level of the conversation the command was sent in. */
+export async function handleThink(opts: {
+  thread: any;
+  text: string;
+  agentThreadId: string;
+  agent: AgentAdapter;
+  /** Posts markdown through the transport; a bare thread.post would show the markup literally. */
+  postWithFallback: (thread: any, text: string) => Promise<void>;
+}): Promise<void> {
+  const { thread, text, agentThreadId, agent, postWithFallback: post } = opts;
+  if (!agent.thinkingLevel) {
+    await post(thread, "⚠️ This agent has no thinking level to set.");
+    return;
+  }
+  const wanted = text.split(/\s+/).slice(1)[0]?.toLowerCase();
+  const result = await agent.thinkingLevel(agentThreadId, wanted);
+  if (!result) {
+    await post(thread, "⚠️ No conversation to set it on yet. Send a message first.");
+    return;
+  }
+  const levels = result.available.join(", ");
+  if (!wanted) {
+    await post(thread, `🧠 Thinking: *${result.level}*\nAvailable on this model: ${levels}\nUsage: \`/think ${result.available.find((l) => l !== result.level) ?? "high"}\``);
+  } else if (result.level === wanted) {
+    await post(thread, result.deferred
+      ? `✅ Thinking will be *${result.level}* from the next turn of this conversation.`
+      : `✅ Thinking set to *${result.level}* for this conversation.`);
+  } else {
+    await post(thread, `⚠️ \`${wanted}\` is not a level this model has. Thinking stays at *${result.level}*. Available: ${levels}`);
+  }
+  console.log(`[roundhouse] /think ${wanted ?? ""} for agentThread=${agentThreadId} -> ${result.level}`);
 }
