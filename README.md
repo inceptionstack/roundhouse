@@ -646,6 +646,8 @@ npm test          # run once
 npm run test:watch # watch mode
 ```
 
+`npm ci` installs a pre-commit hook that blocks commits containing secrets, and CI scans the full git history with gitleaks. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT

@@ -1,0 +1,3 @@
+# Block commits that contain secrets (see CONTRIBUTING.md).
+scripts/scan-staged-secrets.sh
+.githooks/pre-commit

@@ -1,0 +1,10 @@
+# Verified false positives only: fake Slack tokens used as fixtures in test/setup-slack.test.ts
+# (placeholder digits like A0123456789-1234567890). Fingerprint = commit:file:rule:line.
+141d0949f621d27b4f55319ba74b5992e6e29c7b:test/setup-slack.test.ts:slack-app-token:19
+141d0949f621d27b4f55319ba74b5992e6e29c7b:test/setup-slack.test.ts:slack-app-token:37
+141d0949f621d27b4f55319ba74b5992e6e29c7b:test/setup-slack.test.ts:slack-app-token:86
+141d0949f621d27b4f55319ba74b5992e6e29c7b:test/setup-slack.test.ts:slack-legacy-workspace-token:36
+16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-app-token:19
+16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-app-token:37
+16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-app-token:94
+16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-legacy-workspace-token:36

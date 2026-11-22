@@ -7,6 +7,22 @@ dist/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ecdsa*
+id_ed25519*
+*.token
+credentials.json
+service-account*.json
+.aws/
+# npm auth tokens: the root .npmrc is tracked on purpose (no token, only
+# min-release-age). Use ${NPM_TOKEN} in CI, never a literal token.
+.npmrc
+!/.npmrc
 
 # OS
 .DS_Store
