@@ -818,9 +818,10 @@ export class Gateway {
       // Here, past the checks that can drop this turn (a note taken by a turn
       // that never runs would be lost), and after the transcription, which
       // only fills in the text of a message that has none.
-      if (turnSource === "user") {
-        const note = this.stopNotes.take(agentThreadId);
-        if (note) agentMessage.text = agentMessage.text ? `${note}\n\n${agentMessage.text}` : note;
+      let stopNote: { text: string; commit: () => void } | undefined;
+      if (turnSource === "user" && !ac.signal.aborted) {
+        stopNote = this.stopNotes.peek(agentThreadId);
+        if (stopNote) agentMessage.text = agentMessage.text ? `${stopNote.text}\n\n${agentMessage.text}` : stopNote.text;
       }
 
       // Let the agent adapter apply platform-specific message transforms
@@ -882,11 +883,13 @@ export class Gateway {
           // Cancelled while the message was being prepared: do not prompt.
         } else if (agent.promptStream) {
           running.started = true;
+          stopNote?.commit(); // the agent is about to hear it: now it is used up
           const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
           turnUsedTools = streamResult.usedTools;
           streamHadVisibleText = streamResult.hadVisibleText;
         } else {
           running.started = true;
+          stopNote?.commit(); // the agent is about to hear it: now it is used up
           const reply = await agent.prompt(agentThreadId, agentMessage);
           turnUsedTools = true;
           if (reply.text) {

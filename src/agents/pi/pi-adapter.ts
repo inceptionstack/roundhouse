@@ -49,6 +49,8 @@ interface SessionEntry {
   standingText?: string;
   /** "/new" marker to remove once this fresh session has a turn on disk. */
   freshMarker?: string;
+  /** When the latest streamed prompt left the queue and began; its user message is stamped after this. */
+  promptStartedAt?: number;
 }
 
 /** Dropped in a thread's session directory by /new: the next session starts empty. */
@@ -651,6 +653,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
           const promptDone = enqueue(threadId, async () => {
             const entry = await getOrCreate(threadId);
             entry.lastUsed = Date.now();
+            entry.promptStartedAt = entry.lastUsed;
             // Images first: the manifest says which files went in as images.
             const images = await loadImages(message);
             const text = formatMessage(message);
@@ -1019,7 +1022,11 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       if (!entry) return null;
       const turn = renderTurn([...entry.session.messages] as unknown[], opts);
       if (!turn) return null;
-      return { ...turn, sessionFile: entry.session.sessionFile ?? undefined };
+      // The prompt that is running has left the queue, but its user message is
+      // appended a little later (images load, the standing context refreshes).
+      // Until then the conversation's last request is an earlier one.
+      const reached = entry.promptStartedAt === undefined || typeof turn.requestAt !== "number" || turn.requestAt >= entry.promptStartedAt;
+      return { ...turn, reached, sessionFile: entry.session.sessionFile ?? undefined };
     },
 
     getInfo(threadId?: string): Record<string, unknown> {

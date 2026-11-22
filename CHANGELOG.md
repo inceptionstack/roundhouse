@@ -7,7 +7,7 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 ### Added
 - **`/stop [question]`.** Ends the turn in progress like `/cancel`, then has a
   sub-agent that can only read (`read`, `grep`, `find`, `ls`; no MCP, no
-  project context files, prompt templates or themes) review what the agent did
+  project context files, prompt templates, themes or project settings) review what the agent did
   so far and post its report in the chat. The transcript it reads has obvious
   secrets removed and every line behind a bar; the report has them removed
   again. The report starts no agent turn; the agent hears about the stop with

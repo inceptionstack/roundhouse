@@ -629,7 +629,7 @@ describe("subagents", () => {
       const orchestrator = launch();
       await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing, tools: ["read"] });
       const args = spawnMock.mock.calls[0]?.[1] as string[];
-      for (const flag of ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes"]) expect(args).toContain(flag);
+      for (const flag of ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-approve"]) expect(args).toContain(flag);
     });
 
     it("cuts a run off at its deadline, in the process that started it", async () => {
@@ -659,7 +659,9 @@ describe("subagents", () => {
       spawnMock.mockImplementation(() => { queueMicrotask(() => child.emit("spawn")); return child; });
       await o2.spawn({ role: "review", task: "Quick", cwd: rootDir, routing, timeoutMs: 150 });
       child.emit("exit", 0);
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 50));
+      expect((o2 as any).deadlines.size).toBe(0); // the timer is gone as soon as the run ends, not just harmless when it fires
+      await new Promise((r) => setTimeout(r, 350));
       expect(signalled).toEqual([]);
     });
 

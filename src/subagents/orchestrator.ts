@@ -11,6 +11,7 @@ import { RunStore } from "./run-store";
 import { TerminationHandler } from "./termination-handler";
 import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_TIMER_MS = 2_147_483_647;
 const RUN_FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Files the orchestrator and the sub-agent's own process write in the run folder. */
 const RESERVED_RUN_FILES = new Set(["brief.md", "status.json", "settings.json", "stdout.log", "stderr.log"]);
@@ -161,7 +162,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     const timer = setTimeout(() => {
       this.deadlines.delete(runId);
       void this.enforceTimeout(runId).catch((err) => console.error("[roundhouse] sub-agent timeout failed:", (err as Error).message));
-    }, timeoutMs);
+    }, Math.min(timeoutMs, MAX_TIMER_MS)); // a longer delay would fire at once
     timer.unref?.();
     this.deadlines.set(runId, timer);
   }

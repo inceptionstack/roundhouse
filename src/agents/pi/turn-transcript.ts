@@ -23,6 +23,8 @@ export interface TurnTranscript {
   stepsOmitted: number;
   /** How the last assistant message ended ("aborted" after /stop), if it says. */
   lastStopReason?: string;
+  /** When the request began, as the conversation stamped it. */
+  requestAt?: number;
 }
 
 export interface TurnTranscriptOptions {
@@ -64,9 +66,10 @@ export function stripInjected(text: string): string {
  * (controller dumps), and a reviewer steered by what it reads can repeat them.
  */
 export function redactSecrets(text: string): string {
+  const KEY_WORDS = "passphrase|password|passwd|secret|token|api[_-]?key|private[_-]?key|x_iapp_key|psk";
   return text
-    // Telegram bot token, 8-10 digits : 35 chars
-    .replace(/\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g, "[bot token removed]")
+    // Telegram bot token, 8-10 digits : 35 chars (also inside api.telegram.org/bot<token>/…)
+    .replace(/\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g, "[bot token removed]")
     // vendor keys
     .replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "[api key removed]")
     .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[aws key removed]")
@@ -77,10 +80,16 @@ export function redactSecrets(text: string): string {
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]{20,}/g, "Bearer [removed]")
     // private keys
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[private key removed]")
-    // JSON: "x_passphrase": "...", "password": "...", "api_key": "..." and the like
-    .replace(/("[A-Za-z0-9_.-]*(?:passphrase|password|passwd|secret|token|api[_-]?key|private[_-]?key|x_iapp_key|psk)[A-Za-z0-9_.-]*"\s*:\s*)"(?:[^"\\]|\\.)*"/gi, '$1"[removed]"')
-    // env style: NAME_TOKEN=value, PASSWORD: value
-    .replace(/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|PASSPHRASE))\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g, "$1=[removed]");
+    // credentials inside a URL, and curl's -u user:password
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s\/:@]+:[^\s\/@]+@/gi, "$1[removed]@")
+    .replace(/(\s-u\s+)[^\s:]+:\S+/g, "$1[removed]")
+    // JSON: "x_passphrase": "...", "password": "...", "api_key": "..." and the like, also as escaped JSON inside a string
+    .replace(new RegExp(`("[A-Za-z0-9_.-]*(?:${KEY_WORDS})[A-Za-z0-9_.-]*"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`, "gi"), '$1"[removed]"')
+    .replace(new RegExp(`(\\\\"[A-Za-z0-9_.-]*(?:${KEY_WORDS})[A-Za-z0-9_.-]*\\\\"\\s*:\\s*\\\\")[^"\\\\]*(\\\\")`, "gi"), "$1[removed]$2")
+    // env style, upper case: NAME_TOKEN=value
+    .replace(/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|PASSPHRASE))\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g, "$1=[removed]")
+    // password=..., api_key: ... in any case ("token" is left out: "tokens: 1200" is a count here)
+    .replace(/\b((?:pass(?:word|wd|phrase)|api[_-]?key|secret|private[_-]?key))\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"',;]+)/gi, "$1=[removed]");
 }
 
 /** Every line of a step's body behind a bar, so text inside it cannot pass for a heading of the transcript. */
@@ -115,6 +124,11 @@ function argsOf(args: unknown): string {
 }
 
 interface Step { text: string; toolCalls: number; callId?: string }
+
+/** A role or tool name goes into a heading line: plain characters only. */
+function safe(name: unknown): string {
+  return String(name ?? "?").replace(/[^\w.:-]/g, "?").slice(0, 64);
+}
 
 export function renderTurn(messages: readonly unknown[], opts: TurnTranscriptOptions = {}): TurnTranscript | null {
   const maxChars = Math.max(2_000, opts.maxChars ?? DEFAULT_MAX_CHARS);
@@ -152,25 +166,25 @@ export function renderTurn(messages: readonly unknown[], opts: TurnTranscriptOpt
             const id = String(block.id ?? "");
             const name = String(block.name ?? "?");
             if (id) names.set(id, name);
-            steps.push({ text: `${clock(m.timestamp)}ASSISTANT CALLED ${name.replace(/[^\w.:-]/g, "?").slice(0, 64)}:\n${quote(argsOf(block.arguments))}`, toolCalls: 1, callId: id || undefined });
+            steps.push({ text: `${clock(m.timestamp)}ASSISTANT CALLED ${safe(name)}:\n${quote(argsOf(block.arguments))}`, toolCalls: 1, callId: id || undefined });
           }
           // Thinking is the model's own scratch work; the reviewer judges what was done and said.
         }
       }
       if (m.stopReason) lastStopReason = m.stopReason;
       if (m.stopReason === "aborted" || m.stopReason === "error" || m.errorMessage) {
-        steps.push({ text: `ASSISTANT MESSAGE ENDED: ${m.stopReason ?? "error"}${m.errorMessage ? ` (${clip(m.errorMessage, 300)})` : ""}`, toolCalls: 0 });
+        steps.push({ text: `ASSISTANT MESSAGE ENDED: ${safe(m.stopReason ?? "error")}${m.errorMessage ? `\n${quote(clip(redactSecrets(String(m.errorMessage)), 300))}` : ""}`, toolCalls: 0 });
       }
     } else if (m.role === "toolResult") {
       const name = m.toolName ?? names.get(String(m.toolCallId ?? "")) ?? "tool";
       const body = redactSecrets(textOf(m.content).trim() || "(no output)");
       answered.add(String(m.toolCallId ?? ""));
-      steps.push({ text: `${clock(m.timestamp)}RESULT OF ${String(name).replace(/[^\w.:-]/g, "?").slice(0, 64)}${m.isError ? " (ERROR)" : ""}:\n${quote(clip(body, RESULT_HEAD, RESULT_TAIL))}`, toolCalls: 0 });
+      steps.push({ text: `${clock(m.timestamp)}RESULT OF ${safe(name)}${m.isError ? " (ERROR)" : ""}:\n${quote(clip(body, RESULT_HEAD, RESULT_TAIL))}`, toolCalls: 0 });
     } else if (m.role === "user") {
       // A second user message inside the span cannot happen (start is the last one).
       continue;
     } else {
-      steps.push({ text: `[${m.role ?? "unknown"}${m.customType ? `:${m.customType}` : ""} message]`, toolCalls: 0 });
+      steps.push({ text: `[${safe(m.role ?? "unknown")}${m.customType ? `:${safe(m.customType)}` : ""} message]`, toolCalls: 0 });
     }
   }
 
@@ -199,5 +213,5 @@ export function renderTurn(messages: readonly unknown[], opts: TurnTranscriptOpt
   let text = head + tailNote(omitted) + body;
   if (text.length > maxChars) text = text.slice(0, maxChars - 40) + "\n[… cut at the size limit …]\n";
 
-  return { text, request, toolCalls, stepsOmitted: omitted, lastStopReason };
+  return { text, request, toolCalls, stepsOmitted: omitted, lastStopReason, requestAt: typeof first.timestamp === "number" ? first.timestamp : undefined };
 }

@@ -202,8 +202,16 @@ export interface TurnDescription {
   stepsOmitted: number;
   /** How the last assistant message ended ("aborted" after a stop), when known. */
   lastStopReason?: string;
-  /** The raw transcript on disk, when the agent keeps one. */
+  /** The raw transcript on disk, when the agent keeps one. It is not redacted. */
   sessionFile?: string;
+  /** When the owner's request began, as the agent stamped it: tells one turn from another with the same words. */
+  requestAt?: number;
+  /**
+   * False while the request is not yet in the conversation: the agent has been
+   * handed the message and is still getting ready, so what `text` describes is
+   * an earlier turn. Absent when the agent cannot tell.
+   */
+  reached?: boolean;
 }
 
 export interface MessageContext {

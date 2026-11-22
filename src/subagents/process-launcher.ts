@@ -84,14 +84,14 @@ const TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
  * pi's flags for a run limited to the named tools. `--tools` replaces pi's
  * default set (read, bash, edit, write) and keeps MCP tools, so MCP goes off
  * too: a reader must not reach anything through a server. Project context
- * files, prompt templates and themes are not loaded either: they come from
- * the working directory, which is where the agent under review can write, so
- * they would let it write its reviewer's instructions. Names are checked
+ * files, prompt templates, themes and project-local settings are not loaded
+ * either: they come from the working directory, which is where the agent under
+ * review can write, so they would let it write its reviewer's instructions. Names are checked
  * because they end up on a command line.
  */
 export function toolArgs(tools?: readonly string[]): string[] {
   if (!tools) return [];
-  const closed = ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes"];
+  const closed = ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-approve"];
   if (tools.length === 0) return ["--no-tools", ...closed];
   for (const t of tools) {
     if (!TOOL_NAME_RE.test(t)) throw new Error(`Invalid sub-agent tool name: ${JSON.stringify(t)}`);

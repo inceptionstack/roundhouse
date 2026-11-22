@@ -323,6 +323,30 @@ describe("describeTurn (what /stop gives the reviewer)", () => {
     await turn;
   });
 
+  it("says the request is not in the conversation yet while the prompt is still getting ready, then that it is", async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    sdk.messages = [{ role: "user", content: "an earlier request", timestamp: 1 }, { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }];
+    const stream = adapter.promptStream("main", { text: "the new request" })[Symbol.asyncIterator]();
+    const first = stream.next();
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1));
+
+    const getting = await adapter.describeTurn("main");
+    expect(getting.request).toBe("an earlier request");
+    expect(getting.reached).toBe(false);
+
+    sdk.messages = [...sdk.messages, { role: "user", content: "the new request", timestamp: Date.now() + 5 }];
+    const there = await adapter.describeTurn("main");
+    expect(there.request).toBe("the new request");
+    expect(there.reached).toBe(true);
+    expect(there.requestAt).toBeGreaterThan(getting.requestAt);
+
+    release();
+    await first.catch(() => {});
+    await stream.return?.();
+  });
+
   it("is null for a thread with no conversation, and for one with no message from the owner", async () => {
     make();
     expect(await adapter.describeTurn("never-used")).toBeNull();
