@@ -4,6 +4,8 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-22
+
 > **Upgrade notes.** Needs Node >= 22.19 and pi 1.x.
 > - An empty allowlist now refuses everyone: set `chat.allowAll: true` if an
 >   open bot is intended.
@@ -15,6 +17,27 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 > - Telegram deployments that list only usernames keep working, matched on
 >   the real @username. On Slack a name no longer grants access at all;
 >   Slack users are admitted by paired id.
+
+### Fixed — Telegram answers
+- **Text was dropped at the 4096-character limit.** A long answer is now
+  split in its markdown source so that each message's HTML fits; nothing is
+  truncated, and a code block or table that spans messages is reopened in
+  the next one. No message is sent without visible text.
+- **A rate limit (HTTP 429) could cut an answer short or leave a hole in
+  it.** Telegram's wait is now honoured, for up to 90 s per answer, and
+  Telegram is not called inside a wait it asked for. After a part that a
+  rate limit holds back, nothing later is sent, and the log says how much
+  was not delivered. Edits are spaced 1.1 s apart (3.1 s in groups).
+- **Text sat unsent while the agent ran a tool.** A streamed answer now shows
+  what it has when the next edit is due, not when the next piece arrives.
+- **Emphasis.** `__init__`, `snake_case_names` and `2*3*4` stay as written;
+  `**Note:**text` and bold in CJK text are bold.
+- **Tables** are boxed with plain-text cells; links in cells are listed under
+  the table, and a row with more cells than the header keeps them. Rows
+  streamed across a message boundary get the header again.
+- Lines ending in CR LF are read like any other.
+- Notices that do not answer a message (boot, cron, sub-agent reports) are
+  retried after a rate limit and fall back to plain text like any answer.
 
 ### Fixed — the bot while a turn is running
 - **Nothing was received from Telegram during a turn.** The Chat SDK's
