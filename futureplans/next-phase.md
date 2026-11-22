@@ -9,6 +9,39 @@ Two sources:
 
 How to use this file: pick an item, re-read the code it names (it will have moved), settle the open questions first, and delete the item when it ships.
 
+## Where things stand (2026-11-22)
+
+Release 0.7.0 holds everything below; `CHANGELOG.md` has the detail and the upgrade notes.
+
+| PR | What it did |
+|---|---|
+| #153 | Security: the allowlist bypass by display name, fail-closed access, `dmOnly`. pi 1.6. Dependencies without known advisories |
+| #154 | A flaky test |
+| #155 | Compaction thresholds as a fraction of the model's window, flush model opt-in, persona and tool notes in the system prompt, one gateway per home directory, a stop that always ends the process |
+| #156 | The bot keeps receiving during a turn; `/new`, `/model`, `/think`, `/cancel` act on the conversation; images go to the model; requests cut off by a restart are listed |
+| #157 | Telegram rendering, splitting and delivery (see "Telegram answers" in `CLAUDE.md`) |
+
+Working on this repository:
+
+- Tests write under `$HOME`. Run them with a throwaway home: `HOME=$(mktemp -d) npm test`, and `npm run typecheck`.
+- `main` is protected: a pull request, the `test` check on an up-to-date branch, and every review thread resolved. An automated reviewer comments on each push; answer its threads and resolve them.
+- A release is a version bump in `package.json` and `package-lock.json`, the changelog section, and a `v*` tag, which publishes to npm.
+- `CLAUDE.md` describes what is not obvious from the code. Read the section for the area before changing it.
+
+### Merged, and not yet seen working on a live bot
+
+Confirmed live on 2026-11-21: `/status`, `/model`, `/think`, `/verbose`, `/crons`, ordinary turns, a restart that leaves no process behind, and `/restart` sent during a turn (handled at once; the next start listed the request that was cut off). Still to try by hand:
+
+- A message sent while a long turn runs, then `/cancel`: the turn should stop at once and the message should not be lost.
+- `/new`: the next message should start an empty conversation, also after a restart in between.
+- An answer longer than one message, with a table and a long code block: no text missing, the code block and the table header repeated in the second message.
+- A photo: the model should describe what is in it, not a file path.
+- A day of normal use: `/status` should show compaction far less often than before on a 1M-window model, and a prompt-cache hit rate that stays high between messages.
+
+### Considered and deferred: pi-durable
+
+pi-durable was looked at as a possible backend. At the time it was an experimental harness of its own, separate from the in-process SDK that `src/agents/pi/pi-adapter.ts` uses, so adopting it means a second adapter, not a flag. If it matures, prototype it behind the `AgentAdapter` seam (`src/agents/registry.ts`), next to the pi adapter, and compare what survives a gateway restart. B6 and B7 below are the features it would help most.
+
 ## A. Requested by the owner
 
 ### A1. Review the scheduler
