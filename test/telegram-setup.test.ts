@@ -3,8 +3,10 @@ import { resolve } from "node:path";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-// Mock ROUNDHOUSE_DIR before importing pairing module
-const origDir = process.env.ROUNDHOUSE_DIR;
+// ROUNDHOUSE_DIR is derived from homedir() at import time, so the pairing
+// tests point HOME at a fresh directory and re-import the modules.
+const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
 
 describe("pairing", () => {
   let tempDir: string;
@@ -287,14 +289,16 @@ describe("TelegramAdapter.handlePairing", () => {
   beforeEach(async () => {
     vi.resetModules(); // Clear module cache so ROUNDHOUSE_DIR is re-evaluated
     tempDir = await mkdtemp(resolve(tmpdir(), "roundhouse-adapter-test-"));
-    process.env.ROUNDHOUSE_DIR = tempDir;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
     const { TelegramAdapter } = await import("../src/transports/telegram/telegram-adapter");
     adapter = new TelegramAdapter();
   });
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
-    process.env.ROUNDHOUSE_DIR = origDir;
+    process.env.HOME = origHome;
+    process.env.USERPROFILE = origUserProfile;
   });
 
   it("isPairingPending returns false when no pairing file exists", async () => {
