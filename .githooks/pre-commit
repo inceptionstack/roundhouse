@@ -98,7 +98,7 @@ for pattern in "${PATTERNS[@]}"; do
         fi
         FAILED=1
         echo "ERROR: Possible secret matching '$pattern':"
-        echo "  $content"
+        echo "  (matching line hidden, ${#content} chars; find it with: git diff --cached)"
       fi
     done <<< "$MATCHES"
   fi
