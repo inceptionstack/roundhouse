@@ -29,6 +29,13 @@ import { CODE_MARK, firstDifference, flat, genDocument, rng, type Rng } from "./
 
 const LIMIT = TELEGRAM_LIMIT;
 
+/**
+ * The tests that loop over generated documents take a few seconds on a fast
+ * machine and several times that on a loaded CI runner. Vitest's default of
+ * 5 s made them fail there for speed alone, so they get their own timeout.
+ */
+const GENERATED_DOCS_TIMEOUT_MS = 60_000;
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -657,7 +664,7 @@ describe("a table that is being streamed when a message fills up", () => {
     }
     // The table did straddle two messages in a good number of these runs.
     expect(boundaries).toBeGreaterThan(5);
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 });
 
 describe("a code block whose first line is longer than a message", () => {
@@ -698,7 +705,7 @@ describe("delivery of generated documents", () => {
       const whole = htmlToVisible(markdownToTelegramHtml(md)).replace(/\n/g, "");
       expect(firstDifference(flat(t.visible()), whole), `seed ${seed}`).toBeNull();
     }
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   /** The document as a model would stream it: mostly small pieces, now and then a big one */
   async function* streamed(md: string, r: Rng, clock: ReturnType<typeof fakeClock>): AsyncIterable<string> {
@@ -731,7 +738,7 @@ describe("delivery of generated documents", () => {
       const whole = htmlToVisible(markdownToTelegramHtml(md)).replace(/\n/g, "");
       expect(firstDifference(flat(t.visible()), whole), `seed ${seed}`).toBeNull();
     }
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   it("delivers every visible character when streaming 80 documents through rate limits", async () => {
     let limited = 0;
@@ -760,7 +767,7 @@ describe("delivery of generated documents", () => {
       expect(firstDifference(flat(t.visible()), whole), `seed ${seed}`).toBeNull();
     }
     expect(limited).toBeGreaterThan(40);
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   it("delivers every table row of 120 documents with tables, and Telegram refuses nothing", async () => {
     /** The rows of the boxed tables in what a reader sees, without their padding */
@@ -793,7 +800,7 @@ describe("delivery of generated documents", () => {
       }
     }
     expect(rowsChecked).toBeGreaterThan(300);
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   it("delivers every visible character when some bubbles can never be edited", async () => {
     let stuck = 0;
@@ -826,5 +833,5 @@ describe("delivery of generated documents", () => {
       expect(firstDifference(strip(t.visible().join("")), whole), `seed ${seed}`).toBeNull();
     }
     expect(stuck).toBeGreaterThan(40);
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 });
