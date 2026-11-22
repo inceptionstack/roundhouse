@@ -29,3 +29,6 @@ gateway-sessions/
 
 # Claude Code local state (cron lock, transcripts, etc.)
 .claude/
+
+# Tool state written under a relative HOME (never commit)
+.local/
