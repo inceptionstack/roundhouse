@@ -329,6 +329,7 @@ Roundhouse automatically registers these commands with Telegram on startup:
 | `/verbose` | Toggle tool status messages on/off for this chat |
 | `/status` | Show gateway status: version, agent, model, context usage, uptime, etc. |
 | `/cancel` | Stop the current agent run (abort tools, LLM calls, compaction) |
+| `/stop [question]` | Stop the current agent run, then have a read-only sub-agent review what it did so far and report here |
 | `/restart` | Restart the gateway service (requires `allowedUsers` to be configured) |
 | `/doctor` | Run health checks and show system status |
 | `/crons` | Manage scheduled jobs (list, trigger, pause, resume) |
@@ -357,6 +358,12 @@ Toggles verbose mode for the current chat. When ON, shows tool call status messa
 
 Aborts the current agent run for this chat — stops any in-progress tool calls, LLM generation, and compaction. The session is preserved; send another message to continue the conversation.
 
+### `/stop`
+
+Ends the turn in progress the way `/cancel` does, then hands what the agent did so far to a reviewer: a sub-agent that can read and search files and nothing else (`read`, `grep`, `find`, `ls`: no shell, no edits, no MCP). The reviewer gets the turn as a file (your request, what the agent said, each tool call and what came back, long output shortened) and answers in six parts: what was asked, what is done, what was in progress, problems, what is left behind to undo, and a suggestion. Add a question after the command (`/stop why did it touch the router?`) and the reviewer answers that too.
+
+The report is posted in the chat as it is, usually within a minute or two, and **no agent turn starts because of it**: the agent that was stopped does not start working again. With your next message the agent is told that the turn was stopped on purpose and is given the report to weigh as data (once; it is kept in memory, so a restart drops it). If the reviewer fails or runs out of its 10 minutes, you are told, and the turn it was given stays in `~/.roundhouse/subagents/<run>/turn.md`. With nothing running, `/stop` just says so. It needs an agent that can describe its turn (pi can; kiro cannot, and is only stopped).
+
 ### Follow-up notifications
 
 When extensions (e.g. code review) queue follow-up work after the agent responds, the gateway shows:
@@ -367,7 +374,7 @@ Fast operations that complete within 2 seconds show no extra messages.
 
 ## While the agent is working
 
-Messages are received while a turn runs. Commands about the turn in progress or the gateway (`/cancel`, `/status`, `/model`, `/think`, `/verbose`, `/doctor`, `/crons`, `/restart`, `/later`) are handled at once; `/model` and `/think` answer at once and take effect when the turn ends. Everything else waits its turn in the order sent: ordinary messages, `/new`, `/topic`, `/compact`, and commands meant for the agent.
+Messages are received while a turn runs. Commands about the turn in progress or the gateway (`/cancel`, `/stop`, `/status`, `/model`, `/think`, `/verbose`, `/doctor`, `/crons`, `/restart`, `/later`) are handled at once; `/model` and `/think` answer at once and take effect when the turn ends. Everything else waits its turn in the order sent: ordinary messages, `/new`, `/topic`, `/compact`, and commands meant for the agent.
 
 If the gateway is restarted or dies before it has finished your requests, they are not run again. The next gateway lists the requests that were cut off or still waiting; say "continue" or send them again.
 

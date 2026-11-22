@@ -18,6 +18,7 @@ const sdk = {
   prompts: [] as Array<{ text: string; images: number; model: string }>,
   setModelCalls: [] as string[],
   contextTokens: 10_000 as number | null,
+  messages: [] as unknown[],
   holdPrompt: undefined as Promise<void> | undefined,
   models: {
     "big/conv": { provider: "big", id: "conv", contextWindow: 1_000_000 },
@@ -34,6 +35,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     agent = { state: { model: sdk.models["big/conv"], thinkingLevel: "high" } };
     isIdle = true;
     constructor(readonly sessionFile: string) {}
+    get messages() { return sdk.messages; }
     get model() { return this.agent.state.model; }
     get thinkingLevel() { return this.agent.state.thinkingLevel; }
     subscribe() { return () => {}; }
@@ -96,7 +98,7 @@ const make = () => { adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir 
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "rh-pi-session-"));
-  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
+  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.messages = []; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -291,5 +293,40 @@ describe("image attachments", () => {
     const many = Array.from({ length: 7 }, (_, i) => attachment(`p${i}.png`));
     await adapter.prompt("main", { text: "album", attachments: many });
     expect(sdk.prompts.at(-1)!.images).toBe(5);
+  });
+});
+
+describe("describeTurn (what /stop gives the reviewer)", () => {
+  it("describes the turn while it is still running, without waiting for it", async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    sdk.messages = [
+      { role: "user", content: "restart the AP", timestamp: 1 },
+      { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }], stopReason: "toolUse" },
+    ];
+    const turn = adapter.prompt("main", { text: "restart the AP" });
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1));
+
+    // The prompt holds the thread's queue; asking for the turn must not queue behind it.
+    const described = await Promise.race([
+      adapter.describeTurn("main", { maxChars: 10_000 }),
+      new Promise((r) => setTimeout(() => r("waited for the turn"), 500)),
+    ]) as any;
+    expect(described).not.toBe("waited for the turn");
+    expect(described.request).toBe("restart the AP");
+    expect(described.toolCalls).toBe(1);
+    expect(described.text).toContain("ASSISTANT CALLED bash");
+    expect(described.sessionFile).toMatch(/session-\d+\.jsonl$/);
+
+    release();
+    await turn;
+  });
+
+  it("is null for a thread with no conversation, and for one with no message from the owner", async () => {
+    make();
+    expect(await adapter.describeTurn("never-used")).toBeNull();
+    await adapter.prompt("main", { text: "hello" });
+    expect(await adapter.describeTurn("main")).toBeNull(); // the fake session has no messages
   });
 });

@@ -605,6 +605,74 @@ describe("subagents", () => {
     expect(status?.status).toBe("complete");
     expect(status?.exitCode).toBe(0);
   });
+
+  describe("a reader that cannot change anything, and files for it to read", () => {
+    const routing = { transport: "telegram" as const, chatId: "1", parentThreadId: "main" };
+    const launch = () => {
+      const child = createMockChild(9001);
+      spawnMock.mockImplementation(() => { queueMicrotask(() => child.emit("spawn")); return child; });
+      return new SubAgentOrchestratorImpl({ dataRoot: rootDir, readSpawnClockTicks: async () => "1" });
+    };
+
+    it("starts pi with only the named tools and no MCP", async () => {
+      const orchestrator = launch();
+      await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing, tools: ["read", "grep", "find", "ls"] });
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      const i = args.indexOf("--tools");
+      expect(args[i + 1]).toBe("read,grep,find,ls");
+      expect(args).toContain("--no-mcp");
+      // pi's flags come before the prompt.
+      expect(i).toBeLessThan(args.indexOf("-p"));
+    });
+
+    it("leaves pi's tools alone when none are named", async () => {
+      const orchestrator = launch();
+      await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing });
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      expect(args).not.toContain("--tools");
+      expect(args).not.toContain("--no-mcp");
+    });
+
+    it("refuses a tool name that is not a plain name, and starts nothing", async () => {
+      const orchestrator = launch();
+      for (const bad of ["read;rm", "--no-tools", "Read", "a b", ""]) {
+        await expect(orchestrator.spawn({ role: "review", task: "x", cwd: rootDir, routing, tools: [bad] })).rejects.toThrow(/Invalid sub-agent tool name/);
+      }
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it("puts files in the run folder and lists them, with full paths, in the brief", async () => {
+      const orchestrator = launch();
+      const runId = await orchestrator.spawn({
+        role: "review", task: "Look", cwd: rootDir, routing,
+        files: { "turn.md": "the whole turn" },
+        context: { targetFiles: ["/etc/hosts"] },
+      });
+      const runDir = join(rootDir, "subagents", runId);
+      expect(await readFile(join(runDir, "turn.md"), "utf8")).toBe("the whole turn");
+      const brief = await readFile(join(runDir, "brief.md"), "utf8");
+      expect(brief).toContain("- /etc/hosts");
+      expect(brief).toContain(`- ${join(runDir, "turn.md")}`);
+    });
+
+    it("refuses file names that could leave the run folder or replace its own files", async () => {
+      const orchestrator = launch();
+      for (const bad of ["../x", "a/b", ".hidden", "brief.md", "status.json", "stdout.log", ""]) {
+        await expect(orchestrator.spawn({ role: "review", task: "x", cwd: rootDir, routing, files: { [bad]: "x" } })).rejects.toThrow(/Invalid sub-agent file name/);
+      }
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it("records where the output goes, so a restart cannot change it", async () => {
+      const orchestrator = launch();
+      const runId = await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing, delivery: "chat" });
+      const status = JSON.parse(await readFile(join(rootDir, "subagents", runId, "status.json"), "utf8")) as RunStatus;
+      expect(status.delivery).toBe("chat");
+      const plain = await launch().spawn({ role: "review", task: "Look", cwd: rootDir, routing });
+      const plainStatus = JSON.parse(await readFile(join(rootDir, "subagents", plain, "status.json"), "utf8")) as RunStatus;
+      expect(plainStatus.delivery).toBeUndefined();
+    });
+  });
 });
 
 function createMockChild(

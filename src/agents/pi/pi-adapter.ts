@@ -29,8 +29,9 @@ import {
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext, TurnDescription } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
+import { renderTurn } from "./turn-transcript";
 import { isToolPairingError } from "../shared/error-classifiers";
 import { repairSessionFile } from "../shared/session-repair";
 import { softResetSessionFile, type SoftResetReport } from "../shared/session-soft-reset";
@@ -1009,6 +1010,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         entry.session.abortCompaction();
         console.log(`[pi-agent] aborted session for ${threadId}`);
       }
+    },
+
+    // Not queued behind the turn: a reviewer is asked for while the turn is
+    // running or has just been aborted, and a queued call would wait for it.
+    async describeTurn(threadId: string, opts?: { maxChars?: number }): Promise<TurnDescription | null> {
+      const entry = sessions.get(threadId);
+      if (!entry) return null;
+      const turn = renderTurn([...entry.session.messages] as unknown[], opts);
+      if (!turn) return null;
+      return { ...turn, sessionFile: entry.session.sessionFile ?? undefined };
     },
 
     getInfo(threadId?: string): Record<string, unknown> {

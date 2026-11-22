@@ -11,6 +11,9 @@ import { RunStore } from "./run-store";
 import { TerminationHandler } from "./termination-handler";
 import type { RunStatus, SpawnSpec, SubAgentLifecycle, SubAgentOrchestrator } from "./types";
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const RUN_FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Files the orchestrator and the sub-agent's own process write in the run folder. */
+const RESERVED_RUN_FILES = new Set(["brief.md", "status.json", "settings.json", "stdout.log", "stderr.log"]);
 
 export interface OrchestratorOptions extends ProcessLauncherOptions {
   dataRoot?: string;
@@ -56,11 +59,20 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
 
     const runId = randomUUID();
     const runDir = this.store.getRunDir(runId);
-    const brief = buildBrief(spec);
+    const files = Object.entries(spec.files ?? {});
+    for (const [name] of files) {
+      if (!RUN_FILE_NAME_RE.test(name) || RESERVED_RUN_FILES.has(name)) {
+        throw new Error(`Invalid sub-agent file name: ${JSON.stringify(name)}`);
+      }
+    }
+    const brief = buildBrief(files.length
+      ? { ...spec, context: { ...spec.context, targetFiles: [...(spec.context?.targetFiles ?? []), ...files.map(([name]) => join(runDir, name))] } }
+      : spec);
     const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const startedAt = this.now();
 
-    await mkdir(runDir, { recursive: true });
+    await mkdir(runDir, { recursive: true, mode: 0o700 });
+    for (const [name, content] of files) await this.store.writeFile(runId, name, content);
     await this.store.writeFile(runId, "brief.md", brief);
     if (spec.model) {
       await this.store.writeJson(runId, "settings.json", { defaultModel: spec.model });
@@ -81,7 +93,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
         if (child.exitCode !== null) {
           void this.handleChildExit(runId, child.exitCode);
         }
-      });
+      }, spec.tools);
       launchedPid = pid;
 
       const initialStatus: RunStatus = {
@@ -90,6 +102,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
         cwd: spec.cwd,
         routing: spec.routing,
         status: "running",
+        ...(spec.delivery ? { delivery: spec.delivery } : {}),
         pid,
         startedAt: startedAt.toISOString(),
         deadlineAt: new Date(startedAt.getTime() + timeoutMs).toISOString(),

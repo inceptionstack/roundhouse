@@ -232,8 +232,8 @@ describe("gateway admission", () => {
     const { transport } = await startGateway({ allowedUserIds: [OWNER_ID] });
     const thread = tgThread(666);
     const mallory = { id: 666, username: "mallory" };
-    // /cancel, /verbose, /doctor and /crons are pre-turn commands: their only gate is in handleOrAbort.
-    for (const cmd of ["/doctor", "/crons", "/cancel", "/verbose", "/status", "/new", "/model"]) {
+    // /cancel, /stop, /verbose, /doctor and /crons are pre-turn commands: their only gate is in handleOrAbort.
+    for (const cmd of ["/doctor", "/crons", "/cancel", "/stop", "/verbose", "/status", "/new", "/model"]) {
       await wired.dm!(thread, tgMessage(mallory, cmd));
       await wired.subscribed!(thread, tgMessage(mallory, cmd));
       await wired.slash!(tgSlash(mallory, cmd));

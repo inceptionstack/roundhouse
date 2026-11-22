@@ -4,6 +4,18 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`/stop [question]`.** Ends the turn in progress like `/cancel`, then has a
+  sub-agent that can only read (`read`, `grep`, `find`, `ls`) review what the
+  agent did so far and post its report in the chat. The report starts no agent
+  turn; the agent hears about the stop, and gets the report as data, with the
+  owner's next message. A reviewer that fails or times out is reported.
+  Needs `AgentAdapter.describeTurn` (implemented for pi).
+- Sub-agents can be given a tool allowlist (`SpawnSpec.tools`, pi's `--tools`
+  plus `--no-mcp`), files to read in their run folder (`SpawnSpec.files`), and
+  a delivery (`SpawnSpec.delivery: "chat"`: post the output instead of handing
+  it to the agent). The delivery is stored with the run, so it survives a restart.
+
 ## [0.7.0] — 2026-11-22
 
 > **Upgrade notes.** Needs Node >= 22.19 and pi 1.x.

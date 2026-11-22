@@ -152,6 +152,15 @@ export interface AgentAdapter {
   abort?(threadId: string): Promise<void>;
 
   /**
+   * What the agent has done in this thread since the last message from the
+   * owner, as plain text for a reviewer (`/stop` hands it to one): the request,
+   * and every step with the tool results, shortened to a readable size. Safe to
+   * call while a turn is running or right after an abort. Null when the thread
+   * has no conversation or no turn yet.
+   */
+  describeTurn?(threadId: string, opts?: { maxChars?: number }): Promise<TurnDescription | null>;
+
+  /**
    * Switch the conversation in this thread to another model ("provider/id").
    * `applied: false` leaves it as it is and says why in `detail`; with
    * `usable: false` the model cannot be used here at all (unknown, or no
@@ -180,6 +189,21 @@ export interface AgentAdapter {
    * platform-specific hints, rewrite text, etc. Return the (possibly modified) message.
    */
   prepareMessage?(threadId: string, message: AgentMessage, context: MessageContext): AgentMessage;
+}
+
+/** A turn of a conversation in words, for `AgentAdapter.describeTurn`. */
+export interface TurnDescription {
+  /** Markdown: the request and the steps. */
+  text: string;
+  /** The owner's request that began the turn. */
+  request: string;
+  toolCalls: number;
+  /** Oldest steps left out of `text` because the turn was long. */
+  stepsOmitted: number;
+  /** How the last assistant message ended ("aborted" after a stop), when known. */
+  lastStopReason?: string;
+  /** The raw transcript on disk, when the agent keeps one. */
+  sessionFile?: string;
 }
 
 export interface MessageContext {

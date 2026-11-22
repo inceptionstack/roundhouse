@@ -19,6 +19,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "topic", description: "Switch conversation topic" },
   { command: "verbose", description: "Toggle verbose tool output" },
   { command: "cancel", description: "Cancel the current agent run" },
+  { command: "stop", description: "Stop the current run and have a reviewer check it" },
   { command: "restart", description: "Restart the gateway" },
   { command: "update", description: "Update roundhouse and restart" },
   { command: "status", description: "Show system status" },
