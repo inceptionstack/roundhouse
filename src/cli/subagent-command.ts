@@ -8,12 +8,11 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { ROUNDHOUSE_DIR } from "../config";
 import { SubAgentOrchestratorImpl } from "../subagents/orchestrator";
 import { validateRunId } from "../subagents/run-store";
 import type { SpawnSpec, SubAgentRole, RoutingInfo } from "../subagents/types";
 
-const ROUNDHOUSE_DIR = join(homedir(), ".roundhouse");
 
 function loadGatewayConfig(): { notifyChatIds: (string | number)[] } {
   try {

@@ -18,7 +18,7 @@ Tests write under `$HOME` (`~/.roundhouse`, `~/.pi/agent`, `~/.mcporter`). On a 
 
 There is no lint script. TypeScript is executed directly via `tsx`; `tsc` only typechecks and is never invoked at build/runtime. The only "build" happens implicitly when `roundhouse run` prefers a compiled `src/dist/index.js` if present; otherwise it imports `src/index.ts` into its own process (tsx is registered by `bin/roundhouse.mjs`).
 
-The repo uses a custom git hooks path: `git config core.hooksPath .githooks` (already set locally). `.githooks/pre-commit` scans staged diffs for secret patterns (Telegram/Anthropic/OpenAI/AWS/NPM) and blocks commits. Don't bypass with `--no-verify` unless the user asks.
+Git hooks are installed by husky (`prepare: husky || true`, so `core.hooksPath` is `.husky/_`). `.husky/pre-commit` runs `scripts/scan-staged-secrets.sh` (secretlint over the staged blobs, config `.secretlintrc.json`) and then `.githooks/pre-commit` (pattern scan of added lines: Telegram/Anthropic/OpenAI/AWS/NPM). CI's `secret-scan` job runs a pinned, checksum-verified gitleaks over the full history; verified false positives go in `.gitleaksignore` by fingerprint. Don't bypass with `--no-verify` unless the user asks.
 
 ## Architecture
 

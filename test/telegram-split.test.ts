@@ -23,6 +23,13 @@ import { CODE_MARK, PROSE_MARK, genDocument } from "./telegram-doc-generator";
 
 const LIMIT = TELEGRAM_MESSAGE_LIMIT;
 
+/**
+ * The tests that loop over generated documents take a few seconds on a fast
+ * machine and several times that on a loaded CI runner. Vitest's default of
+ * 5 s made them fail there for speed alone, so they get their own timeout.
+ */
+const GENERATED_DOCS_TIMEOUT_MS = 60_000;
+
 /** The source each chunk covers, in order */
 function sources(md: string, chunks: MarkdownChunk[]): string[] {
   return chunks.map((c) => md.slice(c.start, c.end));
@@ -324,7 +331,7 @@ describe("splitMarkdownForTelegram — generated documents", () => {
       const chunks = splitMarkdownForTelegram(md);
       expect(splitProblem(md, chunks, LIMIT), `seed ${seed}`).toBeNull();
     }
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   it("holds its properties for 150 documents at smaller limits", () => {
     for (let seed = 1001; seed <= 1150; seed++) {
@@ -333,7 +340,7 @@ describe("splitMarkdownForTelegram — generated documents", () => {
       const chunks = splitMarkdownForTelegram(md, limit);
       expect(splitProblem(md, chunks, limit), `seed ${seed}, limit ${limit}`).toBeNull();
     }
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 
   it("covers what it claims to: long documents, split code blocks, split tables, hard cuts", () => {
     let split = 0, reopenedFence = 0, repeatedTable = 0, hardCut = 0, longest = 0;
@@ -351,7 +358,7 @@ describe("splitMarkdownForTelegram — generated documents", () => {
     expect(repeatedTable).toBeGreaterThan(20);
     expect(hardCut).toBeGreaterThan(100);
     expect(longest).toBeGreaterThan(30_000);
-  });
+  }, GENERATED_DOCS_TIMEOUT_MS);
 });
 
 describe("splitMarkdownForTelegram — found in review", () => {

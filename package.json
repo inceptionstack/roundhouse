@@ -27,7 +27,8 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p .",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "husky || true"
   },
   "files": [
     "src/",
@@ -52,7 +53,10 @@
     "tsx": "^4.23.15"
   },
   "devDependencies": {
+    "@secretlint/secretlint-rule-preset-recommend": "13.1.0",
     "@types/node": "^26.6.6",
+    "husky": "9.1.7",
+    "secretlint": "13.1.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   },
