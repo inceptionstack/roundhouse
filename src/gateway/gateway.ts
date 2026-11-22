@@ -14,7 +14,7 @@ import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doc
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
 import { IpcServer, createIpcHandler } from "../ipc";
-import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
+import { prepareMemoryForTurn, finalizeMemoryForTurn, rearmMemoryInjection, flushMemoryThenCompact } from "../memory/lifecycle";
 import { recoverFromAgentTurnOverflow, type TurnSource } from "./overflow";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
@@ -758,7 +758,14 @@ export class Gateway {
     const ac = new AbortController();
     const chatKey = typeof thread?.id === "string" ? thread.id : agentThreadId;
     const running = { agentThreadId, controller: ac, started: false };
-    this.runningTurns.set(chatKey, running);
+    // "The turn in this chat" is this one from the moment it is accepted,
+    // unless another holds that place: the owner's messages come one at a
+    // time, but a turn the gateway starts itself (a sub-agent's result) can
+    // overlap with one of his, either way round. The newcomer takes the place
+    // only when it gets the thread lock, or /cancel and /stop would act on the
+    // turn that is waiting and leave the one that is running.
+    const waitsBehindAnother = this.runningTurns.has(chatKey);
+    if (!waitsBehindAnother) this.runningTurns.set(chatKey, running);
     const turnOver = () => {
       if (this.runningTurns.get(chatKey) === running) this.runningTurns.delete(chatKey);
       if (abortControllers.get(agentThreadId) === ac) abortControllers.delete(agentThreadId);
@@ -786,6 +793,7 @@ export class Gateway {
       turnOver();
       return;
     }
+    this.runningTurns.set(chatKey, running);
     abortControllers.set(agentThreadId, ac);
 
     let stopTyping: (() => void) | null = null;
@@ -877,24 +885,35 @@ export class Gateway {
       // needs to know whether the user already saw partial assistant text
       // when picking gateway-overflow recovery copy.
       let streamHadVisibleText = false;
+      // What this message carries for the agent (a note about a /stop, the
+      // memory files) counts as delivered when the agent has the message: when
+      // the adapter says so, if it can, and otherwise when it is prompted. A
+      // turn cancelled before that leaves both for the next message.
+      const reportsStart = agent.getInfo?.()?.reportsPromptStart === true;
+      let reachedAgent = false;
+      const delivered = () => { reachedAgent = true; stopNote?.commit(); };
       try {
         let turnUsedTools = false;
         if (ac.signal.aborted) {
           // Cancelled while the message was being prepared: do not prompt.
         } else if (agent.promptStream) {
           running.started = true;
-          stopNote?.commit(); // the agent is about to hear it: now it is used up
-          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+          if (!reportsStart) delivered();
+          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage, { onStart: delivered }), verboseThreads.has(agentThreadId), ac.signal);
           turnUsedTools = streamResult.usedTools;
           streamHadVisibleText = streamResult.hadVisibleText;
         } else {
           running.started = true;
-          stopNote?.commit(); // the agent is about to hear it: now it is used up
+          delivered();
           const reply = await agent.prompt(agentThreadId, agentMessage);
           turnUsedTools = true;
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }
+        }
+
+        if (!reachedAgent && memoryPrepared?.injected) {
+          await rearmMemoryInjection(agentThreadId).catch((err) => console.error(`[roundhouse] could not re-arm the memory injection:`, (err as Error).message));
         }
 
         // Memory: post-turn finalize + pressure check
@@ -1669,13 +1688,15 @@ export class Gateway {
       ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
       : 0;
     const ok = status.status === "complete" && out.length > 0;
+    // Two reviews can be under way and finish in either order: say which stop this one is about.
+    const stoppedAt = this.stopNotes.stopTime(routing.parentThreadId, status.runId) ?? new Date(status.startedAt).toTimeString().slice(0, 8);
     let text: string;
     if (ok) {
       const body = out.length > MAX_REVIEW_POST_CHARS ? `${out.slice(0, MAX_REVIEW_POST_CHARS)}\n\n[… cut; the whole report is in ${join(runDir, "stdout.log")}]` : out;
-      text = `🔎 **Review of the stopped turn** (${secs} s)\n\n${body}`;
+      text = `🔎 **Review of the turn stopped at ${stoppedAt}** (${secs} s)\n\n${body}`;
     } else {
       const why = status.status === "timeout" ? "ran out of time" : "failed";
-      text = `⚠️ The review of the stopped turn ${why}${out ? `. This is what it had written:\n\n${out.slice(-3000)}` : "."}\n\nThe turn it was given is in ${join(runDir, "turn.md")}.`;
+      text = `⚠️ The review of the turn stopped at ${stoppedAt} ${why}${out ? `. This is what it had written:\n\n${out.slice(-3000)}` : "."}\n\nThe turn it was given is in ${join(runDir, "turn.md")}.`;
     }
     let posted = true;
     try {
@@ -1692,7 +1713,7 @@ export class Gateway {
       kind: ok ? "ok" : status.status === "timeout" ? "timeout" : "failed",
       text: ok ? out : undefined,
       posted,
-      time: new Date(status.startedAt).toTimeString().slice(0, 8),
+      time: stoppedAt,
     });
   }
 

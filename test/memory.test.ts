@@ -694,3 +694,17 @@ describe("flushMemoryThenCompact emergency path", () => {
     expect(progress.some(s => s.includes("Soft-reset failed") && s.includes("connection reset"))).toBe(true);
   });
 });
+
+describe("rearmMemoryInjection", () => {
+  it("makes the next turn carry the memory files again, after a message that carried them never reached the agent", async () => {
+    const { saveThreadMemoryState } = await import("../src/memory/state");
+    const { rearmMemoryInjection } = await import("../src/memory/lifecycle");
+    const { shouldInjectMemory: decide } = await import("../src/memory/policy");
+    const { formatDate: day } = await import("../src/memory/files");
+    const threadId = `rearm-${Date.now()}`;
+    await saveThreadMemoryState(threadId, { lastInjectedDigest: "abc", lastSeenLocalDate: day(new Date()) });
+    expect(decide(await loadThreadMemoryState(threadId), "abc").inject).toBe(false);
+    await rearmMemoryInjection(threadId);
+    expect(decide(await loadThreadMemoryState(threadId), "abc")).toEqual({ inject: true, reason: "manual" });
+  });
+});

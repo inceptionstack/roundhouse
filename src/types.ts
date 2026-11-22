@@ -98,6 +98,14 @@ export interface AdapterInfo {
    */
   standingContext?: "system-prompt";
 
+  /**
+   * True when the adapter calls `PromptHooks.onStart`, and so can also drop a
+   * prompt that was cancelled before it started. The gateway then counts
+   * what a message carried (a note, the memory files) as delivered only once
+   * it is told; with other adapters it counts them as delivered when it prompts.
+   */
+  reportsPromptStart?: boolean;
+
   /** Additional adapter-specific fields */
   [key: string]: unknown;
 }
@@ -118,7 +126,7 @@ export interface AgentAdapter {
   prompt(threadId: string, message: AgentMessage): Promise<AgentResponse>;
 
   /** Send a user message and stream back events in real time. */
-  promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent>;
+  promptStream(threadId: string, message: AgentMessage, hooks?: PromptHooks): AsyncIterable<AgentStreamEvent>;
 
   /** Tear down all sessions and release resources. */
   dispose(): Promise<void>;
@@ -189,6 +197,17 @@ export interface AgentAdapter {
    * platform-specific hints, rewrite text, etc. Return the (possibly modified) message.
    */
   prepareMessage?(threadId: string, message: AgentMessage, context: MessageContext): AgentMessage;
+}
+
+/** What an adapter can tell its caller about a prompt while it is on its way. */
+export interface PromptHooks {
+  /**
+   * Called once, at the moment the message is handed to the agent: from then
+   * on the agent has it, with everything the gateway put in front of it. An
+   * adapter that calls it says so in `AdapterInfo.reportsPromptStart`, and
+   * does not call it for a prompt that is cancelled before that moment.
+   */
+  onStart?: () => void;
 }
 
 /** A turn of a conversation in words, for `AgentAdapter.describeTurn`. */

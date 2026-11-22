@@ -19,6 +19,8 @@ const sdk = {
   setModelCalls: [] as string[],
   contextTokens: 10_000 as number | null,
   messages: [] as unknown[],
+  handler: undefined as undefined | ((event: { type: string }) => void),
+  aborts: 0,
   holdPrompt: undefined as Promise<void> | undefined,
   models: {
     "big/conv": { provider: "big", id: "conv", contextWindow: 1_000_000 },
@@ -38,7 +40,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     get messages() { return sdk.messages; }
     get model() { return this.agent.state.model; }
     get thinkingLevel() { return this.agent.state.thinkingLevel; }
-    subscribe() { return () => {}; }
+    subscribe(handler: (event: { type: string }) => void) { sdk.handler = handler; return () => {}; }
     async prompt(text: string, options?: { images?: unknown[] }) {
       sdk.prompts.push({ text, images: options?.images?.length ?? 0, model: `${this.model.provider}/${this.model.id}` });
       // pi writes the transcript as soon as the user message is appended,
@@ -58,7 +60,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     setThinkingLevel(level: string) { this.agent.state.thinkingLevel = level; }
     getSessionStats() { return { cost: 1.2345, tokens: { input: 1000, output: 200, cacheRead: 50_000, cacheWrite: 3000, total: 54_200 } }; }
     getContextUsage() { return { tokens: sdk.contextTokens, contextWindow: this.model.contextWindow, percent: null }; }
-    async abort() {}
+    async abort() { sdk.aborts++; }
     abortCompaction() {}
     dispose() {}
   }
@@ -98,7 +100,7 @@ const make = () => { adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir 
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "rh-pi-session-"));
-  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.messages = []; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
+  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.messages = []; sdk.handler = undefined; sdk.aborts = 0; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -341,6 +343,129 @@ describe("describeTurn (what /stop gives the reviewer)", () => {
     expect(there.request).toBe("the new request");
     expect(there.reached).toBe(true);
     expect(there.requestAt).toBeGreaterThan(getting.requestAt);
+
+    release();
+    await first.catch(() => {});
+    await stream.return?.();
+  });
+
+  it("counts a turn as asked for from the promptStream call itself, before its stream is even read", async () => {
+    make();
+    await adapter.prompt("main", { text: "first" }); // the conversation exists
+    sdk.messages = [
+      { role: "user", content: "first", timestamp: Date.now() - 60_000 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    ];
+    expect((await adapter.describeTurn("main")).reached).toBe(true);  // nothing newer has been asked for
+    adapter.promptStream("main", { text: "second" });                  // asked for; nobody reads the stream yet
+    const turn = await adapter.describeTurn("main");
+    expect(turn.request).toBe("first");
+    expect(turn.reached).toBe(false);                                  // "first" is not the turn that is running now
+  });
+
+  it("a turn still waiting behind a memory save has not reached the conversation: what is there is the turn before", async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    const flush = adapter.prompt("main", { text: "Roundhouse maintenance: Before context compaction, update your durable memory files:" });
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1));
+    sdk.messages = [
+      { role: "user", content: "the finished request", timestamp: Date.now() - 60_000 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+      { role: "user", content: "Roundhouse maintenance: Before context compaction, update your durable memory files:", timestamp: Date.now() },
+    ];
+    const startedCancelled = vi.fn();
+    const stream = adapter.promptStream("main", { text: "the next request" }, { onStart: startedCancelled })[Symbol.asyncIterator]();
+    const first = stream.next();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sdk.prompts.length).toBe(1); // still queued behind the memory save
+
+    const turn = await adapter.describeTurn("main");
+    expect(turn.request).toBe("the finished request");
+    expect(turn.reached).toBe(false);
+
+    // The owner stops it now. The memory save is what is running; the request
+    // that waited behind it must not start once the save is out of the way.
+    await adapter.abort("main");
+    release();
+    await flush;
+    const seen: string[] = [];
+    for (let r = await first; !r.done; r = await stream.next()) seen.push(r.value.type);
+    expect(seen).toEqual(["agent_end"]);            // the stream ends, having done nothing
+    expect(sdk.prompts.map((p) => p.text)).toEqual([expect.stringContaining("Roundhouse maintenance")]); // never sent to the model
+    expect(startedCancelled).not.toHaveBeenCalled(); // and the caller is not told it was
+
+    // What is asked for after the stop runs as usual, and says when the agent has it.
+    sdk.holdPrompt = undefined;
+    const promptsWhenTold: number[] = [];
+    const next = adapter.promptStream("main", { text: "the request after it" }, { onStart: () => promptsWhenTold.push(sdk.prompts.length) })[Symbol.asyncIterator]();
+    for (let r = await next.next(); !r.done; r = await next.next()) { /* drain */ }
+    expect(sdk.prompts.at(-1)!.text).toBe("the request after it");
+    expect(promptsWhenTold).toEqual([1]);           // once, just before the session got it
+    expect(adapter.getInfo().reportsPromptStart).toBe(true);
+  });
+
+  it("a run that begins although its thread was stopped while the prompt was being handed over is stopped as it starts", async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    const stream = adapter.promptStream("main", { text: "never mind" })[Symbol.asyncIterator]();
+    const first = stream.next();
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1)); // inside session.prompt(), before the run exists
+    await adapter.abort("main");                                 // finds nothing running to stop
+    expect(sdk.aborts).toBe(1);
+    sdk.handler!({ type: "agent_start" });                       // the run begins after all
+    expect(sdk.aborts).toBe(2);
+
+    release();
+    for (let r = await first; !r.done; r = await stream.next()) { /* drain */ }
+
+    // A run of a prompt that nobody stopped is left alone.
+    sdk.holdPrompt = undefined;
+    const ok = adapter.promptStream("main", { text: "carry on" })[Symbol.asyncIterator]();
+    const okFirst = ok.next();
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(2));
+    sdk.handler!({ type: "agent_start" });
+    expect(sdk.aborts).toBe(2);
+    for (let r = await okFirst; !r.done; r = await ok.next()) { /* drain */ }
+  });
+
+  it("a stop that comes while the conversation is still being opened cancels the request too", async () => {
+    make();
+    const stream = adapter.promptStream("fresh", { text: "never mind" })[Symbol.asyncIterator]();
+    const first = stream.next();
+    await adapter.abort("fresh"); // there is no session to abort yet: it is being created
+    const seen: string[] = [];
+    for (let r = await first; !r.done; r = await stream.next()) seen.push(r.value.type);
+    expect(seen).toEqual(["agent_end"]);
+    expect(sdk.prompts).toEqual([]);
+  });
+
+  it("a stop with nothing waiting does not cancel what is asked for afterwards", async () => {
+    make();
+    await adapter.abort("main");   // /cancel in an idle chat, before any conversation exists
+    await adapter.abort("main");
+    const stream = adapter.promptStream("main", { text: "hello" })[Symbol.asyncIterator]();
+    for (let r = await stream.next(); !r.done; r = await stream.next()) { /* drain */ }
+    expect(sdk.prompts.map((p) => p.text)).toEqual(["hello"]);
+  });
+
+  it("after a compaction that left no message of the owner's, a new turn is not taken for the old one's tail", async () => {
+    make();
+    let release!: () => void;
+    sdk.holdPrompt = new Promise<void>((r) => { release = r; });
+    sdk.messages = [
+      { role: "compactionSummary", summary: "…", timestamp: Date.now() - 60_000 },
+      { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse" },
+    ];
+    const stream = adapter.promptStream("main", { text: "the new request" })[Symbol.asyncIterator]();
+    const first = stream.next();
+    await vi.waitFor(() => expect(sdk.prompts.length).toBe(1));
+    expect((await adapter.describeTurn("main")).reached).toBe(false);
+
+    // The same shape, when the compaction happened inside the running turn: that is this turn.
+    sdk.messages = [{ role: "compactionSummary", summary: "…", timestamp: Date.now() + 5 }, sdk.messages[1]];
+    expect((await adapter.describeTurn("main")).reached).toBe(true);
 
     release();
     await first.catch(() => {});

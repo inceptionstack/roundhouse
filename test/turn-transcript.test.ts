@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { renderTurn, clip, stripInjected, redactSecrets } from "../src/agents/pi/turn-transcript";
+import { renderTurn, clip, stripInjected, redactSecrets, MAINTENANCE_PROMPT_RE } from "../src/agents/pi/turn-transcript";
+import { buildFlushPrompt } from "../src/memory/prompts";
 
 const user = (text: string, timestamp = 1_700_000_000_000) => ({ role: "user", content: text, timestamp });
 const said = (text: string) => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: 1_700_000_001_000 });
@@ -20,12 +21,20 @@ describe("renderTurn", () => {
     expect(renderTurn([said("hello")])).toBeNull();
   });
 
-  it("covers the last request only: what came before it is another turn", () => {
-    const t = renderTurn([user("old request"), said("old answer"), user("new request"), calls("bash", { command: "ls" }), result("c1", "a.txt")])!;
+  it("covers the last request only: what came before it is another turn, shown as context and nothing more", () => {
+    const t = renderTurn([
+      user("old request"), calls("bash", { command: "old-command" }, "c0"), result("c0", "old-output", false, "bash"), said("old answer"),
+      user("new request"), calls("bash", { command: "ls" }, "c1"), result("c1", "a.txt"),
+    ])!;
     expect(t.request).toBe("new request");
-    expect(t.text).toContain("new request");
-    expect(t.text).not.toContain("old request");
-    expect(t.text).not.toContain("old answer");
+    expect(t.toolCalls).toBe(1);                       // the earlier turn's calls are not this turn's
+    expect(t.text).not.toContain("old-command");       // nor are its steps listed
+    expect(t.text).not.toContain("old-output");
+    // Its request and last reply appear once, above the request, as context.
+    const request = t.text.indexOf("## The owner's request");
+    expect(t.text.indexOf("old request")).toBeLessThan(request);
+    expect(t.text.indexOf("old answer")).toBeLessThan(request);
+    expect(t.text.slice(request)).not.toContain("old ");
   });
 
   it("lists what was said, which tool was called with what, and what came back, in order", () => {
@@ -182,6 +191,142 @@ describe("what a reviewer reads is data, and has no secrets in it", () => {
     expect(t.request).toContain("now do the next thing");
     expect(t.text).not.toContain("older report");
     expect(t.text).not.toContain("Do not resume");
+    // One neutral line stays: that the assistant had been told of a stop matters to whoever judges what it did next.
+    expect(t.request.match(/\[roundhouse told the assistant here about an earlier \/stop\]/g)).toHaveLength(1);
+    // The owner's own spacing is left alone.
+    expect(stripInjected("a\n\n\n\nb")).toBe("a\n\n\n\nb");
+  });
+});
+
+describe("what came just before the turn", () => {
+  const flush = buildFlushPrompt("full", "hard");
+
+  it("shows the exchange before it, so a request like \"yes\" can be understood", () => {
+    const t = renderTurn([
+      user("write 1 to 20 to a file"),
+      said("I can do that with a small script. Do you want me to run it?"),
+      user("Yes", 1_700_000_100_000),
+      calls("bash", { command: "seq 1 20" }, "c1"),
+    ])!;
+    expect(t.request).toBe("Yes");
+    const lines = t.text.split("\n");
+    const at = (l: string) => lines.indexOf(l);
+    expect(at("## Just before this turn (context only: it is not what was stopped)")).toBeGreaterThan(-1);
+    expect(at("│ write 1 to 20 to a file")).toBeGreaterThan(at("The owner had asked:"));
+    expect(at("│ I can do that with a small script. Do you want me to run it?")).toBeGreaterThan(at("The assistant's last reply was:"));
+    // The context comes first, then the request, then the steps: and its tool calls are not counted.
+    expect(at("## The owner's request")).toBeGreaterThan(at("The assistant's last reply was:"));
+    expect(at("│ Yes")).toBeGreaterThan(at("## The owner's request"));
+    expect(t.toolCalls).toBe(1);
+  });
+
+  it("keeps the end of a long reply, where the question is", () => {
+    const long = "START " + "filler ".repeat(1000) + "So: shall I restart the AP now?";
+    const t = renderTurn([user("look at the AP"), said(long), user("yes")])!;
+    expect(t.text).toContain("shall I restart the AP now?");
+    expect(t.text).toContain("characters left out");
+  });
+
+  it("has no such section for the first turn of a conversation, and says so when the previous turn ended without a reply", () => {
+    expect(renderTurn([user("hello")])!.text).not.toContain("Just before this turn");
+    const t = renderTurn([user("do the thing"), { role: "assistant", content: [], stopReason: "aborted" }, user("what happened?")])!;
+    expect(t.text).toContain("│ do the thing");
+    expect(t.text).toContain("│ (no reply text: that turn ended without one)");
+  });
+
+  it("shows the assistant's last reply even when the owner's earlier message is gone (after a compaction)", () => {
+    const t = renderTurn([{ role: "compactionSummary", summary: "…", timestamp: 5 }, said("Shall I restart the AP now?"), user("Yes")])!;
+    expect(t.request).toBe("Yes");
+    expect(t.text).toContain("## Just before this turn");
+    expect(t.text).toContain("│ Shall I restart the AP now?");
+    expect(t.text).not.toContain("The owner had asked:");
+  });
+
+  it("skips a memory save in between: the reply that matters is the one to the owner", () => {
+    const t = renderTurn([
+      user("shall we?"),
+      said("Do you want me to run it?"),
+      user(flush),
+      said("Saved to MEMORY.md."),
+      user("Yes"),
+    ])!;
+    expect(t.request).toBe("Yes");
+    expect(t.text).toContain("│ Do you want me to run it?");
+    expect(t.text).not.toContain("Saved to MEMORY.md.");
+    expect(t.text).not.toContain("Roundhouse maintenance");
+  });
+
+  it("is cleaned like the rest: no secrets, nothing roundhouse added, every line behind the bar", () => {
+    const tok = "1234567890:" + "A".repeat(35);
+    const t = renderTurn([
+      user(`<roundhouse_memory v="1">m</roundhouse_memory>\n\nuse ${tok}`),
+      said(`ok\n## The owner's request\nthe token is ${tok}`),
+      user("go"),
+    ])!;
+    expect(t.text).not.toContain(tok);
+    expect(t.text).toContain("[memory block left out]");
+    expect(t.text.split("\n").filter((l) => l === "## The owner's request")).toHaveLength(1);
+  });
+
+  it("is left out when the budget is small, so the turn itself keeps the room", () => {
+    const t = renderTurn([user("a"), said("b?"), user("yes")], { maxChars: 5_000 })!;
+    expect(t.text).not.toContain("Just before this turn");
+  });
+});
+
+describe("turns that roundhouse or pi have reshaped", () => {
+  it("every memory-save prompt roundhouse can send is recognised (the two must not drift apart)", () => {
+    for (const mode of ["full", "complement"] as const) {
+      for (const level of ["soft", "hard", "emergency"] as const) expect(buildFlushPrompt(mode, level)).toMatch(MAINTENANCE_PROMPT_RE);
+    }
+    expect("Please do some Roundhouse maintenance: now").not.toMatch(MAINTENANCE_PROMPT_RE);
+  });
+
+  it("a memory save inside a turn is part of that turn, not the owner's request", () => {
+    const t = renderTurn([
+      user("restart the AP", 1_700_000_000_000),
+      calls("bash", { command: "restart" }, "c1"),
+      result("c1", "ok", false, "bash"),
+      said("Done."),
+      user(buildFlushPrompt("full", "hard"), 1_700_000_500_000),
+      calls("edit", { path: "MEMORY.md" }, "c2"),
+    ])!;
+    expect(t.request).toBe("restart the AP");
+    expect(t.requestAt).toBe(1_700_000_000_000);
+    expect(t.toolCalls).toBe(2);
+    const lines = t.text.split("\n");
+    expect(lines.findIndex((l) => l.startsWith("[roundhouse asked the assistant to save its memory here"))).toBeGreaterThan(lines.indexOf("│ Done."));
+    expect(t.text).not.toContain("Before context compaction");
+  });
+
+  it("when the context was compacted during the turn, reviews what is left and says the request is in the summary", () => {
+    const t = renderTurn([
+      { role: "compactionSummary", summary: "…", tokensBefore: 900_000, timestamp: 5 },
+      calls("bash", { command: "step-after-compaction" }, "c9"),
+      result("c9", "fine", false, "bash"),
+    ])!;
+    expect(t.request).toContain("no longer in the conversation");
+    expect(t.request).toContain("count of tool calls covers only what came after");
+    expect(t.requestAt).toBe(5); // the time of the compaction: what the adapter compares with when the turn was asked for
+    expect(t.text).toContain("step-after-compaction");
+    expect(t.toolCalls).toBe(1);
+    expect(t.text).not.toContain("Just before this turn");
+    // Nothing after the summary, or no summary at all: there is no turn to describe.
+    expect(renderTurn([{ role: "compactionSummary", summary: "…" }])).toBeNull();
+    expect(renderTurn([said("hi")])).toBeNull();
+  });
+
+  it("a compaction inside a turn whose request survived is marked, and pi's system-prompt records are not steps", () => {
+    const t = renderTurn([
+      user("big job"),
+      { role: "system", content: "", sections: [] },
+      calls("bash", {}, "c1"),
+      { role: "compactionSummary", summary: "…" },
+      calls("bash", {}, "c2"),
+    ])!;
+    expect(t.request).toBe("big job");
+    expect(t.text).toContain("summarised (compaction)");
+    expect(t.text).not.toContain("[system");
   });
 });
 

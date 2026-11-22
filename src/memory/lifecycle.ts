@@ -46,6 +46,16 @@ export function determineMemoryMode(agentInfo: Record<string, unknown>): MemoryM
  * In Complement mode: passes message through unchanged.
  * In Unknown mode: defaults to Full behavior.
  */
+/**
+ * The message that carried the memory files never reached the agent (its
+ * turn was cancelled before it started): the next one has to carry them.
+ */
+export async function rearmMemoryInjection(threadId: string): Promise<void> {
+  const state = await loadThreadMemoryState(threadId);
+  state.forceInjectReason = "manual";
+  await saveThreadMemoryState(threadId, state);
+}
+
 export async function prepareMemoryForTurn(
   threadId: string,
   message: AgentMessage,
