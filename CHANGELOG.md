@@ -6,15 +6,27 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ### Added
 - **`/stop [question]`.** Ends the turn in progress like `/cancel`, then has a
-  sub-agent that can only read (`read`, `grep`, `find`, `ls`) review what the
-  agent did so far and post its report in the chat. The report starts no agent
-  turn; the agent hears about the stop, and gets the report as data, with the
-  owner's next message. A reviewer that fails or times out is reported.
-  Needs `AgentAdapter.describeTurn` (implemented for pi).
+  sub-agent that can only read (`read`, `grep`, `find`, `ls`; no MCP, no
+  project context files, prompt templates or themes) review what the agent did
+  so far and post its report in the chat. The transcript it reads has obvious
+  secrets removed and every line behind a bar; the report has them removed
+  again. The report starts no agent turn; the agent hears about the stop with
+  the owner's next message, and gets the report as data with the first message
+  after it arrives (never with a "do not resume" line if the owner has written
+  since). A reviewer that fails or times out is reported. One review at a time
+  per session. Needs `AgentAdapter.describeTurn` (implemented for pi).
 - Sub-agents can be given a tool allowlist (`SpawnSpec.tools`, pi's `--tools`
-  plus `--no-mcp`), files to read in their run folder (`SpawnSpec.files`), and
-  a delivery (`SpawnSpec.delivery: "chat"`: post the output instead of handing
-  it to the agent). The delivery is stored with the run, so it survives a restart.
+  plus the flags that close everything else), files to read in their run folder
+  (`SpawnSpec.files`), and a delivery (`SpawnSpec.delivery: "chat"`: post the
+  output instead of handing it to the agent). The delivery is stored with the run,
+  so it survives a restart.
+
+### Fixed
+- **A sub-agent that hung was never cut off by the gateway that started it.** The
+  watcher leaves runs started in the same process alone, and nothing else
+  enforced their deadline. `spawn()` now arms a timer for it.
+- A sub-agent that could not be started no longer leaves its run folder behind,
+  and its logs are created with mode 0600.
 
 ## [0.7.0] — 2026-11-22
 

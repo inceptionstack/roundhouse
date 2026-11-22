@@ -625,6 +625,61 @@ describe("subagents", () => {
       expect(i).toBeLessThan(args.indexOf("-p"));
     });
 
+    it("keeps what the agent under review can write out of the reviewer: no context files, templates, themes", async () => {
+      const orchestrator = launch();
+      await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing, tools: ["read"] });
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      for (const flag of ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes"]) expect(args).toContain(flag);
+    });
+
+    it("cuts a run off at its deadline, in the process that started it", async () => {
+      const signalled: string[] = [];
+      const o2 = new SubAgentOrchestratorImpl({
+        dataRoot: rootDir, readSpawnClockTicks: async () => "1",
+        isProcessAlive: async () => true,
+        signalProcess: (pid, sig) => { signalled.push(`${pid}:${sig}`); },
+      });
+      const child = createMockChild(9100);
+      spawnMock.mockImplementation(() => { queueMicrotask(() => child.emit("spawn")); return child; });
+      const runId = await o2.spawn({ role: "review", task: "Hang", cwd: rootDir, routing, timeoutMs: 150 });
+      expect(signalled).toEqual([]);
+      await vi.waitFor(() => expect(signalled[0]).toBe("9100:SIGTERM"), { timeout: 3000 });
+      const status = JSON.parse(await readFile(join(rootDir, "subagents", runId, "status.json"), "utf8")) as RunStatus;
+      expect(status.requestedOutcome).toBe("timeout");
+    });
+
+    it("does not cut off a run that has already ended", async () => {
+      const signalled: string[] = [];
+      const o2 = new SubAgentOrchestratorImpl({
+        dataRoot: rootDir, readSpawnClockTicks: async () => "1",
+        isProcessAlive: async () => true,
+        signalProcess: (pid, sig) => { signalled.push(`${pid}:${sig}`); },
+      });
+      const child = createMockChild(9101);
+      spawnMock.mockImplementation(() => { queueMicrotask(() => child.emit("spawn")); return child; });
+      await o2.spawn({ role: "review", task: "Quick", cwd: rootDir, routing, timeoutMs: 150 });
+      child.emit("exit", 0);
+      await new Promise((r) => setTimeout(r, 400));
+      expect(signalled).toEqual([]);
+    });
+
+    it("leaves no folder behind when nothing could be started", async () => {
+      spawnMock.mockImplementation(() => { throw new Error("spawn pi ENOENT"); });
+      const orchestrator = new SubAgentOrchestratorImpl({ dataRoot: rootDir, readSpawnClockTicks: async () => "1" });
+      await expect(orchestrator.spawn({ role: "review", task: "x", cwd: rootDir, routing, files: { "turn.md": "secret-ish transcript" } })).rejects.toThrow();
+      const { readdir } = await import("node:fs/promises");
+      expect(await readdir(join(rootDir, "subagents")).catch(() => [])).toEqual([]);
+    });
+
+    it("the run folder and its logs are the owner's alone", async () => {
+      const { stat } = await import("node:fs/promises");
+      const orchestrator = launch();
+      const runId = await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing, files: { "turn.md": "x" } });
+      const dir = join(rootDir, "subagents", runId);
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      for (const f of ["turn.md", "brief.md", "stdout.log", "stderr.log"]) expect((await stat(join(dir, f))).mode & 0o077).toBe(0);
+    });
+
     it("leaves pi's tools alone when none are named", async () => {
       const orchestrator = launch();
       await orchestrator.spawn({ role: "review", task: "Look", cwd: rootDir, routing });
@@ -657,7 +712,7 @@ describe("subagents", () => {
 
     it("refuses file names that could leave the run folder or replace its own files", async () => {
       const orchestrator = launch();
-      for (const bad of ["../x", "a/b", ".hidden", "brief.md", "status.json", "stdout.log", ""]) {
+      for (const bad of ["../x", "a/b", ".hidden", "brief.md", "status.json", "stdout.log", "STDOUT.LOG", "Brief.MD", ""]) {
         await expect(orchestrator.spawn({ role: "review", task: "x", cwd: rootDir, routing, files: { [bad]: "x" } })).rejects.toThrow(/Invalid sub-agent file name/);
       }
       expect(spawnMock).not.toHaveBeenCalled();

@@ -39,8 +39,8 @@ export class ProcessLauncher {
     onChildCreated?: (child: ChildProcess) => void,
     tools?: readonly string[],
   ): Promise<LaunchResult> {
-    const stdoutHandle = await open(join(runDir, "stdout.log"), "a");
-    const stderrHandle = await open(join(runDir, "stderr.log"), "a");
+    const stdoutHandle = await open(join(runDir, "stdout.log"), "a", 0o600);
+    const stderrHandle = await open(join(runDir, "stderr.log"), "a", 0o600);
     let child: ChildProcess | undefined;
 
     try {
@@ -83,16 +83,20 @@ const TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 /**
  * pi's flags for a run limited to the named tools. `--tools` replaces pi's
  * default set (read, bash, edit, write) and keeps MCP tools, so MCP goes off
- * too: a reader must not reach anything through a server. Names are checked
+ * too: a reader must not reach anything through a server. Project context
+ * files, prompt templates and themes are not loaded either: they come from
+ * the working directory, which is where the agent under review can write, so
+ * they would let it write its reviewer's instructions. Names are checked
  * because they end up on a command line.
  */
 export function toolArgs(tools?: readonly string[]): string[] {
   if (!tools) return [];
-  if (tools.length === 0) return ["--no-tools", "--no-mcp"];
+  const closed = ["--no-mcp", "--no-context-files", "--no-prompt-templates", "--no-themes"];
+  if (tools.length === 0) return ["--no-tools", ...closed];
   for (const t of tools) {
     if (!TOOL_NAME_RE.test(t)) throw new Error(`Invalid sub-agent tool name: ${JSON.stringify(t)}`);
   }
-  return ["--tools", tools.join(","), "--no-mcp"];
+  return ["--tools", tools.join(","), ...closed];
 }
 
 function defaultPiAvailabilityCheck(): void {

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRouter, GatewayConfig } from "../src/types";
@@ -73,7 +73,7 @@ vi.mock("../src/subagents", async () => {
 });
 
 import { Gateway } from "../src/gateway/gateway";
-import { stopFocus, routingFromThread, reviewTask, REVIEW_TOOLS } from "../src/gateway/stop-command";
+import { stopFocus, routingFromThread, reviewTask, REVIEW_TOOLS, StopNotes, handleStop, escapeReport, STOP_NOTE_MAX_AGE_MS } from "../src/gateway/stop-command";
 
 const OWNER = 111;
 const thread = () => {
@@ -267,6 +267,47 @@ describe("/stop during a turn", () => {
     expect(ctx.prompts.at(-1)!.match(/<stop_review>/g)).toHaveLength(1);
   });
 
+  it("takes a secret out of the report before it is posted or handed to the agent, and deletes the transcript it came from", async () => {
+    const runId = "55555555-5555-4555-8555-555555555555";
+    subs.spawn.mockResolvedValue(runId);
+    const ctx = await startGateway();
+    await startLongTurn(ctx);
+    await wired.rawSlash!(slash("/stop"));
+    await vi.waitFor(() => expect(subs.spawn).toHaveBeenCalledTimes(1));
+    ctx.gate.shift()!();
+    await currentGateway!.whenIdle();
+
+    const turnFile = join(sandbox.dir, "subagents", runId, "turn.md");
+    mkdirSync(join(sandbox.dir, "subagents", runId), { recursive: true });
+    writeFileSync(turnFile, "the transcript");
+    const token = "1234567890:" + "B".repeat(35);
+    await reviewFinishes("complete", `**Problems:** the .env showed TELEGRAM_BOT_TOKEN=${token} and the AP said {"x_passphrase":"correct horse"}`, runId);
+    expect(ctx.posted.at(-1)).toContain("**Problems:**");
+    for (const secret of [token, "correct horse"]) expect(ctx.posted.at(-1)).not.toContain(secret);
+    expect(existsSync(turnFile)).toBe(false);
+
+    await wired.dm!(thread(), message("go on"));
+    expect(ctx.prompts.at(-1)).toContain("<stop_review>"); // the report did reach the agent ...
+    for (const secret of [token, "correct horse"]) expect(ctx.prompts.at(-1)).not.toContain(secret); // ... without the secrets
+  });
+
+  it("keeps the transcript when the review failed, because the message points to it", async () => {
+    const runId = "66666666-6666-4666-8666-666666666666";
+    subs.spawn.mockResolvedValue(runId);
+    const ctx = await startGateway();
+    await startLongTurn(ctx);
+    await wired.rawSlash!(slash("/stop"));
+    await vi.waitFor(() => expect(subs.spawn).toHaveBeenCalledTimes(1));
+    ctx.gate.shift()!();
+    await currentGateway!.whenIdle();
+    const turnFile = join(sandbox.dir, "subagents", runId, "turn.md");
+    mkdirSync(join(sandbox.dir, "subagents", runId), { recursive: true });
+    writeFileSync(turnFile, "the transcript");
+    await reviewFinishes("failed", null, runId);
+    expect(existsSync(turnFile)).toBe(true);
+    expect(ctx.posted.at(-1)).toContain(turnFile);
+  });
+
   it("a message sent before the report arrives still tells the agent it was stopped", async () => {
     const ctx = await startGateway();
     await startLongTurn(ctx);
@@ -298,7 +339,7 @@ describe("/stop during a turn", () => {
     expect(ctx.posted.at(-1)).toMatch(/review of the stopped turn ran out of time/);
     expect(ctx.posted.at(-1)).toContain("turn.md");
     await wired.dm!(thread(), message("hello"));
-    expect(ctx.prompts.at(-1)).toContain("ran out of time, so no report was sent");
+    expect(ctx.prompts.at(-1)).toContain("ran out of time, so there is no report");
 
     await startLongTurn(ctx, "long job");
     await wired.rawSlash!(slash("/stop"));
@@ -386,5 +427,210 @@ describe("helpers", () => {
     for (const part of ["Asked", "Done so far", "Doing when stopped", "Problems", "Left behind", "Suggestion"]) expect(task).toContain(`**${part}:**`);
     expect(task).not.toContain("The owner added");
     expect(reviewTask(TURN, "is it safe?", "20:14:03")).toContain('The owner added: "is it safe?"');
+  });
+});
+
+// ── The notes the agent gets, on their own ───────────────────────────────
+
+describe("StopNotes", () => {
+  const T0 = 1_000_000;
+  const okReport = (text = "the report") => ({ kind: "ok" as const, text, posted: true, time: "20:10:00" });
+
+  it("tells the agent once, with the first message after the stop; the reviewer line only when one is running", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0);
+    const plain = n.take("main", T0 + 1)!;
+    expect(plain).toContain("stopped your previous turn with /stop at 20:10:00");
+    expect(plain).not.toContain("reviewer"); // nothing was started: the note must not promise one
+    expect(n.take("main", T0 + 2)).toBeUndefined();
+
+    n.stop("main", "20:20:00", T0);
+    n.reviewing("main", "run-1");
+    expect(n.take("main", T0 + 1)).toContain("A reviewer is going through what you did");
+  });
+
+  it("a report that comes later is its own note and does not tell the agent to hold off again", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0); n.reviewing("main", "run-1");
+    n.take("main", T0 + 1);                         // the owner wrote: told about the stop
+    n.report("main", "run-1", okReport("late words"), T0 + 5);
+    const note = n.take("main", T0 + 6)!;
+    expect(note).toContain("<stop_review>\nlate words\n</stop_review>");
+    expect(note).toContain("came in after your last reply");
+    expect(note).not.toContain("Do not resume");    // he may have told the agent to carry on since
+    expect(n.take("main", T0 + 7)).toBeUndefined();
+  });
+
+  it("a report that is in before the owner writes comes together with the stop note", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0); n.reviewing("main", "run-1");
+    n.report("main", "run-1", okReport(), T0 + 5);
+    const note = n.take("main", T0 + 6)!;
+    expect(note).toContain("Do not resume that work");
+    expect(note).toContain("<stop_review>");
+    expect(note).not.toContain("A reviewer is going through"); // it has finished
+  });
+
+  it("a report from an older stop does not replace a newer stop's", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0); n.reviewing("main", "run-1");
+    n.report("main", "run-1", okReport("first"), T0 + 1);
+    n.take("main", T0 + 2);
+    n.stop("main", "20:30:00", T0 + 10); n.reviewing("main", "run-2");
+    n.report("main", "run-1", okReport("stale"), T0 + 11); // arrives late, for the old run
+    const note = n.take("main", T0 + 12)!;
+    expect(note).not.toContain("stale");
+    expect(note).toContain("stopped at 20:30:00".replace("stopped at", "/stop at"));
+  });
+
+  it("a second /stop while the first review runs keeps the link to it", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0); n.reviewing("main", "run-1");
+    expect(n.activeReview("main")).toBe(true);
+    n.stop("main", "20:10:05", T0 + 5);
+    expect(n.activeReview("main")).toBe(true);
+    n.report("main", "run-1", okReport("one report"), T0 + 9);
+    expect(n.activeReview("main")).toBe(false);
+    expect(n.take("main", T0 + 10)).toContain("one report");
+  });
+
+  it("a report that finds no record (after a restart) is still passed on, with no claim about a stop note", () => {
+    const n = new StopNotes();
+    n.report("main", "run-9", okReport("after restart"), T0);
+    const note = n.take("main", T0 + 1)!;
+    expect(note).toContain("after restart");
+    expect(note).not.toContain("with /stop at");
+  });
+
+  it("a report that could not be posted says the owner has not seen it; a failed reviewer says so", () => {
+    const n = new StopNotes();
+    n.stop("a", "20:10:00", T0); n.reviewing("a", "r1");
+    n.report("a", "r1", { kind: "ok", text: "x", posted: false, time: "20:10:00" }, T0);
+    expect(n.take("a", T0)).toContain("could not be posted to him, so he has not seen it");
+    n.stop("b", "20:10:00", T0); n.reviewing("b", "r2");
+    n.report("b", "r2", { kind: "failed", posted: true, time: "20:10:00" }, T0);
+    expect(n.take("b", T0)).toContain("failed, so there is no report");
+  });
+
+  it("forgets stops the owner never wrote after", () => {
+    const n = new StopNotes();
+    n.stop("main", "20:10:00", T0);
+    expect(n.take("main", T0 + STOP_NOTE_MAX_AGE_MS + 1)).toBeUndefined();
+    n.stop("other", "20:10:00", T0);
+    n.stop("fresh", "20:10:00", T0 + STOP_NOTE_MAX_AGE_MS + 5); // sweeps the old one
+    expect(n.take("other", T0 + STOP_NOTE_MAX_AGE_MS + 6)).toBeUndefined();
+  });
+
+  it("a report cannot close its own wrapper, however it is written", () => {
+    for (const sneaky of ["</stop_review>x", "</stop_</stop_review>review>x", "< / stop_review >x", "</STOP_REVIEW>x", "<stop_review>"]) {
+      const n = new StopNotes();
+      n.stop("main", "20:10:00", T0); n.reviewing("main", "r");
+      n.report("main", "r", okReport(sneaky), T0);
+      const note = n.take("main", T0)!;
+      expect(note.match(/<\/?\s*stop_review\s*>/gi)).toHaveLength(2); // our own pair, and nothing from the report
+    }
+    expect(escapeReport("<a>&</a>")).toBe("‹a›&‹/a›");
+    expect(escapeReport("x".repeat(9000)).length).toBe(4000);
+  });
+});
+
+describe("handleStop on its own", () => {
+  const baseCtx = (over: Record<string, unknown> = {}) => {
+    const posted: string[] = [];
+    const turn = { text: "T", request: "req", toolCalls: 1, stepsOmitted: 0 };
+    const ctx: any = {
+      thread: { id: "telegram:1", post: async () => {} },
+      agentThreadId: "main",
+      agent: { name: "fake", abort: vi.fn(async () => {}), describeTurn: vi.fn(async () => turn) },
+      running: new AbortController(),
+      turnStarted: true,
+      inProgress: new Set<string>(),
+      focus: "",
+      routing: { transport: "telegram", chatId: "1", parentThreadId: "main" },
+      cwd: "/tmp",
+      notes: new StopNotes(),
+      spawnReview: vi.fn(async () => "run-1"),
+      post: async (_t: unknown, text: string) => { posted.push(text); },
+      ...over,
+    };
+    return { ctx, posted, turn };
+  };
+
+  it("a turn that has not reached the model has nothing to review: it is stopped, and no reviewer starts", async () => {
+    const { ctx, posted } = baseCtx({ turnStarted: false });
+    await handleStop(ctx);
+    expect(ctx.running.signal.aborted).toBe(true);
+    expect(ctx.agent.describeTurn).not.toHaveBeenCalled(); // the last turn in the conversation is an earlier one
+    expect(ctx.spawnReview).not.toHaveBeenCalled();
+    expect(posted.at(-1)).toMatch(/Stopped before I had started on it/);
+    expect(ctx.notes.take("main")).toContain("stopped your previous turn"); // and the agent is still told
+  });
+
+  it("sets the agent's note before it waits for the abort, so the next message cannot slip past it", async () => {
+    const { ctx } = baseCtx();
+    let noteWhenAbortRuns: string | undefined;
+    ctx.agent.abort = vi.fn(async () => { noteWhenAbortRuns = ctx.notes.take("main"); });
+    await handleStop(ctx);
+    expect(noteWhenAbortRuns).toContain("stopped your previous turn");
+  });
+
+  it("reviews the turn that was running, not a request that began while the abort settled", async () => {
+    const old = { text: "OLD-TURN", request: "restart the AP", toolCalls: 3, stepsOmitted: 0 };
+    const next = { text: "NEXT-TURN", request: "what time is it", toolCalls: 0, stepsOmitted: 0 };
+    const { ctx } = baseCtx();
+    ctx.agent.describeTurn = vi.fn().mockResolvedValueOnce(old).mockResolvedValueOnce(next);
+    await handleStop(ctx);
+    const spec = ctx.spawnReview.mock.calls[0][0];
+    expect(spec.files["turn.md"]).toContain("OLD-TURN");
+    expect(spec.files["turn.md"]).not.toContain("NEXT-TURN");
+  });
+
+  it("uses the later snapshot when it is the same request (it has the steps made while stopping)", async () => {
+    const early = { text: "EARLY", request: "restart the AP", toolCalls: 1, stepsOmitted: 0 };
+    const late = { text: "LATE", request: "restart the AP", toolCalls: 2, stepsOmitted: 0 };
+    const { ctx } = baseCtx();
+    ctx.agent.describeTurn = vi.fn().mockResolvedValueOnce(early).mockResolvedValueOnce(late);
+    await handleStop(ctx);
+    expect(ctx.spawnReview.mock.calls[0][0].files["turn.md"]).toContain("LATE");
+  });
+
+  it("a note about a reviewer is only made once the reviewer has started", async () => {
+    const failing = baseCtx({ spawnReview: vi.fn(async () => { throw new Error("no pi"); }) });
+    await handleStop(failing.ctx);
+    expect(failing.ctx.notes.take("main")).not.toContain("reviewer");
+    const noDescribe = baseCtx();
+    noDescribe.ctx.agent.describeTurn = undefined;
+    await handleStop(noDescribe.ctx);
+    expect(noDescribe.ctx.notes.take("main")).not.toContain("reviewer");
+  });
+
+  it("a second /stop while the first is still working is turned away, and starts no second reviewer", async () => {
+    const { ctx, posted } = baseCtx();
+    let release!: () => void;
+    ctx.agent.abort = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const first = handleStop(ctx);
+    await vi.waitFor(() => expect(ctx.agent.abort).toHaveBeenCalled());
+    await handleStop(ctx);
+    expect(posted.at(-1)).toBe("⏹️ Already stopping.");
+    release();
+    await first;
+    expect(ctx.spawnReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("another /stop while a review of an earlier stop still runs stops the turn but does not start a second reviewer", async () => {
+    const { ctx, posted } = baseCtx();
+    await handleStop(ctx);
+    expect(ctx.spawnReview).toHaveBeenCalledTimes(1);
+    ctx.running = new AbortController();
+    await handleStop(ctx);
+    expect(ctx.running.signal.aborted).toBe(true);
+    expect(ctx.spawnReview).toHaveBeenCalledTimes(1);
+    expect(posted.at(-1)).toMatch(/earlier \/stop is still running/);
+  });
+
+  it("the reviewer is told not to open credential files, and about the bar in front of every line", () => {
+    const task = reviewTask({ text: "", request: "r", toolCalls: 0, stepsOmitted: 0 }, "", "20:00:00");
+    expect(task).toMatch(/Never open or quote credential files/);
+    expect(task).toContain('starts with "│ "');
   });
 });

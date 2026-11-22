@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, stat, readFile } from "node:fs/promises";
+import { mkdir, rm, stat, readFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +30,8 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
   private readonly terminationHandler: TerminationHandler;
   private readonly children = new Map<string, { pid: number }>();
   private readonly statusReady = new Map<string, Promise<void>>();
+  /** One timer per run this process started: the watcher leaves those to us (see isRunManagedInProcess). */
+  private readonly deadlines = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(options: OrchestratorOptions = {}) {
     const dataRoot = options.dataRoot ?? join(homedir(), ".roundhouse");
@@ -61,7 +63,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     const runDir = this.store.getRunDir(runId);
     const files = Object.entries(spec.files ?? {});
     for (const [name] of files) {
-      if (!RUN_FILE_NAME_RE.test(name) || RESERVED_RUN_FILES.has(name)) {
+      if (!RUN_FILE_NAME_RE.test(name) || RESERVED_RUN_FILES.has(name.toLowerCase())) {
         throw new Error(`Invalid sub-agent file name: ${JSON.stringify(name)}`);
       }
     }
@@ -111,6 +113,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
 
       this.children.set(runId, { pid });
       await this.store.write(initialStatus);
+      this.armDeadline(runId, timeoutMs);
       resolveReady!();
 
       // Notify spawn listeners
@@ -121,6 +124,11 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
       return runId;
     } catch (err) {
       this.children.delete(runId);
+      this.clearDeadline(runId);
+      // Nothing was started: do not leave the folder, and what was written into it, behind.
+      if (typeof launchedPid !== "number" && typeof launchedChild?.pid !== "number") {
+        await rm(runDir, { recursive: true, force: true }).catch(() => {});
+      }
       if (typeof launchedPid === "number") {
         // Defense in depth: the launcher handles /proc/bootstrap failures, while the orchestrator
         // still owns cleanup for later failures such as status.json persistence after launch.
@@ -143,6 +151,25 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     if (!current) return null;
     if (current.status !== "running") return current;
     return this.refreshRunningStatus(current);
+  }
+
+  /**
+   * The watcher skips runs this process started, so without a timer here a run
+   * that hangs would never be cut off by the process that is waiting for it.
+   */
+  private armDeadline(runId: string, timeoutMs: number): void {
+    const timer = setTimeout(() => {
+      this.deadlines.delete(runId);
+      void this.enforceTimeout(runId).catch((err) => console.error("[roundhouse] sub-agent timeout failed:", (err as Error).message));
+    }, timeoutMs);
+    timer.unref?.();
+    this.deadlines.set(runId, timer);
+  }
+
+  private clearDeadline(runId: string): void {
+    const timer = this.deadlines.get(runId);
+    if (timer) clearTimeout(timer);
+    this.deadlines.delete(runId);
   }
 
   async list(): Promise<RunStatus[]> { return this.listRuns(true); }
@@ -190,6 +217,7 @@ export class SubAgentOrchestratorImpl implements SubAgentOrchestrator, SubAgentL
     }
 
     this.children.delete(runId);
+    this.clearDeadline(runId);
 
     const current = await this.store.read(runId);
     if (!current || current.status !== "running") return;
