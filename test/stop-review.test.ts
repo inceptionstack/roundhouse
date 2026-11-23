@@ -101,7 +101,7 @@ const TURN = {
   request: "restart the AP", toolCalls: 2, stepsOmitted: 0, lastStopReason: "aborted", sessionFile: "/sessions/main.jsonl",
 };
 
-async function startGateway(agentExtra: Record<string, unknown> = {}) {
+async function startGateway(agentExtra: Record<string, unknown> = {}, configExtra: Record<string, unknown> = {}) {
   const prompts: string[] = [];
   const gate: Array<() => void> = [];
   const started: string[] = [];
@@ -127,6 +127,7 @@ async function startGateway(agentExtra: Record<string, unknown> = {}) {
     memory: { enabled: false },
     voice: { stt: { enabled: false } },
     chat: { botUsername: "rh_bot", allowedUserIds: [OWNER], adapters: { telegram: { mode: "polling" } }, bootTurn: false },
+    ...configExtra,
   } as unknown as GatewayConfig);
   const transport = (gw as any).transport;
   transport.isPairingPending = async () => false;
@@ -471,6 +472,81 @@ describe("/stop during a turn", () => {
     await vi.waitFor(() => expect(ctx.posted.at(-1)).toMatch(/nothing in the conversation yet to review/));
     expect(subs.spawn).not.toHaveBeenCalled();
     ctx.gate.shift()!();
+  });
+});
+
+describe("the memory files a message carried, when the agent never got that message", () => {
+  /** A gateway with memory on, and an agent that reports when it has a message. `fate` decides what becomes of each prompt. */
+  async function withMemory(fate: (text: string) => "runs" | "cancelled before it starts" | "fails before it starts" | "fails after it started") {
+    const root = mkdtempSync(join(tmpdir(), "rh-stop-mem-"));
+    writeFileSync(join(root, "MEMORY.md"), "# Memory\n- the-fact-to-remember\n");
+    const got: string[] = [];
+    const promptStream = (_t: string, m: { text: string }, hooks?: { onStart?: () => void }) => ({
+      async *[Symbol.asyncIterator]() {
+        const f = fate(m.text);
+        if (f === "fails before it starts") throw new Error("could not open the session");
+        if (f === "cancelled before it starts") { yield { type: "agent_end" as const }; return; }
+        hooks?.onStart?.();
+        got.push(m.text);
+        if (f === "fails after it started") throw new Error("the provider hung up");
+        yield { type: "agent_end" as const };
+      },
+    });
+    const ctx = await startGateway(
+      { promptStream, getInfo: () => ({ cwd: root, standingContext: "system-prompt", reportsPromptStart: true, hasMemoryExtension: false }) },
+      { memory: { rootDir: root } },
+    );
+    // Its own conversation, so that what one test leaves in the memory state is not the next one's.
+    const session = "main";
+    rmSync(join(sandbox.dir, "memory-state"), { recursive: true, force: true });
+    return { ctx, got, root, session };
+  }
+  const carriesMemory = (text: string | undefined) => Boolean(text?.includes("<roundhouse_memory") && text.includes("the-fact-to-remember"));
+
+  it("normally goes out once: the first message carries the files, the second does not", async () => {
+    const { got } = await withMemory(() => "runs");
+    await wired.dm!(thread(), message("one"));
+    await wired.dm!(thread(), message("two"));
+    expect(carriesMemory(got[0])).toBe(true);
+    expect(carriesMemory(got[1])).toBe(false);
+  });
+
+  it("goes out again after a message that failed before it started (the session would not open)", async () => {
+    const { ctx, got } = await withMemory((t) => (t.includes("one") ? "fails before it starts" : "runs"));
+    const t = thread();
+    await wired.dm!(t, message("one"));
+    expect(got).toEqual([]);
+    expect(t.post).toHaveBeenCalledWith(expect.stringMatching(/Error: could not open the session/)); // the owner is told, as before
+    void ctx;
+    await wired.dm!(thread(), message("two"));
+    expect(carriesMemory(got[0])).toBe(true);   // "two" carries what "one" could not deliver
+    await wired.dm!(thread(), message("three"));
+    expect(carriesMemory(got[1])).toBe(false);  // and then it is not repeated
+  });
+
+  it("goes out again after a message that was cancelled before it started", async () => {
+    const { got } = await withMemory((t) => (t.includes("one") ? "cancelled before it starts" : "runs"));
+    await wired.dm!(thread(), message("one"));
+    await wired.dm!(thread(), message("two"));
+    expect(carriesMemory(got[0])).toBe(true);
+  });
+
+  it("is not sent a second time after a message that failed once the agent had it", async () => {
+    const { got } = await withMemory((t) => (t.includes("one") ? "fails after it started" : "runs"));
+    await wired.dm!(thread(), message("one"));
+    expect(carriesMemory(got[0])).toBe(true);   // the agent has it, error or not
+    await wired.dm!(thread(), message("two"));
+    expect(carriesMemory(got[1])).toBe(false);
+  });
+
+  it("a note about an earlier /stop is kept too when the message carrying it failed before it started", async () => {
+    const { ctx, got } = await withMemory((t) => (t.includes("one") ? "fails before it starts" : "runs"));
+    const notes = (ctx.gw as any).stopNotes as StopNotes;
+    const id = notes.stop("main", "20:10:00");
+    notes.settle("main", id);
+    await wired.dm!(thread(), message("one"));
+    await wired.dm!(thread(), message("two"));
+    expect(got[0]).toContain("stopped your previous turn with /stop at 20:10:00");
   });
 });
 

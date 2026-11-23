@@ -20,6 +20,10 @@ const sdk = {
   contextTokens: 10_000 as number | null,
   messages: [] as unknown[],
   handler: undefined as undefined | ((event: { type: string }) => void),
+  /** What the fake session's prompt() does, as pi's does: report a start, report that an extension took the prompt, fail its checks, or put the prompt off and come back at once (pi does that while `agent_settled` handlers run). */
+  preflight: "started" as "started" | "handled" | "throw" | "deferred",
+  /** A prompt that was put off: call it to let it have its turn. */
+  runDeferred: undefined as undefined | ((outcome: "started" | "handled") => void),
   aborts: 0,
   holdPrompt: undefined as Promise<void> | undefined,
   models: {
@@ -41,7 +45,11 @@ vi.mock("@earendil-works/pi-coding-agent", () => {
     get model() { return this.agent.state.model; }
     get thinkingLevel() { return this.agent.state.thinkingLevel; }
     subscribe(handler: (event: { type: string }) => void) { sdk.handler = handler; return () => {}; }
-    async prompt(text: string, options?: { images?: unknown[] }) {
+    async prompt(text: string, options?: { images?: unknown[]; preflightResult?: (result: string) => void }) {
+      if (sdk.preflight === "throw") throw new Error('Authentication failed for "big". Credentials may have expired or network is unavailable.');
+      if (sdk.preflight === "handled") { options?.preflightResult?.("handled"); return; }
+      if (sdk.preflight === "deferred") { sdk.runDeferred = (outcome) => options?.preflightResult?.(outcome); return; }
+      options?.preflightResult?.("started");
       sdk.prompts.push({ text, images: options?.images?.length ?? 0, model: `${this.model.provider}/${this.model.id}` });
       // pi writes the transcript as soon as the user message is appended,
       // long before the turn ends.
@@ -100,7 +108,7 @@ const make = () => { adapter = createPiAgentAdapter({ cwd: dir, sessionDir: dir 
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "rh-pi-session-"));
-  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.messages = []; sdk.handler = undefined; sdk.aborts = 0; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
+  sdk.opened = []; sdk.prompts = []; sdk.setModelCalls = []; sdk.contextTokens = 10_000; sdk.messages = []; sdk.handler = undefined; sdk.aborts = 0; sdk.preflight = "started"; sdk.runDeferred = undefined; sdk.holdPrompt = undefined; sdk.noAuth.clear(); sdk.failSetModel = "";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -401,8 +409,53 @@ describe("describeTurn (what /stop gives the reviewer)", () => {
     const next = adapter.promptStream("main", { text: "the request after it" }, { onStart: () => promptsWhenTold.push(sdk.prompts.length) })[Symbol.asyncIterator]();
     for (let r = await next.next(); !r.done; r = await next.next()) { /* drain */ }
     expect(sdk.prompts.at(-1)!.text).toBe("the request after it");
-    expect(promptsWhenTold).toEqual([1]);           // once, just before the session got it
+    expect(promptsWhenTold).toEqual([1]);           // once, when pi said the run started (the fake says so before it records the prompt)
     expect(adapter.getInfo().reportsPromptStart).toBe(true);
+  });
+
+  it("does not say the agent has a message that failed pi's own checks (expired credentials), or that an extension took over", async () => {
+    make();
+    const told = vi.fn();
+    const drain = async (text: string) => {
+      const stream = adapter.promptStream("main", { text }, { onStart: told })[Symbol.asyncIterator]();
+      const seen: string[] = [];
+      for (let r = await stream.next(); !r.done; r = await stream.next()) seen.push(r.value.type);
+      return seen;
+    };
+
+    // The reader gets the error itself, straight after the end of the stream:
+    // not an ordinary end, which the gateway would report as "no response".
+    sdk.preflight = "throw";
+    const seenBeforeTheError: string[] = [];
+    const failing = adapter.promptStream("main", { text: "with stale credentials" }, { onStart: told })[Symbol.asyncIterator]();
+    await expect((async () => {
+      for (let r = await failing.next(); !r.done; r = await failing.next()) seenBeforeTheError.push(r.value.type);
+    })()).rejects.toThrow(/Authentication failed/);
+    expect(seenBeforeTheError).toEqual(["agent_end"]);
+    expect(told).not.toHaveBeenCalled();
+
+    sdk.preflight = "handled";
+    expect(await drain("/an-extension-command")).toEqual(["agent_end"]);
+    expect(told).not.toHaveBeenCalled();
+    expect(sdk.prompts).toEqual([]);
+
+    sdk.preflight = "started";
+    await drain("and now it works");
+    expect(told).toHaveBeenCalledTimes(1);
+  });
+
+  it("a prompt that pi puts off is not counted as started because prompt() came back: only when pi says it started", async () => {
+    make();
+    sdk.preflight = "deferred";
+    const told = vi.fn();
+    const stream = adapter.promptStream("main", { text: "hello" }, { onStart: told })[Symbol.asyncIterator]();
+    for (let r = await stream.next(); !r.done; r = await stream.next()) { /* drain: prompt() returned at once */ }
+    expect(told).not.toHaveBeenCalled();   // it has not run: it may yet fail its checks
+
+    sdk.runDeferred!("started");           // its turn comes, and it starts
+    expect(told).toHaveBeenCalledTimes(1);
+    sdk.runDeferred!("started");
+    expect(told).toHaveBeenCalledTimes(1); // once
   });
 
   it("a run that begins although its thread was stopped while the prompt was being handed over is stopped as it starts", async () => {

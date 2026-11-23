@@ -39,6 +39,14 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
   after the abort. What such a message carried (the memory files, a note about
   an earlier `/stop`) goes with the next message instead of being lost
   (`PromptHooks.onStart`, `AdapterInfo.reportsPromptStart`).
+- **A prompt that failed before it started lost the memory files it carried,
+  and its error.** When the session would not open, or pi's own checks failed
+  (expired credentials), the memory state already said "injected", so the next
+  message went out without the files; and the stream could end before the
+  error was recorded, so the owner saw "Agent returned no response" instead of
+  the error. The gateway now re-arms the injection on the error path too, the
+  pi adapter counts a prompt as started only when pi reports it
+  (`preflightResult`), and the error is recorded before the stream ends.
 - A sub-agent's result that arrived while a turn was running took that turn's
   place as "the turn in this chat" (and the owner's message did the same to a
   result's turn), so `/cancel` and `/stop` acted on the turn that was waiting.

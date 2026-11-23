@@ -892,6 +892,18 @@ export class Gateway {
       const reportsStart = agent.getInfo?.()?.reportsPromptStart === true;
       let reachedAgent = false;
       const delivered = () => { reachedAgent = true; stopNote?.commit(); };
+      // The memory files went out with a message the agent never got: the next
+      // one has to carry them. Checked on the way out of the turn whichever
+      // way that is: a prompt that is cancelled before it starts ends its
+      // stream quietly, one that fails before it starts (the session would
+      // not open, the credentials had expired) throws.
+      let rearmChecked = false;
+      const rearmIfUndelivered = async () => {
+        if (rearmChecked) return;
+        rearmChecked = true;
+        if (reachedAgent || !memoryPrepared?.injected) return;
+        await rearmMemoryInjection(agentThreadId).catch((err) => console.error(`[roundhouse] could not re-arm the memory injection:`, (err as Error).message));
+      };
       try {
         let turnUsedTools = false;
         if (ac.signal.aborted) {
@@ -912,9 +924,7 @@ export class Gateway {
           }
         }
 
-        if (!reachedAgent && memoryPrepared?.injected) {
-          await rearmMemoryInjection(agentThreadId).catch((err) => console.error(`[roundhouse] could not re-arm the memory injection:`, (err as Error).message));
-        }
+        await rearmIfUndelivered();
 
         // Memory: post-turn finalize + pressure check
         try {
@@ -941,6 +951,8 @@ export class Gateway {
           console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
         }
       } catch (err) {
+        // Before the recovery below, which sets its own reason to inject again when it resets the session.
+        await rearmIfUndelivered();
         // Extract hadVisibleText from StreamModelOverflowError if present
         const errorHadVisibleText = err instanceof StreamModelOverflowError ? err.hadVisibleText : streamHadVisibleText;
         await recoverFromAgentTurnOverflow(thread, agentThreadId, agent, err, {

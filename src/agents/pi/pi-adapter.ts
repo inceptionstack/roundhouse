@@ -27,6 +27,7 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  type PromptOptions,
 } from "@earendil-works/pi-coding-agent";
 
 import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext, PromptHooks, TurnDescription } from "../../types";
@@ -226,7 +227,21 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       started(): void;
     },
   ): Promise<void> {
-    const promptOptions = images && images.length > 0 ? { images } : undefined;
+    // pi says what became of the prompt once its own checks are done (input
+    // hooks, model, credentials, the run's first messages): "started" is the
+    // moment the agent has the message. A prompt that fails in those checks
+    // throws without it, one an extension took over reports "handled", and
+    // one that pi puts off (it arrived while `agent_settled` handlers ran)
+    // reports when it is its turn. Nothing else counts as a start: a prompt
+    // that merely came back has not necessarily run. Typed as pi's own
+    // options, so that a pi without `preflightResult` fails the type check
+    // instead of leaving every message looking undelivered.
+    const promptOptions: PromptOptions = {
+      ...(images && images.length > 0 ? { images } : {}),
+      preflightResult: (result) => {
+        if (result === "started") gate?.started();
+      },
+    };
     entry.inFlight++;
     // Track whether *this specific prompt call* has already retried after a
     // repair. Prevents retry loops within one turn, but doesn't latch the
@@ -246,7 +261,6 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // prompt was. Without it a request cancelled while it waited (behind a
         // memory save, say) would run in full afterwards, with nobody reading.
         if (gate?.cancelled()) return;
-        gate?.started();
         await entry.session.prompt(text, promptOptions);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult
@@ -836,6 +850,14 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                 images,
                 { cancelled, started },
               );
+            } catch (err) {
+              // Recorded here, before `done` below. The handler on the queue's
+              // promise runs a few ticks later, and a reader that came back
+              // for the next event in between found an ordinary end: a prompt
+              // that failed before it produced anything (expired credentials)
+              // was then reported as "no response" instead of with its error.
+              error = err instanceof Error ? err : new Error(String(err));
+              throw err;
             } finally {
               try { unsub(); } catch { /* ignore */ }
               // Safety net: an error still held here was never reported.
