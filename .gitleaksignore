@@ -12,3 +12,12 @@
 # Verified false positive: the fake password "hunter2" in a redaction test (test/turn-transcript.test.ts,
 # `curl -u admin:hunter2` on the line after a `curl -d` fixture). Nothing real; the test checks it is removed.
 b0522d0f661a0903711ea0b61ba23f8a63c552f8:test/turn-transcript.test.ts:curl-auth-user:157
+
+# The redaction-test fixtures again, as they appear in the squash commit of #162. A squash is a
+# new commit, so its findings get new fingerprints, and a rule that spans lines can match across
+# lines that were added by different commits on the branch. Verified false positives, nothing real:
+# - curl-auth-user: the fake password "hunter2" after a curl user flag (the same fixture as above).
+# - private-key: a fake key block whose whole content is "abc", which the test checks is removed;
+#   the match runs on from it to a key header used as hostile input a few lines further down.
+09e6af8261eb67b7a32c0b6b97d2314206e54f3e:test/turn-transcript.test.ts:curl-auth-user:166
+09e6af8261eb67b7a32c0b6b97d2314206e54f3e:test/turn-transcript.test.ts:private-key:158
