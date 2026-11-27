@@ -4,6 +4,59 @@ All notable changes to `@inceptionstack/roundhouse` are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`/stop [question]`.** Ends the turn in progress like `/cancel`, then has a
+  sub-agent that can only read (`read`, `grep`, `find`, `ls`; no MCP, no
+  project context files, prompt templates, themes or project settings) review what the agent did
+  so far and post its report in the chat. The transcript it reads has obvious
+  secrets removed and every line behind a bar; the report has them removed
+  again. The report starts no agent turn; the agent hears about the stop with
+  the owner's next message, and gets the report as data with the first message
+  after it arrives (never with a "do not resume" line if the owner has written
+  since). A reviewer that fails or times out is reported. Needs
+  `AgentAdapter.describeTurn` (implemented for pi).
+  After its first live use: the transcript begins with the exchange before the
+  stopped turn (reviewers could not tell what a "yes" referred to); every
+  stopped turn gets its own review, up to two at a time, and each report is
+  titled with the time of its stop; roundhouse's memory-save prompt no longer
+  counts as the owner's request; a turn whose request was compacted away is
+  still reviewed; a turn waiting behind a memory save is recognised as not yet
+  begun; `/stop` on a turn that is already stopped aborts the agent again and
+  starts nothing else.
+- Sub-agents can be given a tool allowlist (`SpawnSpec.tools`, pi's `--tools`
+  plus the flags that close everything else), files to read in their run folder
+  (`SpawnSpec.files`), and a delivery (`SpawnSpec.delivery: "chat"`: post the
+  output instead of handing it to the agent). The delivery is stored with the run,
+  so it survives a restart.
+
+### Fixed
+- **A request cancelled before it had started ran anyway, unseen.** `/cancel`
+  (and `/stop`) on a message that was still waiting, behind a memory save or
+  while its conversation was being opened, answered "cancelled" and aborted
+  whatever was running; the waiting request then started and ran in full with
+  nobody reading its output. The pi adapter now drops a streamed prompt that was
+  asked for before its thread was aborted, and aborts again a run that begins
+  after the abort. What such a message carried (the memory files, a note about
+  an earlier `/stop`) goes with the next message instead of being lost
+  (`PromptHooks.onStart`, `AdapterInfo.reportsPromptStart`).
+- **A prompt that failed before it started lost the memory files it carried,
+  and its error.** When the session would not open, or pi's own checks failed
+  (expired credentials), the memory state already said "injected", so the next
+  message went out without the files; and the stream could end before the
+  error was recorded, so the owner saw "Agent returned no response" instead of
+  the error. The gateway now re-arms the injection on the error path too, the
+  pi adapter counts a prompt as started only when pi reports it
+  (`preflightResult`), and the error is recorded before the stream ends.
+- A sub-agent's result that arrived while a turn was running took that turn's
+  place as "the turn in this chat" (and the owner's message did the same to a
+  result's turn), so `/cancel` and `/stop` acted on the turn that was waiting.
+  A turn now takes the place when it gets the thread lock.
+- **A sub-agent that hung was never cut off by the gateway that started it.** The
+  watcher leaves runs started in the same process alone, and nothing else
+  enforced their deadline. `spawn()` now arms a timer for it.
+- A sub-agent that could not be started no longer leaves its run folder behind,
+  and its logs are created with mode 0600.
+
 ## [0.7.0] — 2026-11-22
 
 > **Upgrade notes.** Needs Node >= 22.19 and pi 1.x.

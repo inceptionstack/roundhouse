@@ -14,7 +14,7 @@ import { runDoctor, formatDoctorTelegram, createDoctorContext } from "../cli/doc
 import { ROUNDHOUSE_DIR, ROUNDHOUSE_VERSION } from "../config";
 import { CronSchedulerService } from "../cron/scheduler";
 import { IpcServer, createIpcHandler } from "../ipc";
-import { prepareMemoryForTurn, finalizeMemoryForTurn, flushMemoryThenCompact } from "../memory/lifecycle";
+import { prepareMemoryForTurn, finalizeMemoryForTurn, rearmMemoryInjection, flushMemoryThenCompact } from "../memory/lifecycle";
 import { recoverFromAgentTurnOverflow, type TurnSource } from "./overflow";
 import { maxPressure } from "../memory/policy";
 import type { PressureLevel } from "../memory/types";
@@ -25,6 +25,8 @@ import { handleStreaming as _handleStream, StreamModelOverflowError } from "./st
 import { handleNew, handleRestart, handleUpdate, handleCompact, handleStatus, handleCancel, handleVerbose, handleDoctor, handleCrons, handleThink, type CommandContext } from "./commands";
 import { handleModel, handleModelAction, MODEL_ACTION_ID } from "./model-command";
 import { handleLater } from "./later-command";
+import { handleStop, stopFocus, routingFromThread, StopNotes } from "./stop-command";
+import { redactSecrets } from "../agents/pi/turn-transcript";
 import { handleTopic, handleTopicAction, TOPIC_ACTION_ID, applyTopicOverride } from "./topic-command";
 import {
   type CommandDescriptor,
@@ -40,10 +42,10 @@ import { SubAgentOrchestratorImpl, SubAgentWatcher } from "../subagents";
 import type { RunStatus, RoutingInfo } from "../subagents";
 import { BotUsernameResolver } from "./bot-username-resolver";
 import { hostname } from "node:os";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { chmod, mkdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { injectToolsSection } from "./tools-inject";
 import { injectPersonaSection, loadPersona } from "./persona-inject";
 import { checkVersionChange } from "./whats-new";
@@ -57,6 +59,8 @@ const INTERRUPTED_NOTICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** Limits */
 const MAX_SUBAGENT_STDOUT_CHARS = 3000;
 const MAX_MESSAGE_CHUNK = 4000;
+/** A reviewer's report is posted whole up to this many characters (it is asked to stay under 350 words). */
+const MAX_REVIEW_POST_CHARS = 8000;
 
 /**
  * Build the list of `TransportAdapter` delegates from the configured
@@ -112,9 +116,13 @@ export class Gateway {
   /** Set by stop(): no new turn, flush or compaction may start. */
   private stopping = false;
   /** The turn in progress in each chat, by chat thread id: what /cancel acts on. */
-  private runningTurns = new Map<string, { agentThreadId: string; controller: AbortController }>();
+  private runningTurns = new Map<string, { agentThreadId: string; controller: AbortController; started: boolean }>();
   /** Message handling that is still running; handlers return before it ends. */
   private inFlightWork = new Set<Promise<void>>();
+  /** What the agent is told with the owner's next message after a /stop (and about the reviewer's report). */
+  private stopNotes = new StopNotes();
+  /** Chats with a /stop under way. */
+  private stopsInProgress = new Set<string>();
 
   constructor(router: AgentRouter, config: GatewayConfig) {
     this.router = router;
@@ -634,7 +642,8 @@ export class Gateway {
       // both telegram (numeric-as-string) and slack (`Cxxx`) work. Composite
       // partitions by ownsChatId before fanning out.
       const chatId = status.routing?.chatId;
-      if (chatId) {
+      // A review after /stop has its own message ("Stopped … a reviewer is going through it").
+      if (chatId && status.delivery !== "chat") {
         const msg = `🔬 **Sub-agent launched** (${status.role})\nrun: \`${status.runId.slice(0, 8)}\``;
         try { await this.transport.notify([chatId], msg); } catch {}
       }
@@ -748,8 +757,15 @@ export class Gateway {
     // switch the chat to another session while this turn is still running.
     const ac = new AbortController();
     const chatKey = typeof thread?.id === "string" ? thread.id : agentThreadId;
-    const running = { agentThreadId, controller: ac };
-    this.runningTurns.set(chatKey, running);
+    const running = { agentThreadId, controller: ac, started: false };
+    // "The turn in this chat" is this one from the moment it is accepted,
+    // unless another holds that place: the owner's messages come one at a
+    // time, but a turn the gateway starts itself (a sub-agent's result) can
+    // overlap with one of his, either way round. The newcomer takes the place
+    // only when it gets the thread lock, or /cancel and /stop would act on the
+    // turn that is waiting and leave the one that is running.
+    const waitsBehindAnother = this.runningTurns.has(chatKey);
+    if (!waitsBehindAnother) this.runningTurns.set(chatKey, running);
     const turnOver = () => {
       if (this.runningTurns.get(chatKey) === running) this.runningTurns.delete(chatKey);
       if (abortControllers.get(agentThreadId) === ac) abortControllers.delete(agentThreadId);
@@ -777,6 +793,7 @@ export class Gateway {
       turnOver();
       return;
     }
+    this.runningTurns.set(chatKey, running);
     abortControllers.set(agentThreadId, ac);
 
     let stopTyping: (() => void) | null = null;
@@ -803,6 +820,16 @@ export class Gateway {
       if (agentMessage.text && !standingInSystemPrompt) {
         agentMessage.text = injectPersonaSection(agentMessage.text);
         agentMessage.text = injectToolsSection(agentMessage.text);
+      }
+
+      // After a /stop: what the agent is told with the owner's next message.
+      // Here, past the checks that can drop this turn (a note taken by a turn
+      // that never runs would be lost), and after the transcription, which
+      // only fills in the text of a message that has none.
+      let stopNote: { text: string; commit: () => void } | undefined;
+      if (turnSource === "user" && !ac.signal.aborted) {
+        stopNote = this.stopNotes.peek(agentThreadId);
+        if (stopNote) agentMessage.text = agentMessage.text ? `${stopNote.text}\n\n${agentMessage.text}` : stopNote.text;
       }
 
       // Let the agent adapter apply platform-specific message transforms
@@ -858,21 +885,46 @@ export class Gateway {
       // needs to know whether the user already saw partial assistant text
       // when picking gateway-overflow recovery copy.
       let streamHadVisibleText = false;
+      // What this message carries for the agent (a note about a /stop, the
+      // memory files) counts as delivered when the agent has the message: when
+      // the adapter says so, if it can, and otherwise when it is prompted. A
+      // turn cancelled before that leaves both for the next message.
+      const reportsStart = agent.getInfo?.()?.reportsPromptStart === true;
+      let reachedAgent = false;
+      const delivered = () => { reachedAgent = true; stopNote?.commit(); };
+      // The memory files went out with a message the agent never got: the next
+      // one has to carry them. Checked on the way out of the turn whichever
+      // way that is: a prompt that is cancelled before it starts ends its
+      // stream quietly, one that fails before it starts (the session would
+      // not open, the credentials had expired) throws.
+      let rearmChecked = false;
+      const rearmIfUndelivered = async () => {
+        if (rearmChecked) return;
+        rearmChecked = true;
+        if (reachedAgent || !memoryPrepared?.injected) return;
+        await rearmMemoryInjection(agentThreadId).catch((err) => console.error(`[roundhouse] could not re-arm the memory injection:`, (err as Error).message));
+      };
       try {
         let turnUsedTools = false;
         if (ac.signal.aborted) {
           // Cancelled while the message was being prepared: do not prompt.
         } else if (agent.promptStream) {
-          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage), verboseThreads.has(agentThreadId), ac.signal);
+          running.started = true;
+          if (!reportsStart) delivered();
+          const streamResult = await this.handleStreaming(thread, agent.promptStream(agentThreadId, agentMessage, { onStart: delivered }), verboseThreads.has(agentThreadId), ac.signal);
           turnUsedTools = streamResult.usedTools;
           streamHadVisibleText = streamResult.hadVisibleText;
         } else {
+          running.started = true;
+          delivered();
           const reply = await agent.prompt(agentThreadId, agentMessage);
           turnUsedTools = true;
           if (reply.text) {
             await this.postWithFallback(thread, reply.text);
           }
         }
+
+        await rearmIfUndelivered();
 
         // Memory: post-turn finalize + pressure check
         try {
@@ -899,6 +951,8 @@ export class Gateway {
           console.error(`[roundhouse] memory finalize error:`, (err as Error).message);
         }
       } catch (err) {
+        // Before the recovery below, which sets its own reason to inject again when it resets the session.
+        await rearmIfUndelivered();
         // Extract hadVisibleText from StreamModelOverflowError if present
         const errorHadVisibleText = err instanceof StreamModelOverflowError ? err.hadVisibleText : streamHadVisibleText;
         await recoverFromAgentTurnOverflow(thread, agentThreadId, agent, err, {
@@ -1200,6 +1254,36 @@ export class Gateway {
             agent: this.router.resolve(target),
             abortControllers,
             running: running?.controller,
+          });
+        },
+      },
+      {
+        // /cancel plus a review: ends the turn in progress, then a sub-agent
+        // that can only read goes through what the agent did and reports here.
+        triggers: ["/stop"],
+        stage: "pre-turn",
+        acceptsArgs: true,
+        invoke: ({ thread, text, agentThreadId }) => {
+          const running = this.runningTurns.get(String(thread?.id ?? ""));
+          const target = running?.agentThreadId ?? agentThreadId;
+          const agent = this.router.resolve(target);
+          const orchestrator = this.subagentOrchestrator;
+          const rules = join(ROUNDHOUSE_DIR, "tools.md");
+          return handleStop({
+            thread, agentThreadId: target, agent,
+            running: running?.controller,
+            focus: stopFocus(text),
+            routing: routingFromThread(thread, target),
+            cwd: (agent.getInfo?.()?.cwd as string | undefined) ?? process.cwd(),
+            rulesFile: existsSync(rules) ? rules : undefined,
+            spawnReview: (spec) => {
+              if (!orchestrator) return Promise.reject(new Error("the sub-agent service is not running"));
+              return orchestrator.spawn(spec);
+            },
+            post: (t, msg) => this.postWithFallback(t, msg),
+            turnStarted: running?.started ?? false,
+            inProgress: this.stopsInProgress,
+            notes: this.stopNotes,
           });
         },
       },
@@ -1594,8 +1678,55 @@ export class Gateway {
     const chatId = routing.chatId;
     if (!chatId) return;
 
+    // A report the owner asked for (the review after /stop) goes to him as it
+    // is. No agent turn: the agent was stopped on purpose.
+    if (status.delivery === "chat") {
+      await this.deliverReviewToChat(status, routing);
+      return;
+    }
+
     await this.notifySubagentResult(status, chatId);
     await this.injectSubagentResult(status, chatId);
+  }
+
+  /** Post a finished review to the chat, and hand it to the agent's next turn as a note. */
+  private async deliverReviewToChat(status: RunStatus, routing: RoutingInfo): Promise<void> {
+    const runDir = join(ROUNDHOUSE_DIR, "subagents", status.runId);
+    let raw = "";
+    try { raw = (await readFile(join(runDir, "stdout.log"), "utf-8")).trim(); } catch { /* reported below */ }
+    // The reviewer is told never to repeat a secret; this is for when it does.
+    const out = redactSecrets(raw);
+    const secs = status.completedAt && status.startedAt
+      ? Math.round((Date.parse(status.completedAt) - Date.parse(status.startedAt)) / 1000)
+      : 0;
+    const ok = status.status === "complete" && out.length > 0;
+    // Two reviews can be under way and finish in either order: say which stop this one is about.
+    const stoppedAt = this.stopNotes.stopTime(routing.parentThreadId, status.runId) ?? new Date(status.startedAt).toTimeString().slice(0, 8);
+    let text: string;
+    if (ok) {
+      const body = out.length > MAX_REVIEW_POST_CHARS ? `${out.slice(0, MAX_REVIEW_POST_CHARS)}\n\n[… cut; the whole report is in ${join(runDir, "stdout.log")}]` : out;
+      text = `🔎 **Review of the turn stopped at ${stoppedAt}** (${secs} s)\n\n${body}`;
+    } else {
+      const why = status.status === "timeout" ? "ran out of time" : "failed";
+      text = `⚠️ The review of the turn stopped at ${stoppedAt} ${why}${out ? `. This is what it had written:\n\n${out.slice(-3000)}` : "."}\n\nThe turn it was given is in ${join(runDir, "turn.md")}.`;
+    }
+    let posted = true;
+    try {
+      await this.postWithFallback(this.transport.createThread(routing.chatId), text);
+    } catch (err) {
+      posted = false;
+      console.error("[roundhouse] could not post the review:", (err as Error).message);
+    }
+    // The transcript can hold secrets the redaction missed; once the report is
+    // out it has done its job. (After a failure it stays, as the message says.)
+    if (ok) await rm(join(runDir, "turn.md"), { force: true }).catch(() => {});
+
+    this.stopNotes.report(routing.parentThreadId, status.runId, {
+      kind: ok ? "ok" : status.status === "timeout" ? "timeout" : "failed",
+      text: ok ? out : undefined,
+      posted,
+      time: stoppedAt,
+    });
   }
 
   /** Notify user of sub-agent completion via transport */

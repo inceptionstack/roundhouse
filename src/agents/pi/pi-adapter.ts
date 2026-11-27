@@ -27,10 +27,12 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  type PromptOptions,
 } from "@earendil-works/pi-coding-agent";
 
-import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext } from "../../types";
+import type { AgentAdapter, AgentAdapterFactory, AgentMessage, AgentResponse, AgentStreamEvent, MessageContext, PromptHooks, TurnDescription } from "../../types";
 import { formatMessage, extractCustomMessage, customContentToText } from "./message-format";
+import { renderTurn } from "./turn-transcript";
 import { isToolPairingError } from "../shared/error-classifiers";
 import { repairSessionFile } from "../shared/session-repair";
 import { softResetSessionFile, type SoftResetReport } from "../shared/session-soft-reset";
@@ -218,8 +220,28 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     onDrainComplete?: () => void,
     resubscribe?: Resubscribe,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    gate?: {
+      /** True once this prompt's thread was aborted after the prompt was asked for: it must not start. */
+      cancelled(): boolean;
+      /** The prompt is being handed to the session now. */
+      started(): void;
+    },
   ): Promise<void> {
-    const promptOptions = images && images.length > 0 ? { images } : undefined;
+    // pi says what became of the prompt once its own checks are done (input
+    // hooks, model, credentials, the run's first messages): "started" is the
+    // moment the agent has the message. A prompt that fails in those checks
+    // throws without it, one an extension took over reports "handled", and
+    // one that pi puts off (it arrived while `agent_settled` handlers ran)
+    // reports when it is its turn. Nothing else counts as a start: a prompt
+    // that merely came back has not necessarily run. Typed as pi's own
+    // options, so that a pi without `preflightResult` fails the type check
+    // instead of leaving every message looking undelivered.
+    const promptOptions: PromptOptions = {
+      ...(images && images.length > 0 ? { images } : {}),
+      preflightResult: (result) => {
+        if (result === "started") gate?.started();
+      },
+    };
     entry.inFlight++;
     // Track whether *this specific prompt call* has already retried after a
     // repair. Prevents retry loops within one turn, but doesn't latch the
@@ -231,8 +253,14 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // A run an extension started on its own may still be going. prompt()
         // would throw "already processing" or, during agent_settled handlers,
         // defer the prompt and return before it ran.
+        if (gate?.cancelled()) return;
         await waitUntilIdle(entry.session);
         await refreshStandingContext(entry);
+        // Checked again here, with nothing awaited before the prompt: an abort
+        // only stops what is running, and until this line nothing of this
+        // prompt was. Without it a request cancelled while it waited (behind a
+        // memory save, say) would run in full afterwards, with nobody reading.
+        if (gate?.cancelled()) return;
         await entry.session.prompt(text, promptOptions);
       } catch (err) {
         // Auto-recover from session-history corruption (orphaned toolCall/toolResult
@@ -287,6 +315,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         // Re-attach caller's subscriber to the new session so the retry's
         // text_delta/tool events flow through (F1).
         resubscribe?.subscribe(entry.session);
+        if (gate?.cancelled()) return;
         await entry.session.prompt(text, promptOptions);
       }
       // The subscriber must stay attached until the session is fully idle,
@@ -491,6 +520,15 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
   reapInterval = setInterval(reap, 60_000);
   reapInterval.unref();
 
+  /** When the latest streamed prompt of each thread was asked for (see describeTurn). */
+  const promptAskedAt = new Map<string, number>();
+  /**
+   * The order in which prompts were asked for and threads were aborted. A
+   * counter, not a clock: two of them in one millisecond still have an order.
+   */
+  let order = 0;
+  const abortedAt = new Map<string, number>();
+
   // Per-thread serialization for both prompt() and promptStream()
   const threadQueues = new Map<string, Promise<any>>();
 
@@ -631,7 +669,21 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
       });
     },
 
-    promptStream(threadId: string, message: AgentMessage): AsyncIterable<AgentStreamEvent> {
+    promptStream(threadId: string, message: AgentMessage, hooks?: PromptHooks): AsyncIterable<AgentStreamEvent> {
+      // From this call on the gateway counts this turn as the one that is
+      // running, though the stream is only read a moment later, the prompt may
+      // wait in the queue (behind a memory save, say), and its user message is
+      // appended later still. Marked here, in the caller's own tick, so that
+      // describeTurn never takes the turn before it for this one.
+      promptAskedAt.set(threadId, Date.now());
+      const asked = ++order;
+      const cancelled = () => (abortedAt.get(threadId) ?? 0) > asked;
+      let startReported = false;
+      const started = () => {
+        if (startReported) return;
+        startReported = true;
+        try { hooks?.onStart?.(); } catch (err) { console.error(`[pi-agent] onStart hook failed:`, (err as Error).message); }
+      };
       // Return an async iterable that is single-use by design.
       // State is scoped inside the iterator factory to prevent sharing.
       let consumed = false;
@@ -689,6 +741,12 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
             // auto-repair session swap (captures only the enqueue closure,
             // not `entry.session`, so it's safe to re-use).
             const handleEvent = (event: AgentSessionEvent) => {
+              // pi's abort() reaches only a run that is under way. One that was
+              // still in prompt()'s preflight when the thread was aborted
+              // begins afterwards: stop it as it starts.
+              if (event.type === "agent_start" && cancelled()) {
+                void entry.session.abort().catch(() => { /* it is ending anyway */ });
+              }
               if (DEBUG_STREAM) {
                 const extra =
                   event.type === "message_end" || event.type === "message_start"
@@ -790,7 +848,16 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
                   subscribe: (newSession) => { unsub = newSession.subscribe(handleEvent); },
                 },
                 images,
+                { cancelled, started },
               );
+            } catch (err) {
+              // Recorded here, before `done` below. The handler on the queue's
+              // promise runs a few ticks later, and a reader that came back
+              // for the next event in between found an ordinary end: a prompt
+              // that failed before it produced anything (expired credentials)
+              // was then reported as "no response" instead of with its error.
+              error = err instanceof Error ? err : new Error(String(err));
+              throw err;
             } finally {
               try { unsub(); } catch { /* ignore */ }
               // Safety net: an error still held here was never reported.
@@ -1003,12 +1070,31 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
     },
 
     async abort(threadId: string): Promise<void> {
+      // First, and whether or not a session exists yet: a prompt that was
+      // asked for before this moment and has not started must not start.
+      abortedAt.set(threadId, ++order);
       const entry = sessions.get(threadId);
       if (entry) {
         await entry.session.abort();
         entry.session.abortCompaction();
         console.log(`[pi-agent] aborted session for ${threadId}`);
       }
+    },
+
+    // Not queued behind the turn: a reviewer is asked for while the turn is
+    // running or has just been aborted, and a queued call would wait for it.
+    async describeTurn(threadId: string, opts?: { maxChars?: number }): Promise<TurnDescription | null> {
+      const entry = sessions.get(threadId);
+      if (!entry) return null;
+      const turn = renderTurn([...entry.session.messages] as unknown[], opts);
+      if (!turn) return null;
+      // The turn the gateway is running was asked for at `promptAskedAt`; its
+      // user message is stamped when it is appended, which is later (the
+      // prompt waits its turn in the queue, images load, the standing context
+      // refreshes). A last request older than that is an earlier turn's.
+      const askedAt = promptAskedAt.get(threadId);
+      const reached = askedAt === undefined || typeof turn.requestAt !== "number" || turn.requestAt >= askedAt;
+      return { ...turn, reached, sessionFile: entry.session.sessionFile ?? undefined };
     },
 
     getInfo(threadId?: string): Record<string, unknown> {
@@ -1081,6 +1167,7 @@ export const createPiAgentAdapter: AgentAdapterFactory = (config) => {
         memoryTools: memoryCapabilities?.memoryTools ?? [],
         extensions: memoryCapabilities?.extensions ?? [],
         ...(standingContext ? { standingContext: "system-prompt" as const } : {}),
+        reportsPromptStart: true,
       };
     },
 

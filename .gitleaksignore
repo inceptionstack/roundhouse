@@ -8,3 +8,7 @@
 16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-app-token:37
 16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-app-token:94
 16ed51f1b97aa99586ffb85af9f563236546d9cd:test/setup-slack.test.ts:slack-legacy-workspace-token:36
+
+# Verified false positive: the fake password "hunter2" in a redaction test (test/turn-transcript.test.ts,
+# `curl -u admin:hunter2` on the line after a `curl -d` fixture). Nothing real; the test checks it is removed.
+b0522d0f661a0903711ea0b61ba23f8a63c552f8:test/turn-transcript.test.ts:curl-auth-user:157
